@@ -35,3 +35,4 @@ Each scenario typically splits its logic into:
 
 - [../gamemodes/README.md](../gamemodes/README.md) — gamemode mirror (Onslaught, AGS)
 - [../game_systems/](../game_systems/) — engine/system-level references
+- [../archive/scenarios/README.md](../archive/scenarios/README.md) — archived scenario history and checkpoints

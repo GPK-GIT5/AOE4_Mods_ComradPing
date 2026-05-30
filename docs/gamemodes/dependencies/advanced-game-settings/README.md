@@ -15,8 +15,8 @@ Onslaught builds on top of AGS for its game-setting framework, win-condition wir
 ## Local setup for Onslaught development
 
 1. Subscribe to or download Woprock's Advanced Game Settings mod.
-2. Place it under `Gamemodes/Dependencies/Advanced Game Settings/` in your local workspace, mirroring the structure shown below.
-3. Open `Gamemodes/Onslaught/CBA Custom v1f.aoe4mod` in the AoE IV Content Editor and build.
+2. Keep a local copy in a private dependency workspace if you need the full upstream tree for diffing or update merges.
+3. For this public repository, use the vendored subset under `Gamemodes/Onslaught/assets/scar/AGS/` as the source-aligned reference.
 
 ## Original subtree shape (for orientation only)
 

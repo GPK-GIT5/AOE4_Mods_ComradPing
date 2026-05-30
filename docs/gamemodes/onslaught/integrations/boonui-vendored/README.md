@@ -24,7 +24,7 @@ boonui/
 
 ## Upstream guide
 
-See the authored integration guide: [docs/development_guides/third_party/boonui-community/boonui-guide.md](../../../../development_guides/third_party/boonui-community/boonui-guide.md)
+See the authored integration guide: [docs/development_guides/community/boonui-community/README.md](../../../../development_guides/community/boonui-community/README.md)
 
 ## Attribution
 

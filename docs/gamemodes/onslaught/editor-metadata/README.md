@@ -19,4 +19,4 @@ Neither file is required to run the compiled mod. They are only needed when open
 
 ## Local setup
 
-Opening [`Gamemodes/Onslaught/CBA Custom v1f.aoe4mod`](../../../../Gamemodes/Onslaught/CBA%20Custom%20v1f.aoe4mod) in the Content Editor on any machine will regenerate `.aoe4/` locally. No manual setup needed.
+Opening the Onslaught project in the Content Editor on any machine will regenerate `.aoe4/` locally. No manual setup needed.

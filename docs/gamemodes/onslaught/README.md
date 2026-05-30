@@ -41,7 +41,6 @@ For deep references, read [MOD-INDEX.md](../MOD-INDEX.md) first, then any specif
 | [`playerui/`](../../../Gamemodes/Onslaught/assets/scar/playerui/) | Player-side UI |
 | [`rewards/`](../../../Gamemodes/Onslaught/assets/scar/rewards/) | Reward tree implementation |
 | [`startconditions/`](../../../Gamemodes/Onslaught/assets/scar/startconditions/) | Start condition scripts |
-| [`winconditions/`](../../../Gamemodes/Onslaught/assets/scar/winconditions/) | Win condition scripts |
 
 ### Top-level entry scripts
 
@@ -67,4 +66,4 @@ For deep references, read [MOD-INDEX.md](../MOD-INDEX.md) first, then any specif
 
 - [../MOD-INDEX.md](../MOD-INDEX.md) — cross-mod quick reference
 - [../../api_reference/indexes/](../../api_reference/indexes/) — onslaught-function-index, onslaught-globals-index, CSV indexes
-- [../../../.skills/scar-debug/SKILL.md](../../../.skills/scar-debug/SKILL.md) — SCAR debug instrumentation skill
+- [../../skills/README.md](../../skills/README.md) — public summary of private SCAR-debug skill coverage

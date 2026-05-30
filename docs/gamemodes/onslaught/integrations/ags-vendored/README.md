@@ -27,7 +27,7 @@ This is a **subset** of AGS, not the full mod. The full mod has many additional 
 ## Upstream source
 
 **Author**: Woprock — Advanced Game Settings for Age of Empires IV.  
-Full mod: see [docs/gamemodes/dependencies/advanced-game-settings/README.md](../../dependencies/advanced-game-settings/README.md) for where to obtain it and how to set up a local build.
+Full mod: see [docs/gamemodes/dependencies/advanced-game-settings/README.md](../../../dependencies/advanced-game-settings/README.md) for where to obtain it and how to set up a local build.
 
 ## Attribution
 
