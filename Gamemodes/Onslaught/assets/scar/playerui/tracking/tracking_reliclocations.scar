@@ -1,0 +1,59 @@
+-----------------------------------------------------------------------
+-- PlayerUI Tracking: Relic Locations
+-- Carried and deposited relic counts for visible players.
+-- Reference: observerui/tracking_reliclocations.scar
+-----------------------------------------------------------------------
+
+PlayerUI_RelicLocations = {}
+
+PlayerUiInitialization:AddInitializable(PlayerUI_RelicLocations)
+
+function PlayerUI_RelicLocations:Initialize()
+	local visiblePlayers = _PlayerUI_VisiblePlayers
+	if visiblePlayers == nil then
+		return
+	end
+	for i = 1, #visiblePlayers do
+		self:_Initialize(visiblePlayers[i].id)
+	end
+end
+
+function PlayerUI_RelicLocations:GetForPlayer_Carried_Deposited(player)
+	local data = self[player.PlayerID]
+	if data == nil then
+		return 0, 0
+	end
+	return data.Carried, data.Deposited
+end
+
+function PlayerUI_RelicLocations:_Initialize(player)
+	local relicLocations = {
+		Carried = 0,
+		Deposited = 0,
+	}
+	self[player.PlayerID] = relicLocations
+
+	local resetRule = function()
+		relicLocations.Carried = 0
+		relicLocations.Deposited = 0
+	end
+	PlayerUiRuleSystem:AddDataGatheringPreparationRule(player.PlayerID, resetRule)
+
+	local entity_GetStateModelFloat = Entity_GetStateModelFloat
+	local squad_GetFirstEntity = Squad_GetFirstEntity
+	local carriedRule = function(squad)
+		local entity = squad_GetFirstEntity(squad)
+		local relics = entity_GetStateModelFloat(entity, "Relic_Count")
+		relicLocations.Carried = relicLocations.Carried + relics
+	end
+	PlayerUiRuleSystem:AddSquadDataGatheringRule(player.PlayerID, "NonWorker", carriedRule)
+
+	local entity_IsPartOfSquad = Entity_IsPartOfSquad
+	local depositedRule = function(entity)
+		if not entity_IsPartOfSquad(entity) then
+			local relics = entity_GetStateModelFloat(entity, "Relic_Count")
+			relicLocations.Deposited = relicLocations.Deposited + relics
+		end
+	end
+	PlayerUiRuleSystem:AddEntityDataGatheringRule(player.PlayerID, "building", depositedRule)
+end

@@ -1,0 +1,680 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Siege Data
+-- Siege blueprint constants, per-civilization siege unit mappings, and lookup helpers
+-- Consumed by: ags_no_dock.scar (NoSiege lock), cba.scar (siege limits), cba_options.scar
+-- Split from ags_no_dock.scar for maintainability
+---------------------------------------------------------------------------------------------------
+
+-- FACTION: ALL / Buildable
+BP_SIEGE_WORKSHOP = "scar_siegeworkshop" -- Duplicate / not used
+-- FACTION: ALL / Units
+BP_SIEGE_RAM = "ram"
+BP_SIEGE_WORKSHOP_RAM = "workshop_ram"
+BP_SIEGE_SPRINGALD = "springald"
+BP_SIEGE_MANGONEL = "mangonel"
+BP_SIEGE_RIBAULDEQUIN = "ribauldequin"
+BP_SIEGE_CULVERIN = "culverin"
+BP_SIEGE_CANNON = "cannon"
+BP_SIEGE_BOMBARD = "bombard"
+BP_SIEGE_TREBUCHET_CW = "trebuchet_cw"
+BP_SIEGE_TREBUCHET_TR = "trebuchet_tr"  -- Used by Tuning Pack for all factions 
+BP_SIEGE_TOWER = "siege_tower"
+-- Independent limit caps (not tied to MaximumMedicPopulation)
+RAM_LIMIT_MAX = 5
+SIEGE_TOWER_LIMIT_MAX = 5
+-- FACTION: Abbasid / Buildable
+BP_SIEGE_SPRINGALD_ABB = "unit_springald_3_buildable_abb"
+BP_SIEGE_MANGONEL_ABB = "unit_mangonel_3_buildable_abb"
+-- FACTION: Abbasid / Buildable / Expansion
+BP_SIEGE_SPRINGALD_ABB_HA_01 = "unit_springald_3_buildable_abb_ha_01"
+BP_SIEGE_MANGONEL_ABB_HA_01 = "unit_mangonel_3_buildable_abb_ha_01"
+-- FACTION: Mongol only / Buildable
+BP_SIEGE_TREBUCHET_TR_BUILDALBE = "unit_trebuchet_4_tr_field_construct_mon"
+BP_SIEGE_TREBUCHET_CW_BUILDALBE = "unit_trebuchet_4_cw_field_construct_mon"
+BP_SIEGE_SPRINGALD_MON = "unit_springald_3_field_construct_mon"
+BP_SIEGE_MANGONEL_MON = "unit_mangonel_3_field_construct_mon"
+-- FACTION: Mongol only / Units
+BP_SIEGE_TREBUCHET_CW_DOUBLE  = "trebuchet_cw_double"
+BP_SIEGE_TREBUCHET_TR_DOUBLE  = "trebuchet_tr_double"
+BP_SIEGE_SPRINGALD_DOUBLE = "springald_double"
+BP_SIEGE_MANGONEL_DOUBLE  = "mangonel_double"
+BP_SIEGE_RIBAULDEQUIN_DOUBLE  = "ribauldequin_double"
+BP_SIEGE_CULVERIN_DOUBLE  = "culverin_double"
+BP_SIEGE_CANNON_DOUBLE  = "cannon_double"
+BP_SIEGE_BOMBARD_DOUBLE  = "bombard_double"
+-- FACTION: French only / Units
+BP_SIEGE_FRENCH_ROYAL = "siege_royal_fre"
+BP_SIEGE_ROYAL_CANNON = "royal_cannon"
+BP_SIEGE_ROYAL_CULVERIN = "royal_culverin"
+BP_SIEGE_ROYAL_RIBAULDEQUIN = "royal_ribauldequin"
+-- FACTION: Chinese only / Units
+BP_SIEGE_NESTOFBEES = "nest_of_bees"
+BP_SIEGE_NESTOFBEES_CLOCKTOWER_CHI   = "nestofbees_clocktower_chi"
+BP_SIEGE_MANGONEL_CLOCKTOWER_CHI  = "mangonel_clocktower_chi"
+BP_SIEGE_SPRINGALD_CLOCKTOWER_CHI  = "springald_clocktower_chi"
+BP_SIEGE_TREBUCHET_CLOCKTOWER_CHI  = "trebuchet_clocktower_chi"
+BP_SIEGE_BOMBARD_CLOCKTOWER_CHI = "bombard_clocktower_chi"
+-- BP_SIEGE_BOMBARD has been used for Great Bombard
+-- FACTION: Ottoman only / Units
+-- BP_SIEGE_GREAT_BOMBARD = "great_bombard"
+
+CBA_SIEGE_UNITS = {
+	siege_ribauldequin = BP_SIEGE_RIBAULDEQUIN,
+	siege_faction_all = {
+		BP_SIEGE_SPRINGALD,
+		BP_SIEGE_MANGONEL,
+		BP_SIEGE_CULVERIN,
+		BP_SIEGE_CANNON,
+		BP_SIEGE_BOMBARD,
+		BP_SIEGE_TREBUCHET_CW,
+		BP_SIEGE_TREBUCHET_TR,
+	},
+	siege_faction_mon = {
+		-- BP_SIEGE_TREBUCHET_TR, / Used in Tuning Pack by all factions
+		BP_SIEGE_SPRINGALD_DOUBLE,
+		BP_SIEGE_MANGONEL_DOUBLE,
+		BP_SIEGE_RIBAULDEQUIN_DOUBLE,
+		BP_SIEGE_CULVERIN_DOUBLE,
+		BP_SIEGE_CANNON_DOUBLE,
+		BP_SIEGE_BOMBARD_DOUBLE,
+		BP_SIEGE_TREBUCHET_CW_DOUBLE,
+		BP_SIEGE_TREBUCHET_TR_DOUBLE,
+	},
+	siege_buildable_mon = {
+		BP_SIEGE_SPRINGALD_MON,
+		BP_SIEGE_MANGONEL_MON,
+		BP_SIEGE_TREBUCHET_CW_BUILDALBE,
+		BP_SIEGE_TREBUCHET_TR_BUILDALBE,
+	},
+	siege_buildable_abb = {
+		BP_SIEGE_SPRINGALD_ABB,
+		BP_SIEGE_MANGONEL_ABB,
+	},
+	siege_buildable_abb_ha_01 = {
+		BP_SIEGE_SPRINGALD_ABB_HA_01,
+		BP_SIEGE_MANGONEL_ABB_HA_01,
+	},
+	siege_faction_fre = {
+		BP_SIEGE_ROYAL_CANNON,
+		BP_SIEGE_ROYAL_CULVERIN,
+		BP_SIEGE_ROYAL_RIBAULDEQUIN,
+	},
+	siege_faction_chi = {
+		BP_SIEGE_NESTOFBEES,
+		BP_SIEGE_NESTOFBEES_CLOCKTOWER_CHI,
+		BP_SIEGE_MANGONEL_CLOCKTOWER_CHI,
+		BP_SIEGE_SPRINGALD_CLOCKTOWER_CHI,
+		BP_SIEGE_TREBUCHET_CLOCKTOWER_CHI,
+		BP_SIEGE_BOMBARD_CLOCKTOWER_CHI,
+	},
+	-- Siege Limit
+	siege_value_2 = {
+		BP_SIEGE_TREBUCHET_TR,
+		BP_SIEGE_CULVERIN,
+	},
+}
+
+---------------------------------------------------------------------------------------------------
+-- Canonical Siege Tag Registry
+-- Single source of truth for type-tag classification across all limit subsystems.
+-- Used by: cba_options.scar (enforcement), cba.scar (events), cba_debug_inspectors.scar (validator)
+--
+-- Limit subsystems and their tag logic:
+--   Ram limit:         Squad/Entity matches ANY tag in ram_tags (OR) → weight 1
+--   Ram tower:         Squad/Entity matches ram_tower_tag → weight 2 (ram limit)
+--   Siege tower limit: Squad matches siege_gate_tag AND siege_tower_tag (AND)
+--   General siege:     Squad/Entity matches siege_gate_tag
+---------------------------------------------------------------------------------------------------
+CBA_SIEGE_TAG_REGISTRY = {
+
+	-- Tags checked by the ram limit system (OR-logic: any one match counts)
+	ram_tags = { "ram", "scar_ram", "fire_ram", "scar_fire_ram" },
+
+	-- Special ram tower tag (weight-2 in ram limit; checked via IsRamTower* helpers)
+	ram_tower_tag = "ram_tower",
+
+	-- Tags checked by the siege tower limit system (AND-logic: both required on the unit)
+	siege_tower_tag = "siege_tower",
+
+	-- Generic siege gate tag (prerequisite filter in recount, queue cancel, point limit)
+	siege_gate_tag = "siege",
+
+	-- Ram weight per classification
+	ram_weight = {
+		ram       = 1,
+		ram_tower = 2,
+	},
+
+	-- Per-key classification for every CBA_SIEGE_TABLE key.
+	-- Maps table key → limit category so the validator knows what to check.
+	--
+	-- Categories:
+	--   "ram"       → ram limit (weight 1); expects ≥1 of ram_tags + siege_gate_tag
+	--   "ram_tower" → ram limit (weight 2); expects ram_tower_tag + siege_gate_tag
+	--   "tower"     → siege tower limit;    expects siege_gate_tag + siege_tower_tag
+	--   "weapon"    → general siege points;  expects siege_gate_tag
+	--   "buildable" → entity-side field construction; expects siege_gate_tag
+	--   "building"  → siege workshop structure; excluded from unit limit validation
+	key_class = {
+		-- Ram class
+		ram              = "ram",
+		workshop_ram     = "ram",
+		ram_tower        = "ram_tower",
+		-- Siege tower class
+		siege_tower      = "tower",
+		-- Generic siege weapons (all factions)
+		springald        = "weapon",
+		mangonel         = "weapon",
+		ribauldequin     = "weapon",
+		culverin         = "weapon",
+		cannon           = "weapon",
+		bombard          = "weapon",
+		trebuchet_cw     = "weapon",
+		trebuchet_tr     = "weapon",
+		-- Chinese unique
+		nest_of_bees              = "weapon",
+		nestofbees_clocktower_chi = "weapon",
+		mangonel_clocktower_chi   = "weapon",
+		springald_clocktower_chi  = "weapon",
+		trebuchet_clocktower_chi  = "weapon",
+		bombard_clocktower_chi    = "weapon",
+		-- French unique
+		royal_cannon       = "weapon",
+		royal_culverin     = "weapon",
+		royal_ribauldequin = "weapon",
+		-- Mongol doubles
+		springald_double     = "weapon",
+		mangonel_double      = "weapon",
+		ribauldequin_double  = "weapon",
+		culverin_double      = "weapon",
+		cannon_double        = "weapon",
+		bombard_double       = "weapon",
+		trebuchet_cw_double  = "weapon",
+		trebuchet_tr_double  = "weapon",
+		-- Field-constructible (entity-side blueprints)
+		springald_buildable   = "buildable",
+		mangonel_buildable    = "buildable",
+		trebuchet_tr_buildable = "buildable",
+		trebuchet_cw_buildable = "buildable",
+		-- Building (siege workshop — not a combat unit)
+		scar_siegeworkshop = "building",
+	},
+
+	-- Expected minimum type tags per classification.
+	-- The validator checks: does the resolved SBP/EBP expose at least these tags?
+	expected_tags = {
+		ram       = { "siege", "ram" },         -- plus variant tags (scar_ram, fire_ram, etc.) accepted
+		ram_tower = { "siege", "ram_tower" },
+		tower     = { "siege", "siege_tower" },
+		weapon    = { "siege" },
+		buildable = { "siege" },
+		building  = {},                         -- no siege unit tags expected
+	},
+
+	-- Tags accepted as equivalent to "ram" in the ram limit system.
+	-- Any ONE of these satisfies the ram-class requirement.
+	ram_equivalent_tags = { "ram", "scar_ram", "fire_ram", "scar_fire_ram" },
+
+	-- All civs that should have entries in CBA_SIEGE_TABLE (direct, not fallback).
+	-- Used by the validator to confirm completeness.
+	expected_direct_civs = {
+		"english", "chinese", "french", "hre", "rus", "abbasid", "mongol",
+		"sultanate", "malian", "ottoman", "japanese", "byzantine",
+		"abbasid_ha_01", "chinese_ha_01", "french_ha_01", "hre_ha_01",
+		"mongol_ha_gol", "lancaster", "templar", "byzantine_ha_mac", "japanese_ha_sen", "sultanate_ha_tug", "jin_dynasty",
+	},
+
+	-- Minimum set of keys every standard civ should have (base siege loadout).
+	-- Civ-specific extras (nest_of_bees, royal_*, doubles, etc.) are validated separately.
+	required_base_keys = {
+		"ram", "workshop_ram", "springald", "mangonel", "ribauldequin",
+		"culverin", "cannon", "bombard", "trebuchet_cw", "trebuchet_tr",
+		"scar_siegeworkshop", "siege_tower",
+	},
+
+	-- Civ-specific required extras beyond required_base_keys.
+	required_civ_extras = {
+		chinese = {
+			"nest_of_bees", "nestofbees_clocktower_chi", "mangonel_clocktower_chi",
+			"springald_clocktower_chi", "trebuchet_clocktower_chi", "bombard_clocktower_chi",
+		},
+		chinese_ha_01 = { "nest_of_bees" },
+		french = { "royal_cannon", "royal_culverin", "royal_ribauldequin" },
+		french_ha_01 = { "royal_cannon", "royal_culverin", "royal_ribauldequin" },
+		abbasid = { "springald_buildable", "mangonel_buildable" },
+		mongol = {
+			"springald_buildable", "mangonel_buildable",
+			"trebuchet_tr_buildable", "trebuchet_cw_buildable",
+			"trebuchet_cw_double", "trebuchet_tr_double",
+			"springald_double", "mangonel_double", "ribauldequin_double",
+			"culverin_double", "cannon_double", "bombard_double",
+		},
+		abbasid_ha_01 = { "ram_tower", "springald_buildable", "mangonel_buildable" },
+		-- Jin has native Nest of Bees (3-pt); Bed Crossbow is locked explicitly in SiegeLimit_Disable
+		-- because it lacks the "siege" type tag and cannot be registered as a CBA_SIEGE_TABLE key.
+		jin_dynasty = { "nest_of_bees" },
+	},
+}
+
+CBA_SIEGE_TABLE = {
+	
+	english = {
+		ram = "unit_ram_3_eng",
+		workshop_ram = "unit_workshop_ram_3_eng",
+		springald = "unit_springald_3_eng",
+		mangonel = "unit_mangonel_3_eng",
+		ribauldequin = "unit_ribauldequin_4_eng",
+		culverin = "unit_culverin_4_eng",
+		cannon = "unit_cannon_4_eng",
+		bombard = "unit_bombard_4_eng",
+		trebuchet_cw = "unit_trebuchet_4_cw_eng",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		scar_siegeworkshop = "building_unit_siege_control_eng",
+		siege_tower = "unit_siege_tower_3_eng",
+	},	
+	chinese = {
+		ram = "unit_ram_3_chi",
+		workshop_ram = "unit_workshop_ram_3_chi",
+		springald = "unit_springald_3_chi",
+		mangonel = "unit_mangonel_3_chi",
+		culverin = "unit_culverin_4_chi",
+		cannon = "unit_cannon_4_chi",
+		bombard = "unit_bombard_4_chi",
+		trebuchet_cw = "unit_trebuchet_4_cw_chi",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		scar_siegeworkshop = "building_unit_siege_control_chi",
+		nest_of_bees = "unit_nest_of_bees_4_chi",
+		nestofbees_clocktower_chi = "unit_nest_of_bees_4_clocktower_chi",
+		mangonel_clocktower_chi = "unit_mangonel_3_clocktower_chi",
+		springald_clocktower_chi = "unit_springald_3_clocktower_chi",
+		trebuchet_clocktower_chi = "unit_trebuchet_4_cw_clocktower_chi",
+		bombard_clocktower_chi = "unit_bombard_4_clocktower_chi",
+		ribauldequin = "unit_ribauldequin_4_nrm", -- Placeholder
+		siege_tower = "unit_siege_tower_3_chi",
+	},
+	french = {
+		workshop_ram = "unit_workshop_ram_3_fre",
+		ram = "unit_ram_3_fre",
+		springald = "unit_springald_3_fre",
+		mangonel = "unit_mangonel_3_fre",
+		ribauldequin = "unit_ribauldequin_4_fre",
+		culverin = "unit_culverin_4_fre",
+		cannon = "unit_cannon_4_fre",
+		bombard = "unit_bombard_4_fre",
+		trebuchet_cw = "unit_trebuchet_4_cw_fre",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		scar_siegeworkshop = "building_unit_siege_control_fre",
+		royal_cannon = "unit_cannon_4_royal_fre",
+		royal_culverin = "unit_culverin_4_royal_fre",
+		royal_ribauldequin = "unit_ribauldequin_4_royal_fre",
+		siege_tower = "unit_siege_tower_3_fre",
+	},
+	hre = {
+		workshop_ram = "unit_workshop_ram_3_hre",
+		ram = "unit_ram_3_hre",
+		springald = "unit_springald_3_hre",
+		mangonel = "unit_mangonel_3_hre",
+		ribauldequin = "unit_ribauldequin_4_hre",
+		culverin = "unit_culverin_4_hre",
+		cannon = "unit_cannon_4_hre",
+		bombard = "unit_bombard_4_hre",
+		trebuchet_cw = "unit_trebuchet_4_cw_hre",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		scar_siegeworkshop = "building_unit_siege_control_hre",
+		siege_tower = "unit_siege_tower_3_hre",
+	},
+	rus = {	
+		workshop_ram = "unit_workshop_ram_3_rus",
+		ram = "unit_ram_3_rus",
+		springald = "unit_springald_3_rus",
+		mangonel = "unit_mangonel_3_rus",
+		ribauldequin = "unit_ribauldequin_4_rus",
+		culverin = "unit_culverin_4_rus",
+		cannon = "unit_cannon_4_rus",
+		bombard = "unit_bombard_4_rus",
+		trebuchet_cw = "unit_trebuchet_4_cw_rus",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		scar_siegeworkshop = "building_unit_siege_control_rus",
+		siege_tower = "unit_siege_tower_3_rus",
+	},
+	abbasid = {
+		workshop_ram = "unit_workshop_ram_3_abb",
+		ram = "unit_ram_3_abb",
+		springald = "unit_springald_3_abb",
+		mangonel = "unit_mangonel_3_abb",
+		ribauldequin = "unit_ribauldequin_4_abb",
+		culverin = "unit_culverin_4_abb",
+		cannon = "unit_cannon_4_abb",
+		bombard = "unit_bombard_4_abb",
+		trebuchet_cw = "unit_trebuchet_4_cw_abb",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		springald_buildable = "unit_springald_3_buildable_abb",
+		mangonel_buildable = "unit_mangonel_3_buildable_abb",
+		scar_siegeworkshop = "building_unit_siege_control_abb",
+		siege_tower = "unit_siege_tower_3_abb",
+	},
+	mongol = {
+		workshop_ram = "unit_workshop_ram_3_mon",
+		ram = "unit_ram_3_mon",
+		springald = "unit_springald_3_mon",
+		mangonel = "unit_mangonel_3_mon",
+		ribauldequin = "unit_ribauldequin_4_mon",
+		culverin = "unit_culverin_4_mon",
+		cannon = "unit_cannon_4_mon",
+		bombard = "unit_bombard_4_mon",
+		trebuchet_cw = "unit_trebuchet_4_cw_mon",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		springald_buildable = "unit_springald_3_field_construct_mon",
+		mangonel_buildable = "unit_mangonel_3_field_construct_mon",
+		scar_siegeworkshop = "building_unit_siege_mon",
+		trebuchet_tr_buildable = "unit_trebuchet_4_tr_field_construct_mon",
+		trebuchet_cw_buildable = "unit_trebuchet_4_cw_field_construct_mon",	
+		trebuchet_cw_double = "unit_trebuchet_4_cw_double_mon",
+		trebuchet_tr_double = "unit_trebuchet_4_tr_double_mon",		
+		springald_double = "unit_springald_3_double_mon",
+		mangonel_double = "unit_mangonel_3_double_mon",
+		ribauldequin_double = "unit_ribauldequin_4_double_mon",
+		culverin_double = "unit_culverin_4_double_mon",
+		cannon_double = "unit_cannon_4_double_mon",
+		bombard_double = "unit_bombard_4_double_mon",
+		siege_tower = "unit_siege_tower_3_mon",
+	},
+	sultanate = {
+		workshop_ram = "unit_workshop_ram_3_sul",
+		ram = "unit_ram_3_sul",
+		springald = "unit_springald_3_sul",
+		mangonel = "unit_mangonel_3_sul",
+		ribauldequin = "unit_ribauldequin_4_sul",
+		culverin = "unit_culverin_4_sul",
+		cannon = "unit_cannon_4_sul",
+		bombard = "unit_bombard_4_sul",
+		trebuchet_cw = "unit_trebuchet_4_cw_sul",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		scar_siegeworkshop = "building_unit_siege_control_sul",
+		siege_tower = "unit_siege_tower_3_sul",
+	},
+	malian = {
+		workshop_ram = "unit_workshop_ram_3_mal",
+		ram = "unit_ram_3_mal",
+		springald = "unit_springald_3_mal",
+		mangonel = "unit_mangonel_3_mal",
+		ribauldequin = "unit_ribauldequin_4_mal",
+		culverin = "unit_culverin_4_mal",
+		cannon = "unit_cannon_4_mal",
+		bombard = "unit_bombard_4_mal",
+		trebuchet_cw = "unit_trebuchet_4_cw_mal",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		scar_siegeworkshop = "building_unit_siege_mal",
+		siege_tower = "unit_siege_tower_3_mal",
+	},
+	ottoman = {
+		workshop_ram = "unit_workshop_ram_3_ott",
+		ram = "unit_ram_3_ott",
+		springald = "unit_springald_3_ott",
+		mangonel = "unit_mangonel_3_ott",
+		ribauldequin = "unit_ribauldequin_4_ott",
+		culverin = "unit_culverin_4_ott",
+		cannon = "unit_cannon_4_ott",
+		bombard = "unit_great_bombard_4_ott",
+		trebuchet_cw = "unit_trebuchet_4_cw_ott",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		scar_siegeworkshop = "building_unit_siege_ott", 
+		--great_bombard = "unit_great_bombard_4_ott"
+		siege_tower = "unit_siege_tower_3_ott",
+	},
+	-- Expansion
+	abbasid_ha_01 = {
+		workshop_ram = "unit_workshop_ram_3_abb_ha_01",
+		ram = "unit_ram_3_abb_ha_01",
+		ram_tower = "unit_ram_tower_3_abb_ha_01",
+		springald = "unit_springald_3_abb_ha_01",
+		mangonel = "unit_mangonel_3_abb_ha_01",
+		ribauldequin = "unit_ribauldequin_4_abb_ha_01",
+		culverin = "unit_culverin_4_abb_ha_01",
+		cannon = "unit_cannon_4_abb_ha_01",
+		bombard = "unit_bombard_4_abb_ha_01",
+		trebuchet_cw = "unit_trebuchet_4_cw_abb_ha_01",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		springald_buildable = BP_SIEGE_SPRINGALD_ABB_HA_01,
+		mangonel_buildable = BP_SIEGE_MANGONEL_ABB_HA_01,
+		scar_siegeworkshop = "building_unit_siege_control_abb_ha_01",
+		siege_tower = "unit_siege_tower_3_abb_ha_01",
+	},
+	chinese_ha_01 = {
+		ram = "unit_ram_3_chi_ha_01",
+		workshop_ram = "unit_workshop_ram_3_chi_ha_01",
+		springald = "unit_springald_3_chi_ha_01",
+		mangonel = "unit_mangonel_3_chi_ha_01",
+		culverin = "unit_culverin_4_chi_ha_01",
+		cannon = "unit_cannon_4_chi_ha_01",
+		bombard = "unit_bombard_4_chi_ha_01",
+		trebuchet_cw = "unit_trebuchet_4_cw_chi_ha_01",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		scar_siegeworkshop = "building_unit_siege_control_chi_ha_01",
+		nest_of_bees = "unit_nest_of_bees_4_chi_ha_01",
+		ribauldequin = "unit_ribauldequin_4_nrm", -- Placeholder
+		siege_tower = "unit_siege_tower_3_chi_ha_01",
+	},
+	french_ha_01 = {
+		workshop_ram = "unit_workshop_ram_3_fre_ha_01",
+		ram = "unit_ram_3_fre_ha_01",
+		springald = "unit_springald_3_fre_ha_01",
+		mangonel = "unit_mangonel_3_fre_ha_01",
+		ribauldequin = "unit_ribauldequin_4_fre_ha_01",
+		culverin = "unit_culverin_4_fre_ha_01",
+		cannon = "unit_cannon_4_fre_ha_01",
+		bombard = "unit_bombard_4_fre_ha_01",
+		trebuchet_cw = "unit_trebuchet_4_cw_fre_ha_01",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		scar_siegeworkshop = "building_unit_siege_control_fre_ha_01",
+		royal_cannon = "unit_cannon_4_royal_fre_ha_01",
+		royal_culverin = "unit_culverin_4_royal_fre_ha_01",
+		royal_ribauldequin = "unit_ribauldequin_4_royal_fre_ha_01",
+		siege_tower = "unit_siege_tower_3_fre_ha_01",
+	},
+	hre_ha_01 = {
+		workshop_ram = "unit_workshop_ram_3_hre_ha_01",
+		ram = "unit_ram_3_hre_ha_01",
+		springald = "unit_springald_3_hre_ha_01",
+		mangonel = "unit_mangonel_3_hre_ha_01",
+		ribauldequin = "unit_ribauldequin_4_hre_ha_01",
+		culverin = "unit_culverin_4_hre_ha_01",
+		cannon = "unit_cannon_4_hre_ha_01",
+		bombard = "unit_bombard_4_hre_ha_01",
+		trebuchet_cw = "unit_trebuchet_4_cw_hre_ha_01",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		scar_siegeworkshop = "building_unit_siege_control_hre_ha_01",
+		siege_tower = "unit_siege_tower_3_hre_ha_01",
+	},
+	japanese = {	
+		workshop_ram = "unit_workshop_ram_3_jpn",
+		ram = "unit_ram_3_jpn",
+		springald = "unit_springald_3_jpn",
+		mangonel = "unit_mangonel_3_jpn",
+		ribauldequin = "unit_ribauldequin_4_jpn",
+		culverin = "unit_culverin_4_jpn",
+		cannon = "unit_cannon_4_jpn",
+		bombard = "unit_bombard_4_jpn",
+		trebuchet_cw = "unit_trebuchet_4_cw_jpn",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		scar_siegeworkshop = "building_unit_siege_jpn",
+		siege_tower = "unit_siege_tower_3_jpn",
+	},
+	byzantine = {	
+		workshop_ram = "unit_workshop_fire_ram_3_byz",
+		ram = "unit_ram_3_byz",
+		springald = "unit_springald_3_byz",
+		mangonel = "unit_mangonel_3_byz",
+		ribauldequin = "unit_ribauldequin_4_byz",
+		culverin = "unit_culverin_4_byz",
+		cannon = "unit_cannon_4_byz",
+		bombard = "unit_bombard_4_byz",
+		trebuchet_cw = "unit_trebuchet_4_cw_byz",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		scar_siegeworkshop = "building_unit_siege_control_byz",
+		siege_tower = "unit_siege_tower_3_byz",
+	},
+	-- DLC Expansion Variants (Season 4+)
+	mongol_ha_gol = {
+		ram            = "unit_ram_3_mon_ha_gol",               -- unique EBP (not parent unit_ram_3_mon)
+		workshop_ram   = "unit_workshop_ram_3_mon_ha_gol",
+		springald      = "unit_springald_3_mon_ha_gol",
+		mangonel       = "unit_mangonel_3_mon_ha_gol",
+		ribauldequin   = "unit_ribauldequin_4_mon",             -- borrows parent
+		culverin       = "unit_culverin_4_mon",                 -- borrows parent
+		cannon         = "unit_cannon_4_mon",                   -- borrows parent
+		bombard        = "unit_bombard_4_mon_ha_gol",
+		trebuchet_cw   = "unit_trebuchet_4_cw_mon",             -- borrows parent
+		trebuchet_tr   = "unit_trebuchet_4_tr_mon_ha_gol",
+		trebuchet_cw_double = "unit_trebuchet_4_cw_double_mon", -- borrows parent double
+		trebuchet_tr_double = "unit_trebuchet_4_tr_double_mon", -- borrows parent double
+		springald_double = "unit_springald_3_double_mon",       -- borrows parent double
+		mangonel_double = "unit_mangonel_3_double_mon",         -- borrows parent double
+		ribauldequin_double = "unit_ribauldequin_4_double_mon", -- borrows parent double
+		culverin_double = "unit_culverin_4_double_mon",         -- borrows parent double
+		cannon_double = "unit_cannon_4_double_mon",             -- borrows parent double
+		bombard_double = "unit_bombard_4_double_mon",           -- borrows parent double
+		scar_siegeworkshop = "building_unit_siege_mon_ha_gol",
+		siege_tower    = "unit_siege_tower_3_mon_ha_gol",
+	},
+	lancaster = {
+		ram            = "unit_siege_ram_3_lan",                -- unique EBP (not parent unit_ram_3_eng)
+		workshop_ram   = "unit_siege_workshop_ram_3_lan",
+		springald      = "unit_siege_springald_3_lan",
+		mangonel       = "unit_siege_mangonel_3_lan",
+		ribauldequin   = "unit_ribauldequin_4_eng",             -- borrows parent
+		culverin       = "unit_siege_culverin_4_lan",
+		cannon         = "unit_cannon_4_eng",                   -- borrows parent
+		bombard        = "unit_bombard_4_eng",                  -- borrows parent
+		trebuchet_cw   = "unit_siege_trebuchet_4_cw_lan",
+		trebuchet_tr   = "unit_trebuchet_4_tr_mon",             -- shared
+		scar_siegeworkshop = "building_unit_siege_workshop_lan",
+		siege_tower    = "unit_siege_tower_3",                  -- generic (no _lan variant)
+	},
+	templar = {
+		ram            = "unit_ram_3_tem",                      -- unique EBP (not parent unit_ram_3_fre)
+		workshop_ram   = "unit_workshop_ram_3_tem",
+		springald      = "unit_springald_3_tem",
+		mangonel       = "unit_mangonel_3_tem",
+		ribauldequin   = "unit_ribauldequin_4_fre",             -- borrows parent
+		culverin       = "unit_culverin_4_fre",                 -- borrows parent
+		cannon         = "unit_cannon_4_fre",                   -- borrows parent
+		bombard        = "unit_bombard_4_fre",                  -- borrows parent
+		trebuchet_cw   = "unit_trebuchet_4_cw_tem",
+		trebuchet_tr   = "unit_trebuchet_4_tr_mon",             -- shared
+		scar_siegeworkshop = "building_siege_workshop_tem",
+		siege_tower    = "unit_siege_tower_3_tem",
+	},
+	byzantine_ha_mac = {
+		ram            = "unit_ram_3_byz_ha_mac",               -- unique EBP (not parent unit_ram_3_byz); fire ram handled in RamLimit_Disable
+		workshop_ram   = "unit_workshop_fire_ram_3_byz_ha_mac",
+		springald      = "unit_springald_3_byz_ha_mac",
+		mangonel       = "unit_mangonel_3_byz_ha_mac",
+		ribauldequin   = "unit_ribauldequin_4_byz",             -- borrows parent
+		culverin       = "unit_culverin_4_byz",                 -- borrows parent
+		cannon         = "unit_cannon_4_byz",                   -- borrows parent
+		bombard        = "unit_bombard_4_byz_ha_mac",
+		trebuchet_cw   = "unit_trebuchet_4_cw_byz_ha_mac",
+		trebuchet_tr   = "unit_trebuchet_4_tr_mon",             -- shared
+		scar_siegeworkshop = "building_unit_siege_control_byz_ha_mac",
+		siege_tower    = "unit_siege_tower_3_byz_ha_mac",
+	},
+	japanese_ha_sen = {
+		ram            = "unit_ram_3_jpn_ha_sen",               -- unique EBP (not parent unit_ram_3_jpn)
+		workshop_ram   = "unit_workshop_ram_3_jpn_ha_sen",
+		springald      = "unit_springald_3_jpn_ha_sen",
+		mangonel       = "unit_mangonel_3_jpn_ha_sen",
+		ribauldequin   = "unit_ribauldequin_4_jpn",             -- borrows parent
+		culverin       = "unit_culverin_4_jpn",                 -- borrows parent
+		cannon         = "unit_cannon_4_jpn",                   -- borrows parent
+		bombard        = "unit_bombard_4_jpn_ha_sen",
+		trebuchet_cw   = "unit_trebuchet_4_cw_jpn_ha_sen",
+		trebuchet_tr   = "unit_trebuchet_4_tr_mon",             -- shared
+		scar_siegeworkshop = "building_unit_siege_jpn_ha_sen",
+		siege_tower    = "unit_siege_tower_3_jpn_ha_sen",
+	},
+	sultanate_ha_tug = {
+		ram            = "unit_ram_3_sul_ha_tug",               -- unique EBP (not parent unit_ram_3_sul)
+		workshop_ram   = "unit_workshop_ram_3_sul_ha_tug",
+		springald      = "unit_springald_3_sul",                -- borrows parent
+		mangonel       = "unit_mangonel_3_sul_ha_tug",
+		ribauldequin   = "unit_ribauldequin_4_sul",             -- borrows parent
+		culverin       = "unit_culverin_4_sul",                 -- borrows parent
+		cannon         = "unit_cannon_4_sul",                   -- borrows parent
+		bombard        = "unit_bombard_4_sul_ha_tug",
+		trebuchet_cw   = "unit_trebuchet_4_cw_sul_ha_tug",
+		trebuchet_tr   = "unit_trebuchet_4_tr_mon",             -- shared
+		scar_siegeworkshop = "building_unit_siege_control_sul_ha_tug",
+		siege_tower    = "unit_siege_tower_3_sul_ha_tug",
+	},
+	jin_dynasty = {
+		ram            = "unit_ram_2_jin",
+		workshop_ram   = "unit_workshop_ram_2_jin",
+		springald      = "unit_springald_3_chi",                -- no Jin SBP; class placeholder
+		mangonel       = "unit_mangonel_3_chi",                 -- no Jin SBP; class placeholder
+		ribauldequin   = "unit_ribauldequin_4_nrm",             -- no Jin SBP; class placeholder
+		culverin       = "unit_culverin_4_chi",                 -- no Jin SBP; class placeholder
+		cannon         = "unit_cannon_4_chi",                   -- no Jin SBP; class placeholder
+		bombard        = "unit_bombard_4_jin",
+		trebuchet_cw   = "unit_trebuchet_4_cw_chi",             -- no Jin SBP; class placeholder
+		trebuchet_tr   = "unit_trebuchet_4_tr_jin",
+		scar_siegeworkshop = "building_machine_workshop_2_jin",
+		siege_tower    = "unit_siege_tower_3_jin",
+		nest_of_bees   = "unit_nest_of_bees_4_jin",       -- Jin native; has siege+scar_mangonel+nest_of_bees tags
+	},
+}
+
+CBA_CIV_BP_SUFFIX = {
+	english = "eng",
+	chinese = "chi",
+	french = "fre",
+	hre = "hre",
+	mongol = "mon",
+	rus = "rus",
+	abbasid = "abb",
+	sultanate = "sul",
+	malian = "mal",
+	ottoman = "ott",
+	abbasid_ha_01 = "abb_ha_01",
+	chinese_ha_01 = "chi_ha_01",
+	french_ha_01 = "fre_ha_01",
+	hre_ha_01 = "hre_ha_01",
+	japanese = "jpn",
+	byzantine = "byz",
+	mongol_ha_gol = "mon_ha_gol",
+	lancaster = "lan",
+	templar = "tem",
+	byzantine_ha_mac = "byz_ha_mac",
+	japanese_ha_sen = "jpn_ha_sen",
+	sultanate_ha_tug = "sul_ha_tug",
+	jin_dynasty = "jin",
+}
+
+-- Siege
+function AGS_GetSiegeEntity(player_civ, bp_type)
+	local civ_table = CBA_SIEGE_TABLE[player_civ]
+	if civ_table == nil and AGS_CIV_FACTION_MAP[player_civ] ~= nil then
+		-- WARNING: All known civs now have own siege tables; this path is dead code.
+		-- If this fires, a new variant civ was added without a CBA_SIEGE_TABLE entry.
+		local parent = AGS_CIV_FACTION_MAP[player_civ]
+		print(string.format("[AGS_WARN] Siege entity table fallback fired for '%s' -> '%s' (add CBA_SIEGE_TABLE entry)", player_civ, parent))
+		civ_table = CBA_SIEGE_TABLE[parent]
+	end
+	if civ_table == nil then return nil end
+	local bp = civ_table[bp_type]
+	if bp == nil or bp == false then return nil end
+	return BP_GetEntityBlueprint(bp)
+end
+
+function AGS_GetSiegeUnit(player_civ, bp_type)
+	local civ_table = CBA_SIEGE_TABLE[player_civ]
+	if civ_table == nil and AGS_CIV_FACTION_MAP[player_civ] ~= nil then
+		local parent = AGS_CIV_FACTION_MAP[player_civ]
+		print(string.format("[AGS_WARN] Siege unit table fallback fired for '%s' -> '%s' (add CBA_SIEGE_TABLE entry)", player_civ, parent))
+		civ_table = CBA_SIEGE_TABLE[parent]
+	end
+	if civ_table == nil then return nil end
+	local bp = civ_table[bp_type]
+	if bp == nil or bp == false then return nil end
+	return BP_GetSquadBlueprint(bp)
+end

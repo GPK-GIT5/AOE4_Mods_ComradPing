@@ -1,0 +1,303 @@
+-----------------------------------------------------------------------
+-- onslaught_annihilation_patches.scar
+--
+-- Onslaught-specific overrides for the official Annihilation win condition.
+-- Must be imported AFTER winconditions/annihilation.scar.
+--
+-- Each patch below has a documented Onslaught dependency. Anything that
+-- can be handled by the official implementation (Mongol unpacking, siege
+-- splat filtering, generic squad/landmark logic) is left untouched.
+-----------------------------------------------------------------------
+
+-----------------------------------------------------------------------
+-- Patch 1: Landmark rebuild gate
+-- Onslaught exposes a player-facing "Official Landmark Rebuild" toggle
+-- via _mod.landmark_rebuild_official (see cba.scar). When the toggle is
+-- off, destroyed landmarks must be fully killed (legacy behavior); when
+-- on, the engine's downed/repairable state is preserved.
+-----------------------------------------------------------------------
+function Annihilation_UseOfficialLandmarkRebuild()
+	if type(Mod_IsOfficialLandmarkRebuildEnabled) == "function" then
+		return Mod_IsOfficialLandmarkRebuildEnabled()
+	end
+	return _mod ~= nil and _mod.landmark_rebuild_official == true
+end
+
+function Annihilation_OnLandmarkDestroyed(context)
+	if context.landmarkEntity ~= nil and not Annihilation_UseOfficialLandmarkRebuild() then
+		pcall(Entity_Kill, context.landmarkEntity)
+	end
+	Annihilation_CheckAnnihilationCondition(context.landmarkOwner)
+end
+
+-----------------------------------------------------------------------
+-- Patch 2: Leaver-pipeline debounce
+-- The leaver pipeline (cba.scar Mod_EliminatePlayerUnits) destroys ~100+
+-- entities in a single burst and sets player._leaver_eliminated = true
+-- before the kills. Without this guard, every kill triggers a full
+-- production-queue rescan (O(n^2) cascade). The 0.5s debounce on the
+-- "still alive" path absorbs same-tick kill bursts without delaying the
+-- num_squads == 0 elimination decision (which must remain immediate).
+-----------------------------------------------------------------------
+function Annihilation_CheckAnnihilationCondition(victimOwner)
+	if victimOwner == nil then return end
+
+	local player = Core_GetPlayersTableEntry(victimOwner)
+	if player == nil then return end
+
+	-- Skip during leaver pipeline; player is already being eliminated.
+	if player._leaver_eliminated then return end
+	if player.isEliminated then return end
+
+	local num_squads = Player_GetEntityCountByUnitType(player.id, "annihilation_condition")
+
+	-- Siege-splat subtraction (copied verbatim from official annihilation.scar)
+	if num_squads > 0 then
+		local num_siege = Player_GetEntityCountByUnitType(player.id, "siege")
+		if num_squads == num_siege then
+			local siege_entities = Player_GetAllEntities(player.id)
+			EGroup_Filter(siege_entities, "siege", FILTER_KEEP)
+			local num_splat = 0
+			for i = 1, EGroup_CountSpawned(siege_entities) do
+				local entityCheck = EGroup_GetEntityAt(siege_entities, i)
+				local squadToCheck = Entity_GetSquad(entityCheck)
+				if squadToCheck ~= nil and Entity_IsPlannedStructure(entityCheck) then
+					num_splat = num_splat + 1
+				end
+			end
+			if num_splat > 0 then
+				num_squads = num_squads - num_splat
+			end
+		end
+	end
+
+	-- Onslaught addition: debounce the "still alive" path. The num_squads == 0
+	-- path is intentionally NOT debounced -- elimination must be immediate.
+	if num_squads > 0 then
+		local now = World_GetGameTime()
+		player._annihilation_last_alive_check = player._annihilation_last_alive_check or 0
+		if (now - player._annihilation_last_alive_check) < 0.5 then
+			return
+		end
+		player._annihilation_last_alive_check = now
+		return
+	end
+
+	-- num_squads == 0: run the full official elimination check by reusing
+	-- the official body unchanged. Re-implementing it here would duplicate
+	-- ~50 lines of resource/queue/landmark logic that already lives in the
+	-- official file. Instead, jump back into a thin internal helper.
+	_Onslaught_Annihilation_CheckZeroSquads(player)
+end
+
+-- Extracted from official annihilation.scar (the body that runs once
+-- num_squads == 0). Kept verbatim except where noted.
+function _Onslaught_Annihilation_CheckZeroSquads(player)
+	local food = Player_GetResource(player.id, RT_Food)
+	local wood = Player_GetResource(player.id, RT_Wood)
+	local gold = Player_GetResource(player.id, RT_Gold)
+
+	local has_landmark_entity_with_queue = false
+	local has_production_entity_with_queue = false
+	local has_squads_in_queue = false
+	local has_resources_for_generic_production = false
+	local has_ally_with_resources = false
+	local entities = Player_GetEntities(player.id)
+
+	for i = 1, EGroup_CountSpawned(entities) do
+		local entity = EGroup_GetEntityAt(entities, i)
+
+		if Entity_IsOfType(entity, "mobile_building")
+				or Entity_GetBuildingProgress(entity) >= 1.0
+				or Entity_GetStateModelBool(entity, "do_unpacking_construction") then
+
+			if Entity_IsProductionQueueAvailable(entity)
+					or Entity_GetStateModelBool(entity, "do_unpacking_construction") then
+
+				if Entity_IsOfType(entity, _annihilation.types.landmark) then
+					has_landmark_entity_with_queue = true
+				else
+					has_production_entity_with_queue = true
+				end
+
+				local num_items_in_queue = Entity_GetProductionQueueSize(entity)
+				for j = 0, (num_items_in_queue - 1) do
+					if Entity_GetProductionQueueItemType(entity, j) == PITEM_Spawn then
+						has_squads_in_queue = true
+						break
+					end
+				end
+
+				for entity_type, cost in pairs(player._annihilation.cheapest_squad_cost) do
+					if Entity_IsOfType(entity, entity_type) then
+						if food >= cost.food and wood >= cost.wood and gold >= cost.gold then
+							has_resources_for_generic_production = true
+							break
+						end
+					end
+				end
+			end
+
+			if has_landmark_entity_with_queue and has_production_entity_with_queue
+					and has_squads_in_queue and has_resources_for_generic_production then
+				break
+			end
+		end
+	end
+	EGroup_Destroy(entities)
+
+	has_ally_with_resources = _annihilation.is_tribute_enabled
+		and Annihilation_PlayerCanReceiveTribute(player.id)
+
+	if not has_squads_in_queue
+			and ((not has_landmark_entity_with_queue and not has_production_entity_with_queue)
+				or (not has_landmark_entity_with_queue and has_production_entity_with_queue
+					and not has_resources_for_generic_production and not has_ally_with_resources)) then
+
+		local localPlayer = Core_GetPlayersTableEntry(Game_GetLocalPlayer())
+		if not localPlayer.isEliminated then
+			local cue = _annihilation.cue
+			local title = Loc_FormatText(11159062, player.playerName)
+			UI_CreateEventCue(title, Loc_Empty(), cue.template, cue.icon, "", cue.style)
+			if player.id == localPlayer.id then
+				Sound_Play2D(_annihilation.sfx.eliminated_player_ally)
+			elseif Player_ObserveRelationship(localPlayer.id, player.id) == R_ALLY then
+				Sound_Play2D(_annihilation.sfx.eliminated_player_ally)
+			else
+				Sound_Play2D(_annihilation.sfx.eliminated_enemy)
+			end
+		end
+
+		Core_SetPlayerDefeated(player.id, Annihilation_LoserPresentation, WR_ANNIHILATION)
+	end
+end
+
+-----------------------------------------------------------------------
+-- Patch 3: OnPlayerDefeated -- stamp eliminationReason + transfer assets
+--
+-- (a) cba.scar wraps Surrender_OnPlayerDefeated and Elimination_OnPlayerDefeated
+--     to inject Mod_EliminatePlayerUnits before World_KillPlayer, but it does
+--     NOT wrap Annihilation_OnPlayerDefeated. Without the call here, an
+--     annihilated player's remaining buildings are not transferred to allies.
+--
+-- (b) cba.scar's _Onslaught_SetEliminationReason handles WR_SURRENDER /
+--     WR_DISCONNECT / WR_ELIMINATION. WR_ANNIHILATION falls through with no
+--     stamp. PlayerUI (playerui_updateui.scar) and cba_ai/utility.scar both
+--     read player.eliminationReason; an unstamped annihilated player can be
+--     misclassified by the keep-alive disconnect probe.
+-----------------------------------------------------------------------
+function Annihilation_OnPlayerDefeated(player, reason)
+	if reason ~= WR_ANNIHILATION then return end
+
+	-- Engine callbacks receive a player entity ref, not a PLAYERS Lua entry.
+	-- Use the same id-unwrap pattern as Mod_EliminatePlayerUnits to ensure
+	-- Core_GetPlayersTableEntry and engine APIs all receive the correct value.
+	local victim_id = player.id or player
+	local playersEntry = Core_GetPlayersTableEntry(victim_id)
+	if playersEntry ~= nil
+			and (playersEntry.eliminationReason == nil
+				or playersEntry.eliminationReason == "alive") then
+		playersEntry.eliminationReason = "eliminated"
+	end
+
+	-- Transfer remaining buildings/units to allies before kill.
+	pcall(Mod_EliminatePlayerUnits, player, nil, false)
+
+	if Player_IsAlive(victim_id) then
+		World_KillPlayer(victim_id, KPR_Lost)
+	end
+
+	Annihilation_CheckVictory()
+end
+
+-----------------------------------------------------------------------
+-- Patch 4: CheckVictory -- deterministic human detection
+--
+-- Player_IsHuman is non-deterministic across peers near disconnect timing
+-- and reports false in replay. Different peers / replays would compute
+-- different humansRemaining counts and trigger Core_WinnerlessGameOver
+-- divergently -- causing OOS in live games and frozen replays. Use the
+-- sim-deterministic player.isHuman cached value instead.
+-- See KI-LEAVER-001 in .github/instructions/coding/known-issues.instructions.md.
+-----------------------------------------------------------------------
+function Annihilation_CheckVictory()
+	local winning_player = nil
+	for _, player in pairs(PLAYERS) do
+		if not Core_IsPlayerEliminated(player.id) then
+			if Annihilation_GetActiveEnemyCount(player) == 0 then
+				winning_player = player
+				break
+			end
+		end
+	end
+
+	if winning_player ~= nil then
+		for _, player in pairs(PLAYERS) do
+			if Player_ObserveRelationship(player.id, winning_player.id) == R_ALLY then
+				Core_SetPlayerVictorious(player.id, Annihilation_WinnerPresentation, WR_ANNIHILATION)
+			end
+		end
+		Core_OnGameOver()
+	else
+		local humansRemaining = {}
+		for _, player in pairs(PLAYERS) do
+			if (not player.isEliminated) and (player.isHuman == true) then
+				table.insert(humansRemaining, player)
+			end
+		end
+		if #humansRemaining == 0 then
+			Core_OnGameOver()
+			Core_WinnerlessGameOver(Annihilation_LoserPresentation, WR_ANNIHILATION)
+		end
+	end
+end
+
+-----------------------------------------------------------------------
+-- Patch 5: Winner / Loser presentation -- route through Onslaught queue
+--
+-- The official presenters call Rule_AddOneShot(_gameOver_message, ...)
+-- directly. Onslaught uses a one-shot latch (_onslaught_gameover_queued
+-- in cba.scar) to dedup presentations when multiple win conditions fire
+-- near-simultaneously. Route both presenters through Onslaught_TryQueueGameOver.
+-----------------------------------------------------------------------
+function Annihilation_WinnerPresentation(playerID)
+	if playerID ~= Game_GetLocalPlayer() then return end
+
+	Onslaught_TryQueueGameOver(GAMEOVER_OBJECTIVE_TIME, {
+		_playerID = playerID,
+		_icon = nil,
+		_endType = Loc_GetString(11161277),  -- "VICTORY"
+		_message = Loc_Empty(),
+		_sound = _annihilation.sfx.victory,
+		_videoURI = "stinger_victory",
+	})
+end
+
+function Annihilation_LoserPresentation(playerID)
+	if playerID ~= Game_GetLocalPlayer() then return end
+
+	local title = Loc_GetString(11165094)  -- "DEFEAT"
+	local video = "stinger_defeat"
+
+	-- Use 'eliminated' instead of 'defeat' if at least one ally remains
+	if not _annihilation.is_diplomacy_enabled then
+		local player_local = Core_GetPlayersTableEntry(playerID)
+		for _, player in pairs(PLAYERS) do
+			if not player.isLocal and not player.isEliminated
+					and Player_ObserveRelationship(player_local.id, player.id) == R_ALLY then
+				title = Loc_GetString(11165821)  -- "ELIMINATED"
+				video = "stinger_eliminated"
+				break
+			end
+		end
+	end
+
+	Onslaught_TryQueueGameOver(GAMEOVER_OBJECTIVE_TIME, {
+		_playerID = playerID,
+		_icon = nil,
+		_endType = title,
+		_message = Loc_Empty(),
+		_sound = _annihilation.sfx.defeat,
+		_videoURI = video,
+	})
+end

@@ -1,0 +1,73 @@
+-----------------------------------------------------------------------
+-- PlayerUI Settings
+-- Master kill switch and user-facing preferences.
+-- Set PLAYERUI_ENABLED = true to activate the live multiplayer HUD.
+-----------------------------------------------------------------------
+
+PLAYERUI_ENABLED = true
+
+PLAYERUI_LOGGING_ENABLED = PLAYERUI_LOGGING_ENABLED
+if PLAYERUI_LOGGING_ENABLED == nil then
+	PLAYERUI_LOGGING_ENABLED = false
+end
+
+PLAYERUI_DIAGNOSTIC_LOGGING_ENABLED = PLAYERUI_DIAGNOSTIC_LOGGING_ENABLED
+if PLAYERUI_DIAGNOSTIC_LOGGING_ENABLED == nil then
+	PLAYERUI_DIAGNOSTIC_LOGGING_ENABLED = false
+end
+
+function PlayerUI_IsLoggingEnabled()
+	return PLAYERUI_LOGGING_ENABLED == true
+end
+
+function PlayerUI_SetLoggingEnabled(enabled)
+	PLAYERUI_LOGGING_ENABLED = enabled == true
+end
+
+function PlayerUI_IsDiagnosticLoggingEnabled()
+	return PLAYERUI_DIAGNOSTIC_LOGGING_ENABLED == true
+end
+
+function PlayerUI_SetDiagnosticLoggingEnabled(enabled)
+	PLAYERUI_DIAGNOSTIC_LOGGING_ENABLED = enabled == true
+end
+
+function PlayerUI_ShouldPrintMessage(message)
+	local text = tostring(message or "")
+	if text == "" then
+		return false
+	end
+	if string.find(text, "^%[PLAYERUI_CRASH_GUARD%]") then
+		return true
+	end
+	if string.find(text, "^%[PLAYERUI%]") then
+		return PlayerUI_IsLoggingEnabled()
+	end
+	if string.find(text, "^%[PLAYERUI_") then
+		return PlayerUI_IsDiagnosticLoggingEnabled()
+	end
+	return PlayerUI_IsDiagnosticLoggingEnabled()
+end
+
+PlayerUI_Settings = {
+	ShowArmy = true,
+	swapResourceWithIncomePerMinute = false,
+	EnableRankTranslateAnimation = true,
+	EnableRankScaleAnimation = false,
+	EnableKillScorePulse = true,
+	EnableEliminationDim = true,
+	EnableScoreColors = true,
+	EnableRankPredictionArrows = true,
+	EnableRankPredictionContested = true,
+	EnableRankPredictionDelta = true,
+	EnableRankContestedCollapseMulti = false,
+	EnableToggleCrashGuard = true,
+	EnableToggleHudVisibility = true,
+	EnableTogglePlayerScoresSync = true,
+	EnableToggleObjectiveSync = true,
+	EnableApplyDataContextWhenHudVisible = true,
+	EnableToggleTraceLogging = false,
+	EnableMinimalSafeHudXaml = false,
+	EnableAutoShow = true,                     -- auto-show HUD after pre-warm instead of starting collapsed
+	EnableRewardIconMotion = true,             -- feature flag: per-icon margin-based card-shuffle motion + completion_center phase (Strategy A: crash-safe margin bindings)
+}

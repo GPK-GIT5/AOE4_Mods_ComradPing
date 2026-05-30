@@ -1,0 +1,110 @@
+---------------------------------------------------------------------------------------------------
+-- Authors:
+-- Relic
+-- Woprock
+--
+-- Description:
+-- Alters players population limits.
+-- Edit @ Compatability with Population Automatic
+-- Edit @ Duplicated original functions to work with Medic Capacity for limiting ships
+---------------------------------------------------------------------------------------------------
+
+AGS_POPULATION_CAPACITY_MODULE = "AGS_PopulationCapacity"
+AGS_MedicPopulation_CAPACITY_MODULE = "AGS_MedicPopulationCapacity"
+
+---------------------------------------------------------------------------------------------------
+-- Delegates:
+---------------------------------------------------------------------------------------------------
+
+Core_RegisterModule(AGS_POPULATION_CAPACITY_MODULE)	
+
+function AGS_PopulationCapacity_UpdateModuleSettings()
+	AGS_Print("AGS_PopulationCapacity_UpdateModuleSettings")
+	if AGS_GLOBAL_SETTINGS.MaximumPopulation == 200 and AGS_GLOBAL_SETTINGS.MinimumPopulation == 0 then
+		Core_UnregisterModule(AGS_POPULATION_CAPACITY_MODULE)
+	end
+end
+
+function AGS_PopulationCapacity_AdjustSettings()
+	AGS_Print("AGS_PopulationCapacity_AdjustSettings")
+	if AGS_GLOBAL_SETTINGS.MinimumPopulation > AGS_GLOBAL_SETTINGS.MaximumPopulation then
+		AGS_GLOBAL_SETTINGS.MinimumPopulation = AGS_GLOBAL_SETTINGS.MaximumPopulation
+	end
+end
+
+function AGS_PopulationCapacity_PresetFinalize()
+	AGS_Print("AGS_PopulationCapacity_PresetFinalize")
+	AGS_PopulationCapacity_Change()
+end
+
+-- Medic/Ship Capacity
+Core_RegisterModule(AGS_MedicPopulation_CAPACITY_MODULE)	
+
+function AGS_MedicPopulationCapacity_UpdateModuleSettings()
+	AGS_Print("AGS_MedicPopulationCapacity_UpdateModuleSettings")
+	if AGS_GLOBAL_SETTINGS.MaximumMedicPopulation == 0 then
+		Core_UnregisterModule(AGS_MedicPopulation_CAPACITY_MODULE)
+	end
+end
+
+function AGS_MedicPopulationCapacity_PresetFinalize()
+	AGS_Print("AGS_MedicPopulationCapacity_PresetFinalize")
+	-- DISABLED: Medic cap modifiers not applied. MaximumMedicPopulation is
+	-- retained as the siege-limit ceiling in CBA_Options_SiegeLimit_ApplyThreshold.
+	-- AGS_MedicPopulationCapacity_Change()
+end
+---------------------------------------------------------------------------------------------------
+-- Functions:
+---------------------------------------------------------------------------------------------------
+
+function AGS_PopulationCapacity_Change()
+	for _, player in ipairs(PLAYERS) do		
+		AGS_PopulationCapacity_ApplyMaxCapPopulation(player, AGS_GLOBAL_SETTINGS.MaximumPopulation)
+		AGS_PopulationCapacity_SetMinPopulation(player, AGS_GLOBAL_SETTINGS.MinimumPopulation) 
+	end
+end
+
+function AGS_PopulationCapacity_SetMinPopulation(player, pop_size)
+	-- Apply minimum population as an absolute target cap, not a flat additive bonus.
+	-- This keeps civs with innate baseline cap modifiers (e.g., Mongol variants) aligned.
+	local current_cap = Player_GetCurrentPopulationCap(player.id, CT_Personnel)
+	if current_cap == nil then
+		current_cap = 0
+	end
+	local value = pop_size - current_cap
+
+	AGS_PopulationCapacity_ApplyMinPopulation(player, value)
+	
+end
+	
+function AGS_PopulationCapacity_ApplyMinPopulation(player, pop_size)
+	Modifier_ApplyToPlayer(Modifier_Create(MAT_Player, "personnel_cap_player_modifier", MUT_Addition, false, pop_size, ""), player.id, 0)
+end
+
+function AGS_PopulationCapacity_ApplyMaxCapPopulation(player, pop_size)
+	local value = - (200 - pop_size)
+	Modifier_ApplyToPlayer(Modifier_Create(MAT_Player, "max_personnel_cap_player_modifier", MUT_Addition, false, value, ""), player.id, 0)
+end
+
+-- Medic/Ship Capacity
+function AGS_MedicPopulationCapacity_Change()
+	for _, player in ipairs(PLAYERS) do		
+		AGS_MedicPopulationCapacity_ApplyMaxCapMedicPopulation(player, AGS_GLOBAL_SETTINGS.MaximumMedicPopulation)
+		AGS_MedicPopulationCapacity_SetMinMedicPopulation(player, AGS_GLOBAL_SETTINGS.MaximumMedicPopulation) 
+	end
+end
+
+function AGS_MedicPopulationCapacity_SetMinMedicPopulation(player, pop_size)
+	local value = pop_size
+	AGS_MedicPopulationCapacity_ApplyMinMedicPopulation(player, value)
+	
+end
+
+function AGS_MedicPopulationCapacity_ApplyMinMedicPopulation(player, pop_size)
+	Modifier_ApplyToPlayer(Modifier_Create(MAT_Player, "medic_cap_player_modifier", MUT_Addition, false, pop_size, ""), player.id, 0)
+end
+
+function AGS_MedicPopulationCapacity_ApplyMaxCapMedicPopulation(player, pop_size)
+	local value = - (0 - pop_size)
+	Modifier_ApplyToPlayer(Modifier_Create(MAT_Player, "max_medic_cap_player_modifier", MUT_Addition, false, pop_size, ""), player.id, 0)
+end

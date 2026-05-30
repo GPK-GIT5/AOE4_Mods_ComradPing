@@ -1,0 +1,959 @@
+---------------------------------------------------------------------------------------------------
+-- Authors:
+-- Comrad Ping
+--
+-- Description:
+-- Unified Limits Panel — replaces ags_special_population_ui.scar.
+-- Displays active numeric limit systems (Siege, Production Buildings,
+-- Siege Workshops, Outposts) in a compact bottom-left HUD panel.
+--
+-- Fixed-slot grid rows: each row has named data-context bindings
+-- (e.g. siege_visible, siege_counter). Adding a new row requires
+-- a new XAML RowDefinition + Lua field bindings.
+--
+-- Features:
+--   - Per-row icon, label, counter, progress bar
+--   - Color thresholds: white (<8/15), yellow (>=8/15), red (at cap)
+--   - SCAR-side animations: flash on change, pulse at cap, idle fade
+--   - Per-row visibility via BoolToVis on active limit systems
+--   - Per-civ margin offsets to avoid HUD overlap
+--   - Validated XAML: Grid, Border, StackPanel, TextBlock, Image, Rectangle
+--
+-- Note: ToolTip is intentionally omitted — XamlPresenter crashes when
+-- ToolTip bindings are placed on non-interactive elements (StackPanel, Grid).
+-- Tooltip fields remain in data_context (reserved for future Button-based pattern).
+--
+-- Note: Animations are SCAR-side only (interval rule updates DC fields).
+-- XAML-side Storyboard/DataTrigger animations are untested in XamlPresenter
+-- and should NOT be used until validated.
+---------------------------------------------------------------------------------------------------
+
+AGS_LIMITS_UI_MODULE = "AGS_LimitsUI"
+
+-- Progress bar maximum width in pixels
+AGS_LIMITS_UI_BAR_MAX = 160
+AGS_LIMITS_UI_YELLOW_START_RATIO = (8 / 15)
+
+-- Animation tuning (single source of truth)
+AGS_LIMITS_UI_ANIM = {
+	tick_interval = 0.10,
+	idle_start_ticks = 50,        -- 5s at 0.10s tick
+	idle_min_opacity = 0.6,
+	idle_fade_step = 0.02,
+	threshold_transition_ticks = 10,
+	flash_ticks = 3,
+	-- 0.10-0.18 range; near-white text dims instead of boosts (clamping workaround)
+	flash_boost = 0.14,
+}
+
+-- Debug trace for deferred update scheduling/coalescing and update entry.
+-- Disabled by default to avoid runtime scarlog spam during normal play.
+AGS_LIMITS_UI_TRACE_UPDATE_FLOW = false
+
+local function AGS_LimitsUI_ShouldTraceUpdateFlow()
+	return AGS_LIMITS_UI_TRACE_UPDATE_FLOW == true
+end
+
+AGS_LIMITS_UI_CONTEXT = {
+	ui = "AGS_LimitsUI",
+	is_ui_created = false,
+	update_pending = false,
+	last_defer_reason = "init",
+	last_snapshot = "",
+	last_recreate_reason = "init",
+	-- Per-civ bottom margins
+	margin_ott     = "-10,0,0,370",
+	margin_std     = "-10,0,0,356",
+	margin_default = "-10,0,0,301",
+	-- Snapshot of previous counter values for flash detection
+	prev_values = {},
+	-- Previous bar widths for static-rebuild detection
+	prev_bar_w = {},
+	-- Animation state (SCAR-side, no XAML Storyboards)
+	anim = {
+		tick = 0,
+		idle_ticks = 0,
+		rows = {},
+	},
+	-- Data context bound to XAML — flat per-row fields
+	data_context = {
+		is_ui_visible   = true,
+		used_margin     = "-10,0,0,301",
+		panel_opacity   = 1.0,
+		header          = "Limits",
+		-- Siege row
+		siege_visible     = false,
+		siege_icon        = "pack://application:,,,/WPFGUI;component/icons/resources/resource_military.png",
+		siege_label       = "",
+		siege_counter     = "",
+		siege_fg          = "#FFFFFF",
+		siege_bar_w       = 0,
+		siege_bar_scale   = 0.0,
+		siege_bar_fg      = "#CCFFFFFF",
+		siege_at_cap      = false,
+		siege_tooltip     = "",
+		-- Production row
+		prod_visible      = false,
+		prod_icon         = "pack://application:,,,/WPFGUI;component/icons/resources/resource_popcap.png",
+		prod_label        = "",
+		prod_counter      = "",
+		prod_fg           = "#FFFFFF",
+		prod_bar_w        = 0,
+		prod_bar_scale    = 0.0,
+		prod_bar_fg       = "#CCFFFFFF",
+		prod_at_cap       = false,
+		prod_tooltip      = "",
+		-- Workshops row
+		ws_visible        = false,
+		ws_icon           = "pack://application:,,,/WPFGUI;component/icons/races/common/buildings/siege_workshop.png",
+		ws_label          = "",
+		ws_counter        = "",
+		ws_fg             = "#FFFFFF",
+		ws_bar_w          = 0,
+		ws_bar_scale      = 0.0,
+		ws_bar_fg         = "#CCFFFFFF",
+		ws_at_cap         = false,
+		ws_tooltip        = "",
+		-- Outposts row
+		op_visible        = false,
+		op_icon           = "pack://application:,,,/WPFGUI;component/icons/resources/resource_popcap.png",
+		op_label          = "",
+		op_counter        = "",
+		op_fg             = "#FFFFFF",
+		op_bar_w          = 0,
+		op_bar_scale      = 0.0,
+		op_bar_fg         = "#CCFFFFFF",
+		op_at_cap         = false,
+		op_tooltip        = "",
+	},
+}
+
+---------------------------------------------------------------------------------------------------
+-- Row Definitions
+-- Each entry describes one possible limit row.
+-- is_active(): returns true if this limit system is enabled for the current match.
+-- get_current(player): returns the current count for the local player.
+-- get_max(player): returns the cap value for this player.
+-- prefix: data_context field prefix for this row's XAML bindings.
+---------------------------------------------------------------------------------------------------
+
+AGS_LIMITS_UI_ROW_DEFS = {
+	{
+		key         = "siege",
+		prefix      = "siege",
+		label       = "Siege",
+		icon        = "pack://application:,,,/WPFGUI;component/icons/resources/resource_military.png",
+		tooltip     = "Siege Unit Limit\nSpringald = 1 pt\nRam / Trebuchet / Culverin = 2 pt\nMangonel / Cannon / Nest of Bees = 3 pt\nGreat Bombard (Ottoman) = 4 pt",
+		get_current = function(p) return math.floor((p.siegeLimit_count or 0) + (p.siegeLimit_pending or 0)) end,
+		get_max     = function(p) return math.floor(CBA_Options_GetPlayerSiegeLimit(p) or 0) end,
+		is_active   = function()
+			return AGS_GLOBAL_SETTINGS.MaximumMedicPopulation ~= nil
+				and AGS_GLOBAL_SETTINGS.MaximumMedicPopulation > 0
+		end,
+	},
+	{
+		key         = "production",
+		prefix      = "prod",
+		label       = "Production",
+		icon        = "pack://application:,,,/WPFGUI;component/icons/resources/resource_popcap.png",
+		tooltip     = "Production Building Limit\nCounts: Barracks, Archery Range, Stable, Dock\nExcludes: Military School, landmarks",
+		get_current = function(p) return p.obj_buildingLimit_count or 0 end,
+		get_max     = function(p) return CBA_Options_GetPlayerProdLimit(p) or 0 end,
+		is_active   = function()
+			return AGS_GLOBAL_SETTINGS.MaximumProductionBuildings ~= nil
+				and AGS_GLOBAL_SETTINGS.MaximumProductionBuildings ~= 0
+		end,
+	},
+	{
+		key         = "workshops",
+		prefix      = "ws",
+		label       = "Workshops",
+		icon        = "pack://application:,,,/WPFGUI;component/icons/races/common/buildings/siege_workshop.png",
+		tooltip     = "Siege Workshop Limit\nCounts: Siege Workshop\nEnglish: Keep, Chinese: Clocktower, French: Ecole de Poudre, Ottoman: Tophane Armory",
+		get_current = function(p) return p.obj_buildingLimit_workshop_count or 0 end,
+		get_max     = function(p) return CBA_Options_GetPlayerWorkshopLimit(p) end,
+		is_active   = function()
+			if AGS_GET_LOCAL_PLAYER and Player_GetRaceName(AGS_GET_LOCAL_PLAYER) == "jin_dynasty" then
+				return false
+			end
+			return AGS_GLOBAL_SETTINGS.MaximumSiegeWorkshop ~= nil
+				and AGS_GLOBAL_SETTINGS.MaximumSiegeWorkshop ~= 0
+				and not AGS_GLOBAL_SETTINGS.NoSiege
+		end,
+	},
+	{
+		key         = "outposts",
+		prefix      = "op",
+		label       = "Outposts",
+		icon        = "pack://application:,,,/WPFGUI;component/icons/resources/resource_popcap.png",
+		tooltip     = "Outpost Limit\nMaximum outpost buildings per player: 20",
+		get_current = function(p) return p.obj_buildingLimit_outpost_count or 0 end,
+		get_max     = function(p) return CBA_Options_GetPlayerOutpostLimit(p) end,
+		is_active   = function()
+			return AGS_GLOBAL_SETTINGS.MaximumProductionBuildings ~= nil
+				and AGS_GLOBAL_SETTINGS.MaximumProductionBuildings ~= 0
+		end,
+	},
+}
+
+---------------------------------------------------------------------------------------------------
+-- Delegates
+---------------------------------------------------------------------------------------------------
+
+Core_RegisterModule(AGS_LIMITS_UI_MODULE)
+
+function AGS_LimitsUI_UpdateModuleSettings()
+	AGS_Print("AGS_LimitsUI_UpdateModuleSettings")
+	-- Activate module only when at least one numeric limit system is enabled.
+	local has_siege = AGS_GLOBAL_SETTINGS.MaximumMedicPopulation ~= nil
+		and AGS_GLOBAL_SETTINGS.MaximumMedicPopulation > 0
+	local has_buildings = AGS_GLOBAL_SETTINGS.MaximumProductionBuildings ~= nil
+		and AGS_GLOBAL_SETTINGS.MaximumProductionBuildings ~= 0
+
+	if UI_IsReplay() or (not has_siege and not has_buildings) then
+		Core_UnregisterModule(AGS_LIMITS_UI_MODULE)
+	end
+end
+
+function AGS_LimitsUI_EarlyInitializations()
+	AGS_Print("AGS_LimitsUI_EarlyInitializations")
+end
+
+function AGS_LimitsUI_OnPlay()
+	AGS_Print("AGS_LimitsUI_OnPlay")
+	if AGS_LIMITS_UI_CONTEXT.on_play_started then
+		return
+	end
+	AGS_LIMITS_UI_CONTEXT.on_play_started = true
+
+	AGS_GET_LOCAL_PLAYER = Game_GetLocalPlayer()
+	AGS_Print("AGS_LimitsUI_OnPlay: local player resolved")
+
+	AGS_LimitsUI_CreateAndUpdateUI()
+	AGS_Print("AGS_LimitsUI_OnPlay: UI created/updated")
+
+	-- Register global events for UI refresh
+	Rule_AddGlobalEvent(AGS_LimitsUI_OnConstructionComplete, GE_ConstructionComplete)
+	CBA_BuildItemBatch_SetHandler("limits_ui", true)
+	CBA_EntityKillBatch_SetHandler("limits_ui", true)
+	CBA_SquadKillBatch_SetHandler("limits_ui", true)
+
+	-- Animation tick (see AGS_LIMITS_UI_ANIM for timing)
+	Rule_AddInterval(AGS_LimitsUI_AnimTick, AGS_LIMITS_UI_ANIM.tick_interval)
+	AGS_Print("AGS_LimitsUI_OnPlay: rules registered")
+end
+
+function AGS_LimitsUI_OnGameRestore()
+	AGS_Print("AGS_LimitsUI_OnGameRestore")
+	AGS_LIMITS_UI_CONTEXT.is_ui_created = false
+	AGS_LimitsUI_CreateAndUpdateUI()
+end
+
+function AGS_LimitsUI_OnGameOver()
+	AGS_Print("AGS_LimitsUI_OnGameOver")
+	AGS_LimitsUI_Show(false)
+	AGS_LIMITS_UI_CONTEXT.on_play_started = false
+	Rule_RemoveGlobalEvent(AGS_LimitsUI_OnConstructionComplete)
+	CBA_BuildItemBatch_SetHandler("limits_ui", false)
+	CBA_EntityKillBatch_SetHandler("limits_ui", false)
+	CBA_SquadKillBatch_SetHandler("limits_ui", false)
+	if Rule_Exists(AGS_LimitsUI_AnimTick) then
+		Rule_Remove(AGS_LimitsUI_AnimTick)
+	end
+end
+
+function AGS_LimitsUI_OnPlayerDefeated(player, reason)
+	AGS_Print("AGS_LimitsUI_OnPlayerDefeated")
+	if player.isLocal then
+		AGS_LimitsUI_Show(false)
+	end
+	AGS_LimitsUI_DeferUpdate("PlayerDefeated")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Event Delegates (trigger UI refresh)
+---------------------------------------------------------------------------------------------------
+
+function AGS_LimitsUI_DeferUpdate(reason)
+	if not AGS_LIMITS_UI_CONTEXT.update_pending then
+		AGS_LIMITS_UI_CONTEXT.update_pending = true
+		AGS_LIMITS_UI_CONTEXT.last_defer_reason = reason or "unknown"
+		if AGS_LimitsUI_ShouldTraceUpdateFlow() then
+			AGS_Print("AGS_LimitsUI_DeferUpdate: scheduled reason=" .. tostring(AGS_LIMITS_UI_CONTEXT.last_defer_reason))
+		end
+		Rule_AddOneShot(AGS_LimitsUI_Update, 0.5)
+	else
+		if AGS_LimitsUI_ShouldTraceUpdateFlow() then
+			AGS_Print("AGS_LimitsUI_DeferUpdate: coalesced reason=" .. tostring(reason or "unknown")
+				.. " pending_from=" .. tostring(AGS_LIMITS_UI_CONTEXT.last_defer_reason))
+		end
+	end
+end
+
+function AGS_LimitsUI_OnConstructionComplete(context)
+	AGS_LimitsUI_DeferUpdate("ConstructionComplete")
+end
+
+function AGS_LimitsUI_OnBuildItemComplete(context)
+	AGS_LimitsUI_DeferUpdate("BuildItemComplete")
+end
+
+function AGS_LimitsUI_OnEntityKilled(context)
+	AGS_LimitsUI_DeferUpdate("EntityKilled")
+end
+
+function AGS_LimitsUI_OnSquadKilled(context)
+	AGS_LimitsUI_DeferUpdate("SquadKilled")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Color Threshold
+-- Returns (text_color, bar_color) based on current/max ratio.
+-- White: < 8/15, Yellow: >= 8/15, Red: at cap (>= 100%)
+---------------------------------------------------------------------------------------------------
+
+function AGS_LimitsUI_GetColors(current, max)
+	if max <= 0 then
+		return "#FF4444", "#CCFF4444"
+	end
+	local ratio = current / max
+	if ratio >= 1.0 then
+		return "#FF4444", "#CCFF4444"
+	elseif ratio >= AGS_LIMITS_UI_YELLOW_START_RATIO then
+		return "#FFD700", "#CCFFD700"
+	else
+		return "#FFFFFF", "#CCFFFFFF"
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Color Helpers
+-- Blend two colors to avoid hard overrides that can desync visual state.
+---------------------------------------------------------------------------------------------------
+
+local function AGS_LimitsUI_HexToByte(two)
+	return tonumber(two, 16) or 0
+end
+
+local function AGS_LimitsUI_ClampByte(v)
+	if v < 0 then return 0 end
+	if v > 255 then return 255 end
+	return math.floor(v + 0.5)
+end
+
+local function AGS_LimitsUI_Lerp(a, b, t)
+	return a + (b - a) * t
+end
+
+local function AGS_LimitsUI_Clamp01(v)
+	if v < 0 then return 0 end
+	if v > 1 then return 1 end
+	return v
+end
+
+local function AGS_LimitsUI_AnimProgress(left, total, min_start)
+	if total == nil or total <= 0 then
+		return 1.0
+	end
+	-- Two progress modes:
+	-- 1) default/inclusive (used by flash): first frame > 0, final frame == 1.0
+	-- 2) min_start mode (used by threshold transitions): first frame starts exactly at
+	--    min_start (requested 50%), final frame reaches 1.0 with even stepping.
+	local base = 1.0
+	if min_start ~= nil then
+		if total <= 1 then
+			base = 1.0
+		else
+			base = AGS_LimitsUI_Clamp01((total - left) / (total - 1))
+		end
+	else
+		base = AGS_LimitsUI_Clamp01((total - left + 1) / total)
+	end
+	local start = AGS_LimitsUI_Clamp01(min_start or 0)
+	return AGS_LimitsUI_Clamp01(start + ((1.0 - start) * base))
+end
+
+function AGS_LimitsUI_BlendRGB(base_rgb, target_rgb, t)
+	local br = AGS_LimitsUI_HexToByte(string.sub(base_rgb, 2, 3))
+	local bg = AGS_LimitsUI_HexToByte(string.sub(base_rgb, 4, 5))
+	local bb = AGS_LimitsUI_HexToByte(string.sub(base_rgb, 6, 7))
+
+	local tr = AGS_LimitsUI_HexToByte(string.sub(target_rgb, 2, 3))
+	local tg = AGS_LimitsUI_HexToByte(string.sub(target_rgb, 4, 5))
+	local tb = AGS_LimitsUI_HexToByte(string.sub(target_rgb, 6, 7))
+
+	local rr = AGS_LimitsUI_ClampByte(AGS_LimitsUI_Lerp(br, tr, t))
+	local rg = AGS_LimitsUI_ClampByte(AGS_LimitsUI_Lerp(bg, tg, t))
+	local rb = AGS_LimitsUI_ClampByte(AGS_LimitsUI_Lerp(bb, tb, t))
+
+	return string.format("#%02X%02X%02X", rr, rg, rb)
+end
+
+function AGS_LimitsUI_BlendARGB(base_argb, target_argb, t)
+	local ba = AGS_LimitsUI_HexToByte(string.sub(base_argb, 2, 3))
+	local br = AGS_LimitsUI_HexToByte(string.sub(base_argb, 4, 5))
+	local bg = AGS_LimitsUI_HexToByte(string.sub(base_argb, 6, 7))
+	local bb = AGS_LimitsUI_HexToByte(string.sub(base_argb, 8, 9))
+
+	local ta = AGS_LimitsUI_HexToByte(string.sub(target_argb, 2, 3))
+	local tr = AGS_LimitsUI_HexToByte(string.sub(target_argb, 4, 5))
+	local tg = AGS_LimitsUI_HexToByte(string.sub(target_argb, 6, 7))
+	local tb = AGS_LimitsUI_HexToByte(string.sub(target_argb, 8, 9))
+
+	local ra = AGS_LimitsUI_ClampByte(AGS_LimitsUI_Lerp(ba, ta, t))
+	local rr = AGS_LimitsUI_ClampByte(AGS_LimitsUI_Lerp(br, tr, t))
+	local rg = AGS_LimitsUI_ClampByte(AGS_LimitsUI_Lerp(bg, tg, t))
+	local rb = AGS_LimitsUI_ClampByte(AGS_LimitsUI_Lerp(bb, tb, t))
+
+	return string.format("#%02X%02X%02X%02X", ra, rr, rg, rb)
+end
+
+local function AGS_LimitsUI_BuildSnapshot(dc)
+	if dc == nil then
+		return "dc=nil"
+	end
+	return string.format(
+		"bars[s=%d,p=%d,w=%d,o=%d]|ctr[s=%s,p=%s,w=%s,o=%s]|vis[s=%s,p=%s,w=%s,o=%s]",
+		tonumber(dc.siege_bar_w or 0), tonumber(dc.prod_bar_w or 0), tonumber(dc.ws_bar_w or 0), tonumber(dc.op_bar_w or 0),
+		tostring(dc.siege_counter or ""), tostring(dc.prod_counter or ""), tostring(dc.ws_counter or ""), tostring(dc.op_counter or ""),
+		tostring(dc.siege_visible or false), tostring(dc.prod_visible or false), tostring(dc.ws_visible or false), tostring(dc.op_visible or false)
+	)
+end
+
+local function AGS_LimitsUI_LogRecreate(reason, detail)
+	local dc = AGS_LIMITS_UI_CONTEXT.data_context
+	local snapshot = AGS_LimitsUI_BuildSnapshot(dc)
+	local old_snapshot = AGS_LIMITS_UI_CONTEXT.last_snapshot or ""
+	local changed = (snapshot ~= old_snapshot)
+	AGS_LIMITS_UI_CONTEXT.last_snapshot = snapshot
+	AGS_LIMITS_UI_CONTEXT.last_recreate_reason = reason or "unknown"
+	AGS_Print("AGS_LimitsUI_RecreateUI: reason=" .. tostring(reason or "unknown")
+		.. " detail=" .. tostring(detail or "")
+		.. " snapshot_changed=" .. tostring(changed)
+		.. " prev_reason=" .. tostring(AGS_LIMITS_UI_CONTEXT.last_defer_reason or "none")
+		.. " snapshot=" .. snapshot)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Update
+-- Populates per-row fields in the flat data_context for XAML bindings.
+-- Computes color thresholds and progress bar widths.
+-- Detects value changes and triggers color-safe animation.
+---------------------------------------------------------------------------------------------------
+
+function AGS_LimitsUI_Update()
+	AGS_LIMITS_UI_CONTEXT.update_pending = false
+
+	-- PERF: Skip updates during leaver transfer pipeline — mass entity kills fire
+	-- OnEntityKilled/OnSquadKilled events that trigger bar-width changes and XAML rebuilds.
+	-- The pipeline completion path calls DeferUpdate("leaver_complete") to reconcile once.
+	if _leaver_transfer_state ~= nil then
+		if AGS_LimitsUI_ShouldTraceUpdateFlow() then
+			AGS_Print("AGS_LimitsUI_Update: skipped (leaver transfer active)")
+		end
+		return
+	end
+
+	if AGS_LimitsUI_ShouldTraceUpdateFlow() then
+		AGS_Print("AGS_LimitsUI_Update: begin reason=" .. tostring(AGS_LIMITS_UI_CONTEXT.last_defer_reason or "unknown"))
+	end
+	if AGS_LIMITS_UI_CONTEXT == nil
+		or AGS_LIMITS_UI_CONTEXT.data_context == nil
+		or not AGS_LIMITS_UI_CONTEXT.is_ui_created then
+		return
+	end
+
+	local player_idx = World_GetPlayerIndex(AGS_GET_LOCAL_PLAYER)
+	local player = PLAYERS[player_idx]
+	if player == nil then
+		return
+	end
+
+	-- Margin is now static (injected at XAML creation time).
+	-- AGS_LimitsUI_ApplyMargin() no longer needed per UI_SetDataContext call.
+
+	local dc = AGS_LIMITS_UI_CONTEXT.data_context
+	local anim = AGS_LIMITS_UI_CONTEXT.anim
+
+	for _, def in ipairs(AGS_LIMITS_UI_ROW_DEFS) do
+		local p = def.prefix
+		local ok_active, active = pcall(def.is_active)
+		local is_on = ok_active and active
+
+		dc[p .. "_visible"] = is_on
+
+		if is_on then
+			local cur = def.get_current(player) or 0
+			local max = def.get_max(player) or 0
+			local at_cap = (cur >= max) and max > 0
+			local state = anim.rows[p] or {}
+
+			dc[p .. "_icon"] = def.icon
+			dc[p .. "_label"] = def.label
+			dc[p .. "_counter"] = tostring(cur) .. " / " .. tostring(max)
+			dc[p .. "_tooltip"] = def.tooltip
+
+			local prev_base_fg = state.base_fg
+			local prev_base_bar_fg = state.base_bar_fg
+
+			-- Color thresholds (white < 8/15, yellow >= 8/15, red >= 100%)
+			local fg, bar_fg = AGS_LimitsUI_GetColors(cur, max)
+			dc[p .. "_at_cap"] = at_cap
+			state.base_fg = fg
+			state.base_bar_fg = bar_fg
+
+			-- Progress bar width (0 to BAR_MAX pixels, quantized to 8px steps to reduce RecreateUI churn)
+			local ratio = 0
+			if max > 0 then
+				ratio = AGS_LimitsUI_Clamp01(cur / max)
+			end
+			local bar_w = math.floor(ratio * AGS_LIMITS_UI_BAR_MAX / 8) * 8
+			dc[p .. "_bar_w"] = math.max(0, bar_w)
+			dc[p .. "_bar_scale"] = ratio
+
+			-- Threshold color transition (fires on crossing, preserves in-progress blend)
+			if prev_base_fg ~= nil and prev_base_bar_fg ~= nil
+				and (prev_base_fg ~= fg or prev_base_bar_fg ~= bar_fg) then
+				-- New transition: start from the current displayed color for smooth handoff
+				-- if one was already in-progress.
+				state.threshold_transition_left = AGS_LIMITS_UI_ANIM.threshold_transition_ticks
+				state.threshold_transition_total = AGS_LIMITS_UI_ANIM.threshold_transition_ticks
+				state.transition_from_fg = dc[p .. "_fg"] or prev_base_fg
+				state.transition_from_bar_fg = dc[p .. "_bar_fg"] or prev_base_bar_fg
+				state.transition_to_fg = fg
+				state.transition_to_bar_fg = bar_fg
+				-- Hold display at current color; AnimTick will blend toward the target.
+				dc[p .. "_fg"] = state.transition_from_fg
+				dc[p .. "_bar_fg"] = state.transition_from_bar_fg
+			elseif state.threshold_transition_left == nil or state.threshold_transition_left <= 0 then
+				-- No transition active: set target color directly.
+				dc[p .. "_fg"] = fg
+				dc[p .. "_bar_fg"] = bar_fg
+			end
+			-- (else: transition in-progress, dc retains AnimTick's last blended value)
+
+			-- Detect value change → trigger short progress-tied effects only
+			local prev = AGS_LIMITS_UI_CONTEXT.prev_values[def.key]
+			if prev ~= nil and prev ~= cur then
+				state.flash_left = AGS_LIMITS_UI_ANIM.flash_ticks
+				state.flash_total = AGS_LIMITS_UI_ANIM.flash_ticks
+				anim.idle_ticks = 0
+				-- Opacity reset removed: binding removed from XAML.
+			end
+
+			anim.rows[p] = state
+			AGS_LIMITS_UI_CONTEXT.prev_values[def.key] = cur
+		else
+			dc[p .. "_counter"] = "0 / 0"
+			dc[p .. "_bar_w"] = 0
+			dc[p .. "_bar_scale"] = 0.0
+			dc[p .. "_at_cap"] = false
+			anim.rows[p] = {
+				flash_left = 0,
+				threshold_transition_left = 0,
+				base_fg = "#FFFFFF",
+				base_bar_fg = "#CCFFFFFF",
+			}
+		end
+	end
+
+	-- Detect bar width changes → recreate XAML with new static widths.
+	-- Width DataContext binding is FATAL; widths are baked into XAML at creation time.
+	local bw = AGS_LIMITS_UI_CONTEXT.prev_bar_w
+	if bw.siege ~= dc.siege_bar_w or bw.prod ~= dc.prod_bar_w
+		or bw.ws ~= dc.ws_bar_w or bw.op ~= dc.op_bar_w then
+		local detail = string.format("bar_w siege:%s->%s prod:%s->%s ws:%s->%s op:%s->%s",
+			tostring(bw.siege), tostring(dc.siege_bar_w),
+			tostring(bw.prod), tostring(dc.prod_bar_w),
+			tostring(bw.ws), tostring(dc.ws_bar_w),
+			tostring(bw.op), tostring(dc.op_bar_w))
+		bw.siege = dc.siege_bar_w
+		bw.prod = dc.prod_bar_w
+		bw.ws = dc.ws_bar_w
+		bw.op = dc.op_bar_w
+		AGS_LimitsUI_RecreateUI("bar_width_change", detail)
+	end
+
+	UI_SetDataContext(AGS_LIMITS_UI_CONTEXT.ui, dc)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Animation Tick
+-- SCAR-side animations — no XAML Storyboards or DataTriggers.
+--   Flash on change:  brief hue-preserving brightness pulse
+--   Threshold shift:  smooth transition between states (up/down)
+--   Idle fade:        reduce panel opacity after 5 seconds of no changes
+---------------------------------------------------------------------------------------------------
+
+function AGS_LimitsUI_AnimTick()
+	if AGS_LIMITS_UI_CONTEXT == nil
+		or AGS_LIMITS_UI_CONTEXT.data_context == nil
+		or not AGS_LIMITS_UI_CONTEXT.is_ui_created then
+		return
+	end
+
+	local dc = AGS_LIMITS_UI_CONTEXT.data_context
+	local anim = AGS_LIMITS_UI_CONTEXT.anim
+	anim.tick = anim.tick + 1
+	anim.idle_ticks = anim.idle_ticks + 1
+	local pushed = false
+
+	for _, def in ipairs(AGS_LIMITS_UI_ROW_DEFS) do
+		local p = def.prefix
+		if dc[p .. "_visible"] then
+			local state = anim.rows[p]
+			local trace_threshold_progress = -1
+			local trace_flash_progress = -1
+
+			local base_fg = (state and state.base_fg) or dc[p .. "_fg"]
+			local base_bar_fg = (state and state.base_bar_fg) or dc[p .. "_bar_fg"]
+
+			local work_fg = base_fg
+			local work_bar_fg = base_bar_fg
+
+			-- Threshold transition (always continuous, both directions)
+			if state ~= nil and state.threshold_transition_left ~= nil and state.threshold_transition_left > 0 then
+				local total = state.threshold_transition_total or AGS_LIMITS_UI_ANIM.threshold_transition_ticks
+				-- Start threshold blend from 50% progress to reduce early-step hesitation.
+				local progress = AGS_LimitsUI_AnimProgress(state.threshold_transition_left, total, 0.5)
+				trace_threshold_progress = progress
+				local from_fg = state.transition_from_fg or base_fg
+				local from_bar_fg = state.transition_from_bar_fg or base_bar_fg
+				local to_fg = state.transition_to_fg or base_fg
+				local to_bar_fg = state.transition_to_bar_fg or base_bar_fg
+				work_fg = AGS_LimitsUI_BlendRGB(from_fg, to_fg, progress)
+				work_bar_fg = AGS_LimitsUI_BlendARGB(from_bar_fg, to_bar_fg, progress)
+				state.threshold_transition_left = state.threshold_transition_left - 1
+			end
+
+			-- Short flash on value change while preserving the current hue
+			if state ~= nil and state.flash_left ~= nil and state.flash_left > 0 then
+				local total = state.flash_total or AGS_LIMITS_UI_ANIM.flash_ticks
+				local progress = AGS_LimitsUI_AnimProgress(state.flash_left, total)
+				trace_flash_progress = progress
+				local amp = math.sin(progress * 3.14159265)
+				work_fg = AGS_LimitsUI_BoostRGB(work_fg, 1.0 + (AGS_LIMITS_UI_ANIM.flash_boost * amp))
+				work_bar_fg = AGS_LimitsUI_BoostARGB(work_bar_fg, 1.0 + (AGS_LIMITS_UI_ANIM.flash_boost * amp))
+				state.flash_left = state.flash_left - 1
+			end
+
+			-- Per-tick trace (toggle: Debug_LimitsUI_TraceAnimTick() in cba_debug.scar)
+			if _DEBUG_LIMITS_ANIM_TRACE then
+				print(string.format("[TRACE][%d][%s] base=%s work=%s bar_base=%s bar_work=%s trans=%s trans_t=%.2f flash=%s flash_t=%.2f",
+					anim.tick, p,
+					tostring(base_fg), tostring(work_fg),
+					tostring(base_bar_fg), tostring(work_bar_fg),
+					tostring(state and state.threshold_transition_left or 0),
+					trace_threshold_progress,
+					tostring(state and state.flash_left or 0),
+					trace_flash_progress))
+			end
+
+			if dc[p .. "_fg"] ~= work_fg or dc[p .. "_bar_fg"] ~= work_bar_fg then
+				dc[p .. "_fg"] = work_fg
+				dc[p .. "_bar_fg"] = work_bar_fg
+				pushed = true
+			end
+		end
+	end
+
+	-- Idle fade disabled: Opacity DataContext binding removed (unvalidated in XamlPresenter).
+	-- Panel stays fully visible at all times.
+
+	if pushed then
+		UI_SetDataContext(AGS_LIMITS_UI_CONTEXT.ui, dc)
+	end
+end
+
+function AGS_LimitsUI_BoostRGB(base_rgb, factor)
+	local r = AGS_LimitsUI_HexToByte(string.sub(base_rgb, 2, 3))
+	local g = AGS_LimitsUI_HexToByte(string.sub(base_rgb, 4, 5))
+	local b = AGS_LimitsUI_HexToByte(string.sub(base_rgb, 6, 7))
+
+	-- Near-white: boosting saturated channels clamps to no-op; dim briefly instead.
+	-- Threshold: all channels > 220 (white #FFFFFF, near-white #EEEEEE, etc.)
+	local effective_factor = factor
+	if r > 220 and g > 220 and b > 220 and factor > 1.0 then
+		effective_factor = 2.0 - factor
+	end
+
+	r = AGS_LimitsUI_ClampByte(r * effective_factor)
+	g = AGS_LimitsUI_ClampByte(g * effective_factor)
+	b = AGS_LimitsUI_ClampByte(b * effective_factor)
+
+	return string.format("#%02X%02X%02X", r, g, b)
+end
+
+function AGS_LimitsUI_BoostARGB(base_argb, factor)
+	local a = AGS_LimitsUI_HexToByte(string.sub(base_argb, 2, 3))
+	local r = AGS_LimitsUI_HexToByte(string.sub(base_argb, 4, 5))
+	local g = AGS_LimitsUI_HexToByte(string.sub(base_argb, 6, 7))
+	local b = AGS_LimitsUI_HexToByte(string.sub(base_argb, 8, 9))
+
+	-- Scale alpha too: bar flash is visible on saturated (white) colors even when RGB clamps.
+	a = AGS_LimitsUI_ClampByte(a * factor)
+	r = AGS_LimitsUI_ClampByte(r * factor)
+	g = AGS_LimitsUI_ClampByte(g * factor)
+	b = AGS_LimitsUI_ClampByte(b * factor)
+
+	return string.format("#%02X%02X%02X%02X", a, r, g, b)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Margin (per-civ)
+---------------------------------------------------------------------------------------------------
+
+function AGS_LimitsUI_ApplyMargin()
+	local race = Player_GetRaceName(AGS_GET_LOCAL_PLAYER)
+	local branch_civ = AGS_CIV_FACTION_MAP[race] or race
+
+	if branch_civ == AGS_CIV_OTTOMAN then
+		AGS_LIMITS_UI_CONTEXT.data_context.used_margin = AGS_LIMITS_UI_CONTEXT.margin_ott
+	elseif branch_civ == AGS_CIV_CHINESE
+		or branch_civ == AGS_CIV_HRE
+		or branch_civ == AGS_CIV_RUS
+		or branch_civ == AGS_CIV_SULTANATE then
+		AGS_LIMITS_UI_CONTEXT.data_context.used_margin = AGS_LIMITS_UI_CONTEXT.margin_std
+	else
+		AGS_LIMITS_UI_CONTEXT.data_context.used_margin = AGS_LIMITS_UI_CONTEXT.margin_default
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Visibility
+---------------------------------------------------------------------------------------------------
+
+function AGS_LimitsUI_Show(show_ui)
+	if AGS_LIMITS_UI_CONTEXT.is_ui_created then
+		AGS_LIMITS_UI_CONTEXT.data_context.is_ui_visible = show_ui
+		UI_SetDataContext(AGS_LIMITS_UI_CONTEXT.ui, AGS_LIMITS_UI_CONTEXT.data_context)
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Recreate UI (progress bar width update)
+-- Width DataContext binding is FATAL in XamlPresenter, so bar widths are
+-- baked into the XAML string at creation time. When counts change and bar
+-- widths need to update, we destroy and recreate the panel with new widths.
+-- This only fires on event-driven count changes (infrequent), not AnimTick.
+---------------------------------------------------------------------------------------------------
+
+function AGS_LimitsUI_RecreateUI(reason, detail)
+	AGS_LimitsUI_LogRecreate(reason or "unknown", detail)
+	if AGS_LIMITS_UI_CONTEXT.is_ui_created then
+		UI_Remove(AGS_LIMITS_UI_CONTEXT.ui)
+		AGS_LIMITS_UI_CONTEXT.is_ui_created = false
+	end
+	AGS_LimitsUI_CreateUI(reason)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Create UI
+---------------------------------------------------------------------------------------------------
+
+function AGS_LimitsUI_CreateAndUpdateUI()
+	AGS_Print("AGS_LimitsUI_CreateAndUpdateUI: enter")
+	AGS_LimitsUI_CreateUI("create_and_update")
+	AGS_Print("AGS_LimitsUI_CreateAndUpdateUI: CreateUI done, calling Update")
+	AGS_LimitsUI_Update()
+	AGS_Print("AGS_LimitsUI_CreateAndUpdateUI: Update done")
+end
+
+function AGS_LimitsUI_CreateUI(reason)
+	if AGS_LIMITS_UI_CONTEXT.is_ui_created then
+		return
+	end
+
+	AGS_Print("AGS_LimitsUI_CreateUI: phase 1 — margin resolution (reason=" .. tostring(reason or "unknown") .. ")")
+
+	-- Determine per-civ margin at creation time (static injection, not XAML binding).
+	-- Dynamic Margin binding via DataContext is not validated in XamlPresenter.
+	local used_margin = AGS_LIMITS_UI_CONTEXT.margin_default
+	local race = Player_GetRaceName(AGS_GET_LOCAL_PLAYER)
+	local branch_civ = AGS_CIV_FACTION_MAP[race] or race
+	if branch_civ == AGS_CIV_OTTOMAN then
+		used_margin = AGS_LIMITS_UI_CONTEXT.margin_ott
+	elseif branch_civ == AGS_CIV_CHINESE
+		or branch_civ == AGS_CIV_HRE
+		or branch_civ == AGS_CIV_RUS
+		or branch_civ == AGS_CIV_SULTANATE then
+		used_margin = AGS_LIMITS_UI_CONTEXT.margin_std
+	end
+
+	AGS_Print("AGS_LimitsUI_CreateUI: phase 2 — XAML build (margin=" .. used_margin .. ")")
+
+	-- XAML stripped to patterns validated by the working ags_special_population_ui.scar:
+	-- - MergedDictionaries directly under Grid.Resources (no explicit ResourceDictionary wrapper)
+	-- - No DropShadowEffect (not used in the working siege UI)
+	-- - No Border element (not used in the working siege UI)
+	-- - BoolToVis, nHUDBaseHeavyTextBlockStyle provided by HUDResources.xaml
+	-- - Foreground/Fill DataContext bindings, Image Source (all validated safe)
+	-- INCREMENT 1: Border element reintroduced (background panel + frame)
+	local xaml =
+[[<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+		xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+		HorizontalAlignment="Left"
+		VerticalAlignment="Bottom"
+		SnapsToDevicePixels="True"
+		Width="200"
+		Margin="__MARGIN__"
+		Visibility="{Binding [is_ui_visible], Converter={StaticResource BoolToVis}}"
+		IsHitTestVisible="False">
+	<Grid.Resources>
+		<ResourceDictionary.MergedDictionaries>
+			<ResourceDictionary Source="pack://application:,,,ui/Resources/HUDResources.xaml" />
+		</ResourceDictionary.MergedDictionaries>
+	</Grid.Resources>
+	<Border Background="#CC1A1A2E" BorderBrush="#66888888" BorderThickness="1" CornerRadius="2" Padding="8,6,8,6">
+	<StackPanel>
+		<!-- Header -->
+		<TextBlock Text="{Binding [header]}"
+				   HorizontalAlignment="Center"
+				   Style="{StaticResource nHUDBaseHeavyTextBlockStyle}"
+				   FontSize="14" Foreground="#CCCCCC"
+				   Margin="0,0,0,2"/>
+		<!-- Separator -->
+		<Rectangle Fill="#616C8C" Height="1" Margin="0,0,0,4"/>
+
+		<!-- Row 1: Siege -->
+		<StackPanel Margin="0,2,0,2"
+					Visibility="{Binding [siege_visible], Converter={StaticResource BoolToVis}}">
+			<Grid>
+				<Grid.ColumnDefinitions>
+					<ColumnDefinition Width="20"/>
+					<ColumnDefinition Width="*"/>
+					<ColumnDefinition Width="Auto"/>
+				</Grid.ColumnDefinitions>
+				<Image Grid.Column="0" Width="14" Height="14"
+					   Source="pack://application:,,,/WPFGUI;component/icons/resources/resource_military.png"
+					   VerticalAlignment="Center"/>
+				<TextBlock Grid.Column="1" Text="{Binding [siege_label]}"
+						   Style="{StaticResource nHUDBaseHeavyTextBlockStyle}"
+						   FontSize="11" Foreground="#AAAAAA"
+						   VerticalAlignment="Center"/>
+				<TextBlock Grid.Column="2" Text="{Binding [siege_counter]}"
+						   Foreground="{Binding [siege_fg]}"
+						   Style="{StaticResource nHUDBaseHeavyTextBlockStyle}"
+						   FontSize="11"
+						   VerticalAlignment="Center"/>
+			</Grid>
+			<Grid Height="3" Width="160" HorizontalAlignment="Left" Margin="20,2,0,0" ClipToBounds="True">
+				<Rectangle Fill="#33FFFFFF"/>
+				<Rectangle Fill="{Binding [siege_bar_fg]}" Width="__SIEGE_BAR_W__" HorizontalAlignment="Left"/>
+			</Grid>
+		</StackPanel>
+
+		<!-- Row 2: Production -->
+		<StackPanel Margin="0,2,0,2"
+					Visibility="{Binding [prod_visible], Converter={StaticResource BoolToVis}}">
+			<Grid>
+				<Grid.ColumnDefinitions>
+					<ColumnDefinition Width="20"/>
+					<ColumnDefinition Width="*"/>
+					<ColumnDefinition Width="Auto"/>
+				</Grid.ColumnDefinitions>
+				<Image Grid.Column="0" Width="14" Height="14"
+					   Source="pack://application:,,,/WPFGUI;component/icons/resources/resource_popcap.png"
+					   VerticalAlignment="Center"/>
+				<TextBlock Grid.Column="1" Text="{Binding [prod_label]}"
+						   Style="{StaticResource nHUDBaseHeavyTextBlockStyle}"
+						   FontSize="11" Foreground="#AAAAAA"
+						   VerticalAlignment="Center"/>
+				<TextBlock Grid.Column="2" Text="{Binding [prod_counter]}"
+						   Foreground="{Binding [prod_fg]}"
+						   Style="{StaticResource nHUDBaseHeavyTextBlockStyle}"
+						   FontSize="11"
+						   VerticalAlignment="Center"/>
+			</Grid>
+			<Grid Height="3" Width="160" HorizontalAlignment="Left" Margin="20,2,0,0" ClipToBounds="True">
+				<Rectangle Fill="#33FFFFFF"/>
+				<Rectangle Fill="{Binding [prod_bar_fg]}" Width="__PROD_BAR_W__" HorizontalAlignment="Left"/>
+			</Grid>
+		</StackPanel>
+
+		<!-- Row 3: Workshops -->
+		<StackPanel Margin="0,2,0,2"
+					Visibility="{Binding [ws_visible], Converter={StaticResource BoolToVis}}">
+			<Grid>
+				<Grid.ColumnDefinitions>
+					<ColumnDefinition Width="20"/>
+					<ColumnDefinition Width="*"/>
+					<ColumnDefinition Width="Auto"/>
+				</Grid.ColumnDefinitions>
+				<Image Grid.Column="0" Width="14" Height="14"
+					   Source="pack://application:,,,/WPFGUI;component/icons/races/common/buildings/siege_workshop.png"
+					   VerticalAlignment="Center"/>
+				<TextBlock Grid.Column="1" Text="{Binding [ws_label]}"
+						   Style="{StaticResource nHUDBaseHeavyTextBlockStyle}"
+						   FontSize="11" Foreground="#AAAAAA"
+						   VerticalAlignment="Center"/>
+				<TextBlock Grid.Column="2" Text="{Binding [ws_counter]}"
+						   Foreground="{Binding [ws_fg]}"
+						   Style="{StaticResource nHUDBaseHeavyTextBlockStyle}"
+						   FontSize="11"
+						   VerticalAlignment="Center"/>
+			</Grid>
+			<Grid Height="3" Width="160" HorizontalAlignment="Left" Margin="20,2,0,0" ClipToBounds="True">
+				<Rectangle Fill="#33FFFFFF"/>
+				<Rectangle Fill="{Binding [ws_bar_fg]}" Width="__WS_BAR_W__" HorizontalAlignment="Left"/>
+			</Grid>
+		</StackPanel>
+
+		<!-- Row 4: Outposts -->
+		<StackPanel Margin="0,2,0,2"
+					Visibility="{Binding [op_visible], Converter={StaticResource BoolToVis}}">
+			<Grid>
+				<Grid.ColumnDefinitions>
+					<ColumnDefinition Width="20"/>
+					<ColumnDefinition Width="*"/>
+					<ColumnDefinition Width="Auto"/>
+				</Grid.ColumnDefinitions>
+				<Image Grid.Column="0" Width="14" Height="14"
+					   Source="pack://application:,,,/WPFGUI;component/icons/resources/resource_popcap.png"
+					   VerticalAlignment="Center"/>
+				<TextBlock Grid.Column="1" Text="{Binding [op_label]}"
+						   Style="{StaticResource nHUDBaseHeavyTextBlockStyle}"
+						   FontSize="11" Foreground="#AAAAAA"
+						   VerticalAlignment="Center"/>
+				<TextBlock Grid.Column="2" Text="{Binding [op_counter]}"
+						   Foreground="{Binding [op_fg]}"
+						   Style="{StaticResource nHUDBaseHeavyTextBlockStyle}"
+						   FontSize="11"
+						   VerticalAlignment="Center"/>
+			</Grid>
+			<Grid Height="3" Width="160" HorizontalAlignment="Left" Margin="20,2,0,0" ClipToBounds="True">
+				<Rectangle Fill="#33FFFFFF"/>
+				<Rectangle Fill="{Binding [op_bar_fg]}" Width="__OP_BAR_W__" HorizontalAlignment="Left"/>
+			</Grid>
+		</StackPanel>
+	</StackPanel>
+	</Border>
+</Grid>]]
+
+	-- Inject per-civ margin (static value, not a XAML binding).
+	xaml = string.gsub(xaml, "__MARGIN__", used_margin)
+
+	-- Progress bar widths (static injection — Width DataContext binding is FATAL).
+	local dc = AGS_LIMITS_UI_CONTEXT.data_context
+	xaml = string.gsub(xaml, "__SIEGE_BAR_W__", tostring(math.max(0, dc.siege_bar_w or 0)))
+	xaml = string.gsub(xaml, "__PROD_BAR_W__", tostring(math.max(0, dc.prod_bar_w or 0)))
+	xaml = string.gsub(xaml, "__WS_BAR_W__", tostring(math.max(0, dc.ws_bar_w or 0)))
+	xaml = string.gsub(xaml, "__OP_BAR_W__", tostring(math.max(0, dc.op_bar_w or 0)))
+
+	AGS_Print("AGS_LimitsUI_CreateUI: phase 3 — UI_AddChild")
+
+	UI_AddChild(
+		"ScarDefault", "XamlPresenter",
+		AGS_LIMITS_UI_CONTEXT.ui,
+		{
+			IsHitTestVisible = false,
+			Xaml = xaml,
+			DataContext = UI_CreateDataContext(AGS_LIMITS_UI_CONTEXT.data_context),
+		}
+	)
+
+	AGS_Print("AGS_LimitsUI_CreateUI: phase 4 — UI_AddChild succeeded")
+	AGS_LIMITS_UI_CONTEXT.is_ui_created = true
+end
+
+

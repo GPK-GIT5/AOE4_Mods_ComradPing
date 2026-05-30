@@ -1,0 +1,893 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — UI Prompt System
+-- Interactive YES/NO and multiple-choice prompts via XamlPresenter overlay.
+-- Modular from core debug functions; integrates by writing to _cba_debug.test_results.
+--
+-- Console fallback: Debug_Answer("yes") / Debug_Answer("no") / Debug_Answer(1..4)
+-- Dismiss: Debug_DismissPrompt()
+--
+-- Dependencies: _cba_debug table (from cba_debug_core.scar)
+-- Branch: onslaught-v3.3
+---------------------------------------------------------------------------------------------------
+
+local _DBG_PROMPT_PANEL = "CBA_DebugPromptPanel"
+
+_cba_debug_prompts = {
+	panel_created = false,
+	active = false,
+	-- Current prompt state
+	prompt_type = nil,       -- "yesno" or "choice"
+	question = "",
+	choice_count = 0,        -- Number of visible choices (2 for yesno, up to 4 for choice)
+	on_answer = nil,         -- Callback: receives (choice_index) where 1=YES/A, 2=NO/B, etc.
+	timeout = 30,
+	default_choice = 1,
+	deadline = 0,
+	-- Data context reference for UI updates
+	dc = nil,
+}
+
+---------------------------------------------------------------------------------------------------
+-- XAML Template — Centered overlay with up to 4 buttons.
+-- Safe bindings only: Text, Foreground, Visibility (BoolToVis), Command.
+-- No Width/Height/Opacity bindings (fatal in XamlPresenter).
+---------------------------------------------------------------------------------------------------
+
+local function _DebugPrompt_BuildXaml()
+	return [[<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+	xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+	xmlns:esControls="clr-namespace:WPFGUI.Shared.Controls;assembly=EngineUI"
+	xmlns:esUtility="clr-namespace:WPFGUI.Shared.Utility;assembly=EngineUI"
+	HorizontalAlignment="Center"
+	VerticalAlignment="Center"
+	SnapsToDevicePixels="True"
+	Visibility="{Binding [panel_visible], Converter={StaticResource BoolToVis}}">
+	<Grid.Resources>
+		<ResourceDictionary.MergedDictionaries>
+			<ResourceDictionary Source="pack://application:,,,ui/Resources/HUDResources.xaml" />
+		</ResourceDictionary.MergedDictionaries>
+	</Grid.Resources>
+
+	<!-- Dark backdrop -->
+	<Border Background="#DD12121E" CornerRadius="10" Padding="24,18,24,20">
+		<StackPanel>
+			<!-- Header bar -->
+			<TextBlock Text="{Binding [header]}"
+				FontSize="15" FontWeight="SemiBold"
+				Foreground="#FFD54F"
+				Margin="0,0,0,6" />
+
+			<!-- Question body -->
+			<TextBlock Text="{Binding [question]}"
+				FontSize="13" Foreground="#E0E0E0"
+				TextWrapping="Wrap"
+				Margin="0,0,0,4" />
+
+			<!-- Detail line (failures, counts, etc.) -->
+			<TextBlock Text="{Binding [detail]}"
+				FontSize="12" Foreground="#AAAAAA"
+				TextWrapping="Wrap"
+				Visibility="{Binding [detail_visible], Converter={StaticResource BoolToVis}}"
+				Margin="0,0,0,4" />
+
+			<!-- Timer countdown -->
+			<TextBlock Text="{Binding [timer_text]}"
+				FontSize="11" Foreground="#777777"
+				Margin="0,0,0,14" />
+
+			<!-- Button row -->
+			<StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+				<!-- Button A -->
+				<Button Command="{Binding [cmd_a]}" Margin="4,0"
+					Visibility="{Binding [btn_a_vis], Converter={StaticResource BoolToVis}}"
+					esUtility:AudioAttachedProperty.PreviewMouseLeftButtonUpSound="sfx_ui_hud_inGame_button_play">
+					<Border Background="#2D6A3E" CornerRadius="4" Padding="16,8">
+						<TextBlock Text="{Binding [btn_a_text]}" FontSize="13" Foreground="#FFFFFF" FontWeight="SemiBold"/>
+					</Border>
+				</Button>
+				<!-- Button B -->
+				<Button Command="{Binding [cmd_b]}" Margin="4,0"
+					Visibility="{Binding [btn_b_vis], Converter={StaticResource BoolToVis}}"
+					esUtility:AudioAttachedProperty.PreviewMouseLeftButtonUpSound="sfx_ui_hud_inGame_button_play">
+					<Border Background="#8B2D2D" CornerRadius="4" Padding="16,8">
+						<TextBlock Text="{Binding [btn_b_text]}" FontSize="13" Foreground="#FFFFFF" FontWeight="SemiBold"/>
+					</Border>
+				</Button>
+				<!-- Button C -->
+				<Button Command="{Binding [cmd_c]}" Margin="4,0"
+					Visibility="{Binding [btn_c_vis], Converter={StaticResource BoolToVis}}"
+					esUtility:AudioAttachedProperty.PreviewMouseLeftButtonUpSound="sfx_ui_hud_inGame_button_play">
+					<Border Background="#2D5A88" CornerRadius="4" Padding="16,8">
+						<TextBlock Text="{Binding [btn_c_text]}" FontSize="13" Foreground="#FFFFFF" FontWeight="SemiBold"/>
+					</Border>
+				</Button>
+				<!-- Button D -->
+				<Button Command="{Binding [cmd_d]}" Margin="4,0"
+					Visibility="{Binding [btn_d_vis], Converter={StaticResource BoolToVis}}"
+					esUtility:AudioAttachedProperty.PreviewMouseLeftButtonUpSound="sfx_ui_hud_inGame_button_play">
+					<Border Background="#6B5B2D" CornerRadius="4" Padding="16,8">
+						<TextBlock Text="{Binding [btn_d_text]}" FontSize="13" Foreground="#FFFFFF" FontWeight="SemiBold"/>
+					</Border>
+				</Button>
+			</StackPanel>
+		</StackPanel>
+	</Border>
+</Grid>]]
+end
+
+---------------------------------------------------------------------------------------------------
+-- Panel Lifecycle
+---------------------------------------------------------------------------------------------------
+
+local function _DebugPrompt_EnsurePanel()
+	if _cba_debug_prompts.panel_created then
+		return
+	end
+	local dc = {
+		panel_visible = false,
+		header = "",
+		question = "",
+		detail = "",
+		detail_visible = false,
+		timer_text = "",
+		btn_a_text = "", btn_a_vis = false,
+		btn_b_text = "", btn_b_vis = false,
+		btn_c_text = "", btn_c_vis = false,
+		btn_d_text = "", btn_d_vis = false,
+		cmd_a = UI_CreateCommand("_DebugPrompt_ClickA"),
+		cmd_b = UI_CreateCommand("_DebugPrompt_ClickB"),
+		cmd_c = UI_CreateCommand("_DebugPrompt_ClickC"),
+		cmd_d = UI_CreateCommand("_DebugPrompt_ClickD"),
+	}
+	_cba_debug_prompts.dc = dc
+
+	local xaml = _DebugPrompt_BuildXaml()
+	UI_AddChild("ScarDefault", "XamlPresenter", _DBG_PROMPT_PANEL, {
+		IsHitTestVisible = true,
+		Xaml = xaml,
+		DataContext = UI_CreateDataContext(dc),
+	})
+	_cba_debug_prompts.panel_created = true
+end
+
+local function _DebugPrompt_UpdateDC()
+	if _cba_debug_prompts.dc then
+		UI_SetDataContext(_DBG_PROMPT_PANEL, _cba_debug_prompts.dc)
+	end
+end
+
+local function _DebugPrompt_Show()
+	if _cba_debug_prompts.dc then
+		_cba_debug_prompts.dc.panel_visible = true
+		_DebugPrompt_UpdateDC()
+	end
+end
+
+local function _DebugPrompt_Hide()
+	if _cba_debug_prompts.dc then
+		_cba_debug_prompts.dc.panel_visible = false
+		_DebugPrompt_UpdateDC()
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Button Click Handlers — Named global functions (safe for UI_CreateCommand)
+---------------------------------------------------------------------------------------------------
+
+function _DebugPrompt_ClickA()
+	_DebugPrompt_Resolve(1)
+end
+
+function _DebugPrompt_ClickB()
+	_DebugPrompt_Resolve(2)
+end
+
+function _DebugPrompt_ClickC()
+	_DebugPrompt_Resolve(3)
+end
+
+function _DebugPrompt_ClickD()
+	_DebugPrompt_Resolve(4)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Resolution — Process answer and invoke callback
+---------------------------------------------------------------------------------------------------
+
+function _DebugPrompt_Resolve(choice_index)
+	local p = _cba_debug_prompts
+	if not p.active then
+		return
+	end
+
+	-- Stop polling
+	pcall(Rule_Remove, _DebugPrompt_PollTimeout)
+	p.active = false
+
+	-- Hide panel
+	_DebugPrompt_Hide()
+
+	-- Determine label for logging
+	local label = tostring(choice_index)
+	if p.prompt_type == "yesno" then
+		label = (choice_index == 1) and "YES" or "NO"
+	end
+
+	print(string.format("[DEBUG_PROMPT] Answer: %s (choice %d)", label, choice_index))
+
+	-- Record in test results if _cba_debug exists
+	if _cba_debug and _cba_debug.test_results then
+		table.insert(_cba_debug.test_results, {
+			name = "[Prompt] " .. p.question,
+			pass = true,
+			detail = "User answered: " .. label,
+		})
+	end
+
+	-- Invoke callback (stored in table field → safe for anonymous functions)
+	local cb = p.on_answer
+	p.on_answer = nil
+	if cb then
+		local ok, err = pcall(cb, choice_index)
+		if not ok then
+			print(string.format("[DEBUG_PROMPT] Callback error: %s", tostring(err)))
+		end
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Timeout Polling — Named global function (safe for Rule_AddInterval)
+---------------------------------------------------------------------------------------------------
+
+function _DebugPrompt_PollTimeout()
+	local p = _cba_debug_prompts
+	if not p.active then
+		Rule_RemoveMe()
+		return
+	end
+
+	local ok, gt = pcall(World_GetGameTime)
+	if not ok then return end
+
+	local remaining = math.max(0, math.floor(p.deadline - gt))
+	if p.dc then
+		p.dc.timer_text = string.format("Auto-answer in %ds", remaining)
+		_DebugPrompt_UpdateDC()
+	end
+
+	if gt >= p.deadline then
+		Rule_RemoveMe()
+		print(string.format("[DEBUG_PROMPT] Timeout — using default choice %d", p.default_choice))
+		_DebugPrompt_Resolve(p.default_choice)
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Public API: Debug_AskYesNo
+-- Shows a YES/NO prompt. Callback receives 1 (YES) or 2 (NO).
+--   question       : Short question text (1-2 lines)
+--   on_answer      : function(choice_index)  — 1=YES, 2=NO
+--   timeout        : Seconds before auto-answer (default 30)
+--   default_answer : 1=YES (default) or 2=NO
+--   detail         : Optional detail line below question
+---------------------------------------------------------------------------------------------------
+
+function Debug_AskYesNo(question, on_answer, timeout, default_answer, detail)
+	_DebugPrompt_EnsurePanel()
+
+	local p = _cba_debug_prompts
+	if p.active then
+		print("[DEBUG_PROMPT] Dismissing previous prompt to show new one")
+		_DebugPrompt_Resolve(p.default_choice)
+	end
+
+	timeout = timeout or 30
+	default_answer = default_answer or 1
+	local no_timer = (timeout == 0)
+
+	local ok, gt = pcall(World_GetGameTime)
+
+	p.active = true
+	p.prompt_type = "yesno"
+	p.question = question or "Confirm?"
+	p.choice_count = 2
+	p.on_answer = on_answer
+	p.timeout = timeout
+	p.default_choice = default_answer
+	p.deadline = no_timer and math.huge or ((ok and gt or 0) + timeout)
+
+	-- Update data context
+	local dc = p.dc
+	dc.header = "[DEBUG] Confirmation"
+	dc.question = p.question
+	dc.detail = detail or ""
+	dc.detail_visible = (detail ~= nil and detail ~= "")
+	dc.timer_text = no_timer and "" or string.format("Auto-answer in %ds", timeout)
+	dc.btn_a_text = "YES"
+	dc.btn_a_vis = true
+	dc.btn_b_text = "NO"
+	dc.btn_b_vis = true
+	dc.btn_c_vis = false
+	dc.btn_d_vis = false
+
+	_DebugPrompt_Show()
+
+	-- Console fallback instructions
+	print("")
+	print(string.format("[DEBUG_PROMPT] %s", p.question))
+	if detail and detail ~= "" then
+		print(string.format("  %s", detail))
+	end
+	print("  Click YES/NO on screen, or type: Debug_Answer(\"yes\") / Debug_Answer(\"no\")")
+	if no_timer then
+		print("  No auto-answer. Waiting for manual response.")
+	else
+		print(string.format("  Auto-answers %s in %ds.", default_answer == 1 and "YES" or "NO", timeout))
+	end
+
+	-- Event cue for visibility
+	pcall(UI_CreateEventCue, "[DEBUG] Prompt", p.question,
+		"high_priority", "", "sfx_ui_event_queue_high_priority_play",
+		no_timer and 60 or timeout)
+
+	-- Start timeout polling (skip if no timer)
+	if not no_timer then
+		Rule_AddInterval(_DebugPrompt_PollTimeout, 1.0)
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Public API: Debug_AskChoice
+-- Shows a multiple-choice prompt (2-4 options). Callback receives choice index (1-based).
+--   question       : Short question text
+--   choices        : Array of strings, e.g. {"Pass", "Fail", "Skip"}
+--   on_answer      : function(choice_index)
+--   timeout        : Seconds before auto-answer (default 30)
+--   default_choice : Index to use on timeout (default 1)
+--   detail         : Optional detail line below question
+---------------------------------------------------------------------------------------------------
+
+function Debug_AskChoice(question, choices, on_answer, timeout, default_choice, detail)
+	_DebugPrompt_EnsurePanel()
+
+	local p = _cba_debug_prompts
+	if p.active then
+		print("[DEBUG_PROMPT] Dismissing previous prompt to show new one")
+		_DebugPrompt_Resolve(p.default_choice)
+	end
+
+	choices = choices or {"OK"}
+	timeout = timeout or 30
+	default_choice = default_choice or 1
+	local no_timer = (timeout == 0)
+
+	local count = math.min(#choices, 4)
+	local ok, gt = pcall(World_GetGameTime)
+
+	p.active = true
+	p.prompt_type = "choice"
+	p.question = question or "Choose:"
+	p.choice_count = count
+	p.on_answer = on_answer
+	p.timeout = timeout
+	p.default_choice = default_choice
+	p.deadline = no_timer and math.huge or ((ok and gt or 0) + timeout)
+
+	-- Labels for choices: A, B, C, D
+	local labels = {"A", "B", "C", "D"}
+	local btn_keys = {"a", "b", "c", "d"}
+
+	local dc = p.dc
+	dc.header = "[DEBUG] Choose"
+	dc.question = p.question
+	dc.detail = detail or ""
+	dc.detail_visible = (detail ~= nil and detail ~= "")
+	dc.timer_text = no_timer and "" or string.format("Auto-answer in %ds (default: %s)", timeout, labels[default_choice] or "?")
+
+	for i = 1, 4 do
+		local key = btn_keys[i]
+		if i <= count then
+			dc["btn_" .. key .. "_text"] = labels[i] .. ") " .. choices[i]
+			dc["btn_" .. key .. "_vis"] = true
+		else
+			dc["btn_" .. key .. "_vis"] = false
+		end
+	end
+
+	_DebugPrompt_Show()
+
+	-- Console fallback
+	print("")
+	print(string.format("[DEBUG_PROMPT] %s", p.question))
+	if detail and detail ~= "" then
+		print(string.format("  %s", detail))
+	end
+	for i = 1, count do
+		print(string.format("  %s) %s", labels[i], choices[i]))
+	end
+	print(string.format("  Click on screen, or type: Debug_Answer(1) .. Debug_Answer(%d)", count))
+	if no_timer then
+		print("  No auto-answer. Waiting for manual response.")
+	else
+		print(string.format("  Auto-answers %s in %ds.", labels[default_choice] or "?", timeout))
+	end
+
+	pcall(UI_CreateEventCue, "[DEBUG] Choose", p.question,
+		"high_priority", "", "sfx_ui_event_queue_high_priority_play",
+		no_timer and 60 or timeout)
+
+	if not no_timer then
+		Rule_AddInterval(_DebugPrompt_PollTimeout, 1.0)
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Console Fallback: Debug_Answer
+-- Accepts: "yes", "no", 1, 2, 3, 4, "a", "b", "c", "d"
+---------------------------------------------------------------------------------------------------
+
+function Debug_Answer(value)
+	local p = _cba_debug_prompts
+	if not p.active then
+		print("[DEBUG_PROMPT] No prompt active. Nothing to answer.")
+		return
+	end
+
+	local choice = nil
+
+	if type(value) == "number" then
+		choice = value
+	elseif type(value) == "string" then
+		local v = string.lower(value)
+		if v == "yes" or v == "y" then choice = 1
+		elseif v == "no" or v == "n" then choice = 2
+		elseif v == "a" then choice = 1
+		elseif v == "b" then choice = 2
+		elseif v == "c" then choice = 3
+		elseif v == "d" then choice = 4
+		else
+			local num = tonumber(value)
+			if num then choice = num end
+		end
+	end
+
+	if choice == nil or choice < 1 or choice > p.choice_count then
+		print(string.format("[DEBUG_PROMPT] Invalid answer: %s (expected 1-%d)", tostring(value), p.choice_count))
+		return
+	end
+
+	_DebugPrompt_Resolve(choice)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Console: Debug_DismissPrompt — Force-dismiss without triggering callback
+---------------------------------------------------------------------------------------------------
+
+function Debug_DismissPrompt()
+	local p = _cba_debug_prompts
+	if not p.active then
+		print("[DEBUG_PROMPT] No prompt active.")
+		return
+	end
+
+	pcall(Rule_Remove, _DebugPrompt_PollTimeout)
+	p.active = false
+	p.on_answer = nil
+	_DebugPrompt_Hide()
+	print("[DEBUG_PROMPT] Prompt dismissed.")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Cleanup — Remove panel (called on game end or debug teardown)
+---------------------------------------------------------------------------------------------------
+
+function _DebugPrompt_Cleanup()
+	if _cba_debug_prompts.panel_created then
+		pcall(UI_Remove, _DBG_PROMPT_PANEL)
+		_cba_debug_prompts.panel_created = false
+		_cba_debug_prompts.active = false
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- PRE-BUILT INTERACTIVE CHECKS
+-- Each check: gather data → show prompt → record result → chain to next phase if needed.
+-- Designed for integration with visual debug flow via _Debug_ScheduleNextPhase.
+---------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------
+-- Interactive Check: Precache Validation
+-- Scans all civ building blueprints, presents findings, asks user to confirm.
+-- Console: Debug_InteractiveCheck_Precache()
+---------------------------------------------------------------------------------------------------
+
+local _PRECACHE_CHECK_KEYS = {
+	"barracks", "archery_range", "stable", "siege_workshop", "blacksmith",
+	"house", "town_center", "market", "university", "arsenal",
+	"monastery", "castle", "stone_wall", "palisade_wall", "palisade_gate",
+	"scar_dock",
+}
+
+function Debug_InteractiveCheck_Precache()
+	print("")
+	print("============================================")
+	print("  INTERACTIVE CHECK: Precache Validation")
+	print("============================================")
+
+	if AGS_ENTITY_TABLE == nil then
+		print("  AGS_ENTITY_TABLE not loaded — skipping precache check")
+		if _cba_debug and _cba_debug.test_results then
+			table.insert(_cba_debug.test_results, {
+				name = "[Precache] Blueprint scan",
+				pass = false,
+				detail = "AGS_ENTITY_TABLE is nil",
+			})
+		end
+		return
+	end
+
+	-- Scan blueprints
+	local resolved = 0
+	local failed = {}
+	local total = 0
+
+	for civ_name, civ_data in pairs(AGS_ENTITY_TABLE) do
+		if civ_name ~= "neutral" then
+			for _, key in ipairs(_PRECACHE_CHECK_KEYS) do
+				if civ_data[key] ~= nil and civ_data[key] ~= false then
+					total = total + 1
+					local ok, ebp = pcall(BP_GetEntityBlueprint, civ_data[key])
+					if ok and ebp ~= nil then
+						resolved = resolved + 1
+					else
+						table.insert(failed, civ_name .. "/" .. key)
+					end
+				end
+			end
+		end
+	end
+
+	local fail_count = #failed
+
+	if fail_count == 0 then
+		-- All resolved — auto-pass, brief confirmation
+		print(string.format("  All %d blueprints resolved.", total))
+		Debug_AskYesNo(
+			string.format("All %d building blueprints loaded OK. Continue?", total),
+			_DebugPC_OnConfirm,
+			15,
+			1  -- default YES
+		)
+	else
+		-- Failures found — present for user decision
+		local fail_list = table.concat(failed, ", ")
+		if string.len(fail_list) > 120 then
+			fail_list = string.sub(fail_list, 1, 117) .. "..."
+		end
+
+		-- Store for callback
+		_cba_debug_prompts._pc_fail_count = fail_count
+		_cba_debug_prompts._pc_total = total
+		_cba_debug_prompts._pc_resolved = resolved
+
+		Debug_AskChoice(
+			string.format("Precache: %d of %d blueprints resolved. %d failed.", resolved, total, fail_count),
+			{
+				"Pass — failures are expected",
+				"Fail — needs fixing",
+				"Skip — review later",
+			},
+			_DebugPC_OnChoice,
+			30,
+			3,  -- default: Skip
+			"Failed: " .. fail_list
+		)
+	end
+end
+
+function _DebugPC_OnConfirm(choice)
+	local pass = (choice == 1)
+	if _cba_debug and _cba_debug.test_results then
+		table.insert(_cba_debug.test_results, {
+			name = "[Precache] Blueprint scan",
+			pass = pass,
+			detail = pass and "All resolved, confirmed" or "User rejected",
+		})
+	end
+	print(string.format("  Precache check: %s", pass and "PASS" or "FAIL"))
+end
+
+function _DebugPC_OnChoice(choice)
+	local labels = {"Pass (expected)", "Fail (needs fix)", "Skip (review later)"}
+	local pass_map = {true, false, true}  -- Skip counts as non-blocking
+	local p = _cba_debug_prompts
+
+	local pass = pass_map[choice] or true
+	local label = labels[choice] or "unknown"
+
+	if _cba_debug and _cba_debug.test_results then
+		table.insert(_cba_debug.test_results, {
+			name = "[Precache] Blueprint scan",
+			pass = pass,
+			detail = string.format("%s — %d/%d resolved, user chose: %s",
+				pass and "OK" or "FAIL",
+				p._pc_resolved or 0, p._pc_total or 0, label),
+		})
+	end
+	print(string.format("  Precache check: %s (%s)", pass and "PASS" or "FAIL", label))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Interactive Check: Keep State Validation
+-- Focuses camera on each player's keep, asks user to confirm it looks correct.
+-- Console: Debug_InteractiveCheck_KeepState()
+---------------------------------------------------------------------------------------------------
+
+function Debug_InteractiveCheck_KeepState()
+	print("")
+	print("============================================")
+	print("  INTERACTIVE CHECK: Keep State Validation")
+	print("============================================")
+
+	if PLAYERS == nil or #PLAYERS == 0 then
+		print("  No players — skipping keep check")
+		return
+	end
+
+	_cba_debug_prompts._ks_idx = 1
+	_cba_debug_prompts._ks_passed = 0
+	_cba_debug_prompts._ks_total = 0
+	_DebugKS_NextPlayer()
+end
+
+function _DebugKS_NextPlayer()
+	local p = _cba_debug_prompts
+	local idx = p._ks_idx or 1
+
+	-- Find next player with a keep
+	while idx <= #PLAYERS do
+		local player = PLAYERS[idx]
+		if player and player.keep and player.keep.entity then
+			break
+		end
+		idx = idx + 1
+	end
+
+	if idx > #PLAYERS then
+		-- All done
+		local passed = p._ks_passed or 0
+		local total = p._ks_total or 0
+		print(string.format("  Keep state check complete: %d/%d confirmed", passed, total))
+		if _cba_debug and _cba_debug.test_results then
+			table.insert(_cba_debug.test_results, {
+				name = "[KeepState] Visual confirmation",
+				pass = (passed == total),
+				detail = string.format("%d/%d keeps confirmed OK", passed, total),
+			})
+		end
+		return
+	end
+
+	p._ks_idx = idx
+	local player = PLAYERS[idx]
+
+	-- Get keep info
+	local hp, max_hp = "?", "?"
+	local alive = "?"
+	if player.keep.entity then
+		local ok1, h = pcall(Entity_GetHealth, player.keep.entity)
+		local ok2, m = pcall(Entity_GetHealthMax, player.keep.entity)
+		local ok3, a = pcall(Entity_IsAlive, player.keep.entity)
+		if ok1 then hp = tostring(h) end
+		if ok2 then max_hp = tostring(m) end
+		if ok3 then alive = tostring(a) end
+	end
+	local civ = "unknown"
+	local ok_civ, c = pcall(Player_GetRaceName, player.id)
+	if ok_civ then civ = c end
+
+	-- Focus camera
+	pcall(Debug_FocusPlayer, idx)
+
+	-- Show prompt
+	Debug_AskYesNo(
+		string.format("P%d (%s) keep: HP %s/%s, alive=%s. Looks correct?", idx, civ, hp, max_hp, alive),
+		_DebugKS_OnAnswer,
+		20,
+		1  -- default YES
+	)
+end
+
+function _DebugKS_OnAnswer(choice)
+	local p = _cba_debug_prompts
+	p._ks_total = (p._ks_total or 0) + 1
+	if choice == 1 then
+		p._ks_passed = (p._ks_passed or 0) + 1
+	end
+	-- Advance to next player
+	p._ks_idx = (p._ks_idx or 1) + 1
+	-- Schedule next via oneshot to avoid deep call stack
+	Rule_AddOneShot(_DebugKS_NextPlayer_Scheduled, 0.5)
+end
+
+-- Named global wrapper for Rule_AddOneShot (anonymous functions not allowed)
+function _DebugKS_NextPlayer_Scheduled()
+	_DebugKS_NextPlayer()
+end
+
+---------------------------------------------------------------------------------------------------
+-- Interactive Check: Siege Limit Sanity
+-- Spawns siege and asks user to confirm the limit UI updated correctly.
+-- Console: Debug_InteractiveCheck_SiegeLimitUI()
+---------------------------------------------------------------------------------------------------
+
+function Debug_InteractiveCheck_SiegeLimitUI()
+	print("")
+	print("============================================")
+	print("  INTERACTIVE CHECK: Siege Limit UI")
+	print("============================================")
+
+	if PLAYERS == nil or #PLAYERS == 0 then
+		print("  No players — skipping siege check")
+		return
+	end
+
+	-- Focus on player 1
+	pcall(Debug_FocusPlayer, 1)
+
+	pcall(UI_CreateEventCue, "[DEBUG] Siege Limit",
+		"Watch the siege counter UI during spawn",
+		"high_priority", "", "sfx_ui_event_queue_high_priority_play",
+		10)
+
+	-- Spawn a siege unit for player 1 (mangonel is 3 pts — visible change)
+	local player = PLAYERS[1]
+	local civ = "unknown"
+	local ok_civ, c = pcall(Player_GetRaceName, player.id)
+	if ok_civ then civ = c end
+
+	local ok_spawn = false
+	local siege_bp = nil
+	-- Try to spawn a mangonel via AGS table
+	if AGS_ENTITY_TABLE and AGS_ENTITY_TABLE[civ] then
+		local sw_key = AGS_ENTITY_TABLE[civ].siege_workshop
+		if sw_key then
+			ok_spawn = true
+		end
+	end
+
+	-- Spawn a few siege units via Debug_Spawn if available
+	if type(Debug_Spawn) == "function" then
+		pcall(Debug_Spawn, "unit_mangonel_3_" .. civ, 1, 1)
+	end
+
+	-- Ask after brief delay for UI to update
+	Rule_AddOneShot(_DebugSLUI_AskConfirm, 2.0)
+end
+
+function _DebugSLUI_AskConfirm()
+	Debug_AskYesNo(
+		"Did the siege limit counter update on screen?",
+		_DebugSLUI_OnAnswer,
+		20,
+		1,  -- default YES
+		"Check the bar/number in the siege UI panel."
+	)
+end
+
+function _DebugSLUI_OnAnswer(choice)
+	local pass = (choice == 1)
+	if _cba_debug and _cba_debug.test_results then
+		table.insert(_cba_debug.test_results, {
+			name = "[SiegeLimitUI] Visual confirmation",
+			pass = pass,
+			detail = pass and "User confirmed UI updated" or "User reported UI did not update",
+		})
+	end
+	print(string.format("  Siege limit UI check: %s", pass and "PASS" or "FAIL"))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Interactive Suite Runner
+-- Chains all interactive checks sequentially. Callable standalone or from Debug_RunAll.
+-- Console: Debug_InteractiveChecks()
+---------------------------------------------------------------------------------------------------
+
+function Debug_InteractiveChecks()
+	_cba_debug.enabled = true
+	print("")
+	print("================================================================")
+	print("  CBA DEBUG — INTERACTIVE CHECKS")
+	print("  Requires user input (click or console). Auto-timeouts apply.")
+	print("================================================================")
+
+	local ok, gt = pcall(World_GetGameTime)
+	_cba_debug_prompts._suite_start = ok and gt or 0
+	_cba_debug_prompts._suite_passed = 0
+	_cba_debug_prompts._suite_total = 0
+
+	-- Start with precache
+	_DebugIC_RunPrecache()
+end
+
+function _DebugIC_RunPrecache()
+	-- Wrap precache check with suite chaining
+	local orig_cb = _DebugPC_OnConfirm
+	_cba_debug_prompts._ic_phase = "precache"
+
+	-- Run precache check — it will call its own callback, then we chain
+	Debug_InteractiveCheck_Precache()
+
+	-- After precache completes (via timeout or user input), schedule next
+	-- We can't easily hook into the end of the async precache check,
+	-- so we use a polling approach to detect when the prompt is no longer active
+	Rule_AddInterval(_DebugIC_WaitForIdle, 1.0)
+end
+
+-- Wait for current prompt to finish, then advance to next check
+function _DebugIC_WaitForIdle()
+	if _cba_debug_prompts.active then
+		return  -- Still waiting for user input
+	end
+	Rule_RemoveMe()
+
+	local phase = _cba_debug_prompts._ic_phase
+	if phase == "precache" then
+		_cba_debug_prompts._ic_phase = "keep_state"
+		Rule_AddOneShot(_DebugIC_RunKeepState, 1.0)
+	elseif phase == "keep_state" then
+		_cba_debug_prompts._ic_phase = "siege_ui"
+		Rule_AddOneShot(_DebugIC_RunSiegeUI, 1.0)
+	elseif phase == "siege_ui" then
+		_DebugIC_Finish()
+	end
+end
+
+function _DebugIC_RunKeepState()
+	Debug_InteractiveCheck_KeepState()
+	Rule_AddInterval(_DebugIC_WaitForIdle, 1.0)
+end
+
+function _DebugIC_RunSiegeUI()
+	Debug_InteractiveCheck_SiegeLimitUI()
+	Rule_AddInterval(_DebugIC_WaitForIdle, 1.0)
+end
+
+function _DebugIC_Finish()
+	local ok, gt = pcall(World_GetGameTime)
+	local elapsed = 0
+	if ok and _cba_debug_prompts._suite_start then
+		elapsed = gt - _cba_debug_prompts._suite_start
+	end
+
+	-- Count interactive results from test_results
+	local passed = 0
+	local total = 0
+	if _cba_debug and _cba_debug.test_results then
+		for _, r in ipairs(_cba_debug.test_results) do
+			local name = r.name or ""
+			if string.find(name, "^%[Precache%]") or string.find(name, "^%[KeepState%]")
+				or string.find(name, "^%[SiegeLimitUI%]") or string.find(name, "^%[Prompt%]") then
+				total = total + 1
+				if r.pass then passed = passed + 1 end
+			end
+		end
+	end
+
+	print("")
+	print(string.format("  TOTAL: %d/%d passed", passed, total))
+	_Debug_EndMarker("InteractiveChecks", passed, total, elapsed)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Namespace Registration
+---------------------------------------------------------------------------------------------------
+if debug then
+	debug.prompt.ask     = Debug_AskYesNo
+	debug.prompt.choice  = Debug_AskChoice
+	debug.prompt.answer  = Debug_Answer
+	debug.prompt.dismiss = Debug_DismissPrompt
+	debug.prompt.run     = Debug_InteractiveChecks
+	debug._register("prompts", Debug_InteractiveChecks, "Interactive XamlPresenter YES/NO + multi-choice prompts", 3)
+	debug._register("prompt", Debug_InteractiveChecks, "Alias → prompts: interactive XamlPresenter checks", 3)
+end

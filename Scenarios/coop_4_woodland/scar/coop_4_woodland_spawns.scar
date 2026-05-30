@@ -1,0 +1,772 @@
+-------------------------------------------
+-- Phase 1 
+-------------------------------------------
+
+-- Spawns Town Center for Players
+function Spawn_TC()
+	
+	for _, player in pairs(PLAYERS) do
+		local player_civ = Player_GetRaceName(player.id)
+		
+		-- Spawn Town Center & Lumber camp (lumber skipped for civs with no lumber camp, e.g. Mongols)
+		local ebp_lumber = AGS_GetCivilizationEntity(player_civ, AGS_BP_LUMBER)
+		if player.id == player1 then
+			Util_CreateEntities(player1, eg_player1_tc, AGS_GetCivilizationEntity(player_civ, AGS_BP_CAPITAL),mkr_tc_player1, 1, false, true, false, false)
+			if ebp_lumber then Util_CreateEntities(player1, eg_player1_tc, ebp_lumber, mkr_wood_player1, 1, false, true, false, false) end
+		elseif player.id == player2 then
+			Util_CreateEntities(player2, eg_player2_tc, AGS_GetCivilizationEntity(player_civ, AGS_BP_CAPITAL),mkr_tc_player2, 1, false, true, false, false)
+			if ebp_lumber then Util_CreateEntities(player2, eg_player2_tc, ebp_lumber, mkr_wood_player2, 1, false, true, false, false) end
+		elseif player.id == player3 then
+			Util_CreateEntities(player3, eg_player3_tc, AGS_GetCivilizationEntity(player_civ, AGS_BP_CAPITAL),mkr_tc_player3, 1, false, true, false, false)
+			if ebp_lumber then Util_CreateEntities(player3, eg_player3_tc, ebp_lumber, mkr_wood_player3, 1, false, true, false, false) end
+		elseif player.id == player4 then
+			Util_CreateEntities(player4, eg_player4_tc, AGS_GetCivilizationEntity(player_civ, AGS_BP_CAPITAL),mkr_tc_player4, 1, false, true, false, false)
+			if ebp_lumber then Util_CreateEntities(player4, eg_player4_tc, ebp_lumber, mkr_wood_player4, 1, false, true, false, false) end
+		end
+		
+		-- Merge Groups
+		EGroup_AddEGroup(eg_player_tc, eg_player1_tc)
+		EGroup_AddEGroup(eg_player_tc, eg_player2_tc)
+		EGroup_AddEGroup(eg_player_tc, eg_player3_tc)
+		EGroup_AddEGroup(eg_player_tc, eg_player4_tc)
+		
+		-- Set targeting
+		EGroup_SetTargetingType(eg_player_tc, Targeting_None)
+		EGroup_SetSelectable(eg_player_tc, false)
+		EGroup_SetInvulnerable(eg_player_tc, true)
+		-- Keep TCs player-owned so scout carcass dropoff always has a valid owner target.
+		EGroup_SetPlayerOwner(eg_player1_tc, player1)
+		EGroup_SetPlayerOwner(eg_player2_tc, player2)
+		EGroup_SetPlayerOwner(eg_player3_tc, player3)
+		EGroup_SetPlayerOwner(eg_player4_tc, player4)
+		-- Hide TC production during the pre-objective lock phase.
+		Player_SetEntityProductionAvailability(player.id, AGS_GetCivilizationEntity(player_civ, AGS_BP_CAPITAL), ITEM_REMOVED)
+		-- Disable TC sight while the objective-gated lock is active.
+		_ApplyTC_VisionSuppression(player.id, 0)
+		
+	end
+end
+
+-- Setup allied starter units / Reinforcements
+function Start_Setup_Players()
+	
+	local player1_civ = Player_GetRaceName(player1)
+	local player2_civ = Player_GetRaceName(player2)
+	local player3_civ = Player_GetRaceName(player3)
+	local player4_civ = Player_GetRaceName(player4)
+	
+	-- Spawn Player 1 / Select faction
+	if player1_civ == "malian" then
+		UnitEntry_DeploySquads(player1, sg_player1_start, Unit_Types.start_player_melee_mal, mkr_spawn_1)
+	elseif player1_civ == "abbasid" or player1_civ == "abbasid_ha_01" then
+		UnitEntry_DeploySquads(player1, sg_player1_start, Unit_Types.start_player_melee_abb, mkr_spawn_1)
+	elseif player1_civ == "rus" or player1_civ == "french" or player1_civ == "french_ha_01" then -- Calvary
+		UnitEntry_DeploySquads(player1, sg_player1_start, Unit_Types.start_player_melee_cav, mkr_spawn_1)
+	elseif player1_civ == "english" or player1_civ == "hre" or player1_civ == "hre_ha_01" or player1_civ == "japanese" then -- Infantry
+		UnitEntry_DeploySquads(player1, sg_player1_start, Unit_Types.start_player_melee_inf, mkr_spawn_1)
+	else
+		UnitEntry_DeploySquads(player1, sg_player1_start, Unit_Types.start_player_melee, mkr_spawn_1) -- Default
+	end -- Add Army group
+	if player1_civ == "mongol" then
+		UnitEntry_DeploySquads(player1, sg_player1_start, {type = "scar_khan", numSquads = 1, spawn = mkr_spawn_1})
+	elseif player1_civ == "english" then
+		UnitEntry_DeploySquads(player1, sg_player1_start, {sbp =  SBP.ENGLISH.UNIT_ABBEY_KING_2, numSquads = 1, spawn = mkr_spawn_1})
+	elseif player1_civ == "french_ha_01" then
+		UnitEntry_DeploySquads(player1, sg_player1_start, {sbp =  SBP.FRENCH_HA_01.UNIT_JEANNE_D_ARC_2_WOMANATARMS_FRE_HA_01, numSquads = 1, spawn = mkr_spawn_1})
+	else
+		UnitEntry_DeploySquads(player1, sg_player1_start, {type = "scar_monk", numSquads = 3, spawn = mkr_spawn_1})
+	end -- Add Unique unit
+	
+	-- Spawn Player 2 / Select faction
+	if player2_civ == "malian" then
+		UnitEntry_DeploySquads(player2, sg_player2_start, Unit_Types.start_player_ranged_mal, mkr_spawn_2)
+	elseif player2_civ == "chinese" or player2_civ == "chinese_ha_01" or player2_civ == "jin_dynasty" then
+		UnitEntry_DeploySquads(player2, sg_player2_start, Unit_Types.start_player_ranged_chi, mkr_spawn_2)
+	elseif player2_civ == "abbasid" or player2_civ == "abbasid_ha_01" then
+		UnitEntry_DeploySquads(player2, sg_player2_start, Unit_Types.start_player_ranged_abb, mkr_spawn_2)
+	elseif player2_civ == "mongol" then
+		UnitEntry_DeploySquads(player2, sg_player2_start, Unit_Types.start_player_ranged_mon, mkr_spawn_2)
+	elseif player2_civ == "rus" then
+		UnitEntry_DeploySquads(player2, sg_player2_start, Unit_Types.start_player_ranged_rus, mkr_spawn_2)
+	else
+		UnitEntry_DeploySquads(player2, sg_player2_start, Unit_Types.start_player_ranged, mkr_spawn_2) -- Default
+	end
+	if player2_civ == "mongol" then
+		UnitEntry_DeploySquads(player2, sg_player2_start, {type = "scar_khan", numSquads = 1, spawn = mkr_spawn_2})
+	elseif player2_civ == "english" then
+		UnitEntry_DeploySquads(player2, sg_player2_start, {sbp =  SBP.ENGLISH.UNIT_ABBEY_KING_2, numSquads = 1, spawn = mkr_spawn_2})
+	elseif player2_civ == "french_ha_01" then
+		UnitEntry_DeploySquads(player2, sg_player2_start, {sbp =  SBP.FRENCH_HA_01.UNIT_JEANNE_D_ARC_2_ARCHER_FRE_HA_01, numSquads = 1, spawn = mkr_spawn_2})
+	else
+		UnitEntry_DeploySquads(player2, sg_player2_start, {type = "scar_monk", numSquads = 3, spawn = mkr_spawn_2})
+	end -- Unique
+	
+	-- Spawn Player 3 / Select faction
+	if player3_civ == "malian" then
+		UnitEntry_DeploySquads(player3, sg_player3_start, Unit_Types.start_player_melee_mal, mkr_spawn_3)
+	elseif player3_civ == "abbasid" or player3_civ == "abbasid_ha_01" then
+		UnitEntry_DeploySquads(player3, sg_player3_start, Unit_Types.start_player_melee_abb, mkr_spawn_3)
+	elseif player3_civ == "rus" or player3_civ == "french" or player3_civ == "french_ha_01" then -- Calvary
+		UnitEntry_DeploySquads(player3, sg_player3_start, Unit_Types.start_player_melee_cav, mkr_spawn_3)
+	elseif player3_civ == "english" or player3_civ == "hre" or player3_civ == "hre_ha_01" or player3_civ == "japanese" then -- Infantry
+		UnitEntry_DeploySquads(player3, sg_player3_start, Unit_Types.start_player_melee_inf, mkr_spawn_3)
+	else
+		UnitEntry_DeploySquads(player3, sg_player3_start, Unit_Types.start_player_melee, mkr_spawn_3) -- Default
+	end
+	if player3_civ == "mongol" then
+		UnitEntry_DeploySquads(player3, sg_player3_start, {type = "scar_khan", numSquads = 1, spawn = mkr_spawn_3})
+	elseif player3_civ == "english" then
+		UnitEntry_DeploySquads(player3, sg_player3_start, {sbp =  SBP.ENGLISH.UNIT_ABBEY_KING_2, numSquads = 1, spawn = mkr_spawn_3})
+	elseif player3_civ == "french_ha_01" then
+		UnitEntry_DeploySquads(player3, sg_player3_start, {sbp =  SBP.FRENCH_HA_01.UNIT_JEANNE_D_ARC_2_WOMANATARMS_FRE_HA_01, numSquads = 1, spawn = mkr_spawn_3})
+	else
+		UnitEntry_DeploySquads(player3, sg_player3_start, {type = "scar_monk", numSquads = 3, spawn = mkr_spawn_3})
+	end -- Unique
+	
+	-- Spawn Player 4 / Select faction
+	if player4_civ == "malian" then
+		UnitEntry_DeploySquads(player4, sg_player4_start, Unit_Types.start_player_ranged_mal, mkr_spawn_4)
+	elseif player4_civ == "chinese" or player4_civ == "chinese_ha_01" or player4_civ == "jin_dynasty" then
+		UnitEntry_DeploySquads(player4, sg_player4_start, Unit_Types.start_player_ranged_chi, mkr_spawn_4)
+	elseif player4_civ == "abbasid" or player4_civ == "abbasid_ha_01" then
+		UnitEntry_DeploySquads(player4, sg_player4_start, Unit_Types.start_player_ranged_abb, mkr_spawn_4)
+	elseif player4_civ == "mongol" then
+		UnitEntry_DeploySquads(player4, sg_player4_start, Unit_Types.start_player_ranged_mon, mkr_spawn_4)
+	elseif player4_civ == "rus" then
+		UnitEntry_DeploySquads(player4, sg_player4_start, Unit_Types.start_player_ranged_rus, mkr_spawn_4)
+	else
+		UnitEntry_DeploySquads(player4, sg_player4_start, Unit_Types.start_player_ranged, mkr_spawn_4) -- Default
+	end
+	if player4_civ == "mongol" then
+		UnitEntry_DeploySquads(player4, sg_villagers_food, {type = "scar_khan", numSquads = 1, spawn = mkr_spawn_4})
+	elseif player4_civ == "english" then
+		UnitEntry_DeploySquads(player4, sg_player4_start, {sbp =  SBP.ENGLISH.UNIT_ABBEY_KING_2, numSquads = 1, spawn = mkr_spawn_4})
+	elseif player4_civ == "french_ha_01" then
+		UnitEntry_DeploySquads(player4, sg_player4_start, {sbp =  SBP.FRENCH_HA_01.UNIT_JEANNE_D_ARC_2_ARCHER_FRE_HA_01, numSquads = 1, spawn = mkr_spawn_4})
+	else
+		UnitEntry_DeploySquads(player4, sg_player4_start, {type = "scar_monk", numSquads = 3, spawn = mkr_spawn_4})
+	end -- Unique
+	
+	-- Setup Reinforcements_Player counts
+	count_start_player1 = SGroup_Count(sg_player1_start) 
+	count_start_player2 = SGroup_Count(sg_player2_start) 
+	count_start_player3 = SGroup_Count(sg_player3_start) 
+	count_start_player4 = SGroup_Count(sg_player4_start) 
+	-- Setup Reinforcements_Player rules 
+	if DC.player_reinforcements then
+		Rule_Add(Reinforcements_Player1)
+		Rule_Add(Reinforcements_Player2)
+		Rule_Add(Reinforcements_Player3)
+		Rule_Add(Reinforcements_Player4)
+	end
+
+
+
+end
+-- Setup enemey starting units / Patrols
+function Start_Setup_Enemies()
+	
+	----------------------------------
+	-- Objective: Capture gold camp
+	----------------------------------
+	if DC.camp_strength == "hard" then
+		UnitEntry_DeploySquads(player5, sg_gold_guards_1, Unit_Types.units_camp_hard, mkr_spawn_gold_camp_1)
+		UnitEntry_DeploySquads(player5, sg_gold_guards_2, Unit_Types.units_camp_hard, mkr_spawn_gold_camp_2)
+	else
+		UnitEntry_DeploySquads(player5, sg_gold_guards_1, Unit_Types.units_camp, mkr_spawn_gold_camp_1)
+		UnitEntry_DeploySquads(player5, sg_gold_guards_2, Unit_Types.units_camp, mkr_spawn_gold_camp_2)
+	end
+	
+	Cmd_FormationMove(sg_gold_guards_1, mkr_spawn_gold_camp_1, false, false, mkr_spawn_1)
+	Cmd_FormationMove(sg_gold_guards_2, mkr_spawn_gold_camp_2, false, false, mkr_spawn_3)
+	
+	----------------------------------
+	-- Objective: Bridge / Checkpoint
+	----------------------------------
+	if DC.checkpoint_strength == "easy" then
+		-- Spawn & Position units / Side 1
+		UnitEntry_DeploySquads(player5, sg_checkpoint_units_1, Unit_Types.units_camp, mkr_side1_position1)
+		Cmd_FormationMove(sg_checkpoint_units_1, mkr_side1_position1, false, false, mkr_spawn_1)
+		UnitEntry_DeploySquads(player5, sg_checkpoint_units_2, Unit_Types.units_camp_hard, mkr_side1_position2)
+		Cmd_FormationMove(sg_checkpoint_units_2, mkr_side1_position2, false, false, mkr_side1_position1)
+		-- Spawn & Position units / Side 2
+		UnitEntry_DeploySquads(player5, sg_checkpoint_units_3, Unit_Types.units_camp, mkr_side2_position1)
+		Cmd_FormationMove(sg_checkpoint_units_3, mkr_side2_position1, false, false, mkr_spawn_3)
+		UnitEntry_DeploySquads(player5, sg_checkpoint_units_4, Unit_Types.units_camp_hard, mkr_side2_position2)
+		Cmd_FormationMove(sg_checkpoint_units_4, mkr_side2_position2, false, false, mkr_side2_position1)
+	else
+		-- Spawn & Position units / Side 1
+		UnitEntry_DeploySquads(player5, sg_checkpoint_units_1, Unit_Types.units_bridge_hard, mkr_side1_position1)
+		Cmd_FormationMove(sg_checkpoint_units_1, mkr_side1_position1, false, false, mkr_spawn_1)
+		UnitEntry_DeploySquads(player5, sg_checkpoint_units_2, Unit_Types.units_bridge_hard, mkr_side1_position2)
+		Cmd_FormationMove(sg_checkpoint_units_2, mkr_side1_position2, false, false, mkr_side1_position1)
+		-- Spawn & Position units / Side 2
+		UnitEntry_DeploySquads(player5, sg_checkpoint_units_3, Unit_Types.units_bridge_hard, mkr_side2_position1)
+		Cmd_FormationMove(sg_checkpoint_units_3, mkr_side2_position1, false, false, mkr_spawn_3)
+		UnitEntry_DeploySquads(player5, sg_checkpoint_units_4, Unit_Types.units_bridge_hard, mkr_side2_position2)
+		Cmd_FormationMove(sg_checkpoint_units_4, mkr_side2_position2, false, false, mkr_side2_position1)
+	end
+	-- Group units / Side 1
+	SGroup_AddGroup(sg_checkpoint_group_1, sg_checkpoint_units_1)
+	SGroup_AddGroup(sg_checkpoint_group_1, sg_checkpoint_units_2)
+	-- Group units / Side 2
+	SGroup_AddGroup(sg_checkpoint_group_2, sg_checkpoint_units_3)
+	SGroup_AddGroup(sg_checkpoint_group_2, sg_checkpoint_units_4)
+	
+	-- Merge both groups to main
+	SGroup_AddGroup(sg_checkpoint_group_all, sg_checkpoint_group_1)
+	SGroup_AddGroup(sg_checkpoint_group_all, sg_checkpoint_group_2)
+	-- Get group counts
+	count_checkpoint_side1 = SGroup_Count(sg_checkpoint_group_1)
+	count_checkpoint_side2 = SGroup_Count(sg_checkpoint_group_2)
+	
+	----------------------------------
+	-- Objective: Patrols / Village
+	----------------------------------
+	if DC.patrol_strength == "hard" then
+		-- Spawn patrol #1 / Village
+		UnitEntry_DeploySquads(player5, sg_middle_patrol_1, Unit_Types.units_patrol_hard, mkr_patrol_mid_1)
+		Cmd_FormationAttackMove(sg_middle_patrol_1, mkr_patrol_mid_6)
+		Rule_AddInterval(Patrol_Cycle, 120, { sgroup = sg_middle_patrol_1, path = patrol_mid_1 })
+		-- Spawn patrol #2 / Village
+		UnitEntry_DeploySquads(player5, sg_middle_patrol_2, Unit_Types.units_patrol_hard, mkr_patrol_mid_6)
+		Cmd_FormationAttackMove(sg_middle_patrol_2, mkr_patrol_mid_1)
+		Rule_AddInterval(Patrol_Cycle, 240, { sgroup = sg_middle_patrol_2, path = patrol_mid_2 })
+		-- Spawn patrol #3 / City > Village
+		UnitEntry_DeploySquads(player5, sg_middle_patrol_3, Unit_Types.units_patrol_hard, mkr_patrol_mid_8)
+		Rule_AddInterval(Patrol_Cycle, 240, { sgroup = sg_middle_patrol_3, path = patrol_mid_3 })
+		-- Spawn patrol #4 / City > Village
+		UnitEntry_DeploySquads(player5, sg_middle_patrol_4, Unit_Types.units_patrol_hard, mkr_patrol_mid_7)
+		Rule_AddInterval(Patrol_Cycle, 240, { sgroup = sg_middle_patrol_4, path = patrol_mid_4 })
+		
+	else
+		-- Spawn patrol #1 / Village
+		UnitEntry_DeploySquads(player5, sg_middle_patrol_1, Unit_Types.units_patrol, mkr_patrol_mid_1)
+		Cmd_FormationAttackMove(sg_middle_patrol_1, mkr_patrol_mid_6)
+		Rule_AddInterval(Patrol_Cycle, 120, { sgroup = sg_middle_patrol_1, path = patrol_mid_1 })
+		-- Spawn patrol #2 / Village
+		UnitEntry_DeploySquads(player5, sg_middle_patrol_2, Unit_Types.units_patrol, mkr_patrol_mid_6)
+		Cmd_FormationAttackMove(sg_middle_patrol_2, mkr_patrol_mid_1)
+		Rule_AddInterval(Patrol_Cycle, 240, { sgroup = sg_middle_patrol_2, path = patrol_mid_2 })
+		-- Spawn patrol #3 / City > Village
+		UnitEntry_DeploySquads(player5, sg_middle_patrol_3, Unit_Types.units_patrol, mkr_patrol_mid_8)
+		Rule_AddInterval(Patrol_Cycle, 240, { sgroup = sg_middle_patrol_3, path = patrol_mid_3 })
+		-- Spawn patrol #4 / City > Village
+		UnitEntry_DeploySquads(player5, sg_middle_patrol_4, Unit_Types.units_patrol, mkr_patrol_mid_7)
+		Rule_AddInterval(Patrol_Cycle, 240, { sgroup = sg_middle_patrol_4, path = patrol_mid_4 })
+	end
+	
+	
+end
+
+-- Reinforcements / Side 1
+function Reinforcements_Player1()
+	local player_civ = Player_GetRaceName(player1)
+	
+	if SGroup_Count(sg_player1_start) < 0.3 * count_start_player1 then
+		if DC.reinforcement_pre_capture then
+			
+			if player_civ == "malian" then
+				UnitEntry_DeploySquads(player1, sg_player1_reinforcements, Unit_Types.units_player_melee_reinforce_mal, mkr_spawn_1)
+			elseif player_civ == "rus" or player_civ == "french" or player_civ == "french_ha_01" then -- Calvary
+				UnitEntry_DeploySquads(player1, sg_player1_reinforcements, Unit_Types.units_player_melee_reinforce_cav, mkr_spawn_1)
+			elseif player_civ == "english" or player_civ == "hre" or player_civ == "hre_ha_01" then -- Infantry
+				UnitEntry_DeploySquads(player1, sg_player1_reinforcements, Unit_Types.units_player_melee_reinforce_inf, mkr_spawn_1)
+			else
+				UnitEntry_DeploySquads(player1, sg_player1_reinforcements, Unit_Types.units_player_melee_reinforce, mkr_spawn_1)
+			end
+			SendReinforceNotification(mkr_spawn_1, "$11176787") -- Reinforcements have arrived!
+			Rule_RemoveMe()
+		end
+
+	elseif SGroup_Count(sg_checkpoint_group_1) < 0.1 * count_checkpoint_side1 then -- Captured
+		
+		if player_civ == "malian" then
+			UnitEntry_DeploySquads(player1, sg_player1_reinforcements, Unit_Types.units_player_melee_reinforce_mal, mkr_spawn_1)
+		elseif player_civ == "rus" or player_civ == "french" or player_civ == "french_ha_01" then -- Calvary
+			UnitEntry_DeploySquads(player1, sg_player1_reinforcements, Unit_Types.units_player_melee_reinforce_cav, mkr_spawn_1)
+		elseif player_civ == "english" or player_civ == "hre" or player_civ == "hre_ha_01" then -- Infantry
+			UnitEntry_DeploySquads(player1, sg_player1_reinforcements, Unit_Types.units_player_melee_reinforce_inf, mkr_spawn_1)
+		else
+			UnitEntry_DeploySquads(player1, sg_player1_reinforcements, Unit_Types.units_player_melee_reinforce, mkr_spawn_1)
+		end
+		Rule_RemoveMe()
+	end
+	
+end -- Melee
+
+function Reinforcements_Player2()
+	local player_civ = Player_GetRaceName(player2)
+	
+	if SGroup_Count(sg_player2_start) < 0.3 * count_start_player2 then
+		if DC.reinforcement_pre_capture then
+			if player_civ == "malian" then
+				UnitEntry_DeploySquads(player2, sg_player2_reinforcements, Unit_Types.units_player_ranged_reinforce_mal, mkr_spawn_2)
+			elseif player_civ == "chinese" or player_civ == "chinese_ha_01" or player_civ == "jin_dynasty" then
+				UnitEntry_DeploySquads(player2, sg_player2_reinforcements, Unit_Types.units_player_ranged_reinforce_chi, mkr_spawn_2)
+			elseif player_civ == "abbasid" or player_civ == "abbasid_ha_01" then
+				UnitEntry_DeploySquads(player2, sg_player2_reinforcements, Unit_Types.units_player_ranged_reinforce_abb, mkr_spawn_2)
+			elseif player_civ == "rus" or player_civ == "mongol" then
+				UnitEntry_DeploySquads(player2, sg_player2_reinforcements, Unit_Types.units_player_ranged_reinforce_cav, mkr_spawn_2)
+			else
+				UnitEntry_DeploySquads(player2, sg_player2_reinforcements, Unit_Types.units_player_ranged_reinforce, mkr_spawn_2)
+			end
+		
+		
+			SendReinforceNotification(mkr_spawn_2, "$11176787") -- Reinforcements have arrived!
+			Rule_RemoveMe()
+
+		end
+	elseif SGroup_Count(sg_checkpoint_group_1) < 0.1 * count_checkpoint_side1 then -- Switch spawn location (Mining Camp)
+		if player_civ == "malian" then
+			UnitEntry_DeploySquads(player2, sg_player2_reinforcements, Unit_Types.units_player_ranged_reinforce_mal, mkr_spawn_2)
+		elseif player_civ == "chinese" or player_civ == "chinese_ha_01" or player_civ == "jin_dynasty" then
+			UnitEntry_DeploySquads(player2, sg_player2_reinforcements, Unit_Types.units_player_ranged_reinforce_chi, mkr_spawn_2)
+		elseif player_civ == "abbasid" or player_civ == "abbasid_ha_01" then
+			UnitEntry_DeploySquads(player2, sg_player2_reinforcements, Unit_Types.units_player_ranged_reinforce_abb, mkr_spawn_2)
+		elseif player_civ == "rus" or player_civ == "mongol" then
+			UnitEntry_DeploySquads(player2, sg_player2_reinforcements, Unit_Types.units_player_ranged_reinforce_cav, mkr_spawn_2)
+		else
+			UnitEntry_DeploySquads(player2, sg_player2_reinforcements, Unit_Types.units_player_ranged_reinforce, mkr_spawn_2)
+		end
+
+		Rule_RemoveMe()
+	end
+end -- Ranged
+-- Reinforcements / Side 2
+function Reinforcements_Player3()
+	local player_civ = Player_GetRaceName(player3)
+	
+	if SGroup_Count(sg_player3_start) < 0.3 * count_start_player3 then
+		if DC.reinforcement_pre_capture then
+			
+			if player_civ == "malian" then
+				UnitEntry_DeploySquads(player3, sg_player3_reinforcements, Unit_Types.units_player_melee_reinforce_mal, mkr_spawn_3)
+			elseif player_civ == "rus" or player_civ == "french" or player_civ == "french_ha_01" then -- Calvary
+				UnitEntry_DeploySquads(player3, sg_player3_reinforcements, Unit_Types.units_player_melee_reinforce_cav, mkr_spawn_3)
+			elseif player_civ == "english" or player_civ == "hre" or player_civ == "hre_ha_01" then -- Infantry
+				UnitEntry_DeploySquads(player3, sg_player3_reinforcements, Unit_Types.units_player_melee_reinforce_inf, mkr_spawn_3)
+			else
+				UnitEntry_DeploySquads(player3, sg_player3_reinforcements, Unit_Types.units_player_melee_reinforce, mkr_spawn_3)
+			end
+			SendReinforceNotification(mkr_spawn_3, "$11176787") -- Reinforcements have arrived!
+			Rule_RemoveMe()
+		end
+
+	elseif SGroup_Count(sg_checkpoint_group_2) < 0.1 * count_checkpoint_side2 then -- Switch spawn location (Mining Camp)
+		
+		if player_civ == "malian" then
+			UnitEntry_DeploySquads(player3, sg_player3_reinforcements, Unit_Types.units_player_melee_reinforce_mal, mkr_spawn_3)
+		elseif player_civ == "rus" or player_civ == "french" or player_civ == "french_ha_01" then -- Calvary
+			UnitEntry_DeploySquads(player3, sg_player3_reinforcements, Unit_Types.units_player_melee_reinforce_cav, mkr_spawn_3)
+		elseif player_civ == "english" or player_civ == "hre" or player_civ == "hre_ha_01" then -- Infantry
+			UnitEntry_DeploySquads(player3, sg_player3_reinforcements, Unit_Types.units_player_melee_reinforce_inf, mkr_spawn_3)
+		else
+			UnitEntry_DeploySquads(player3, sg_player3_reinforcements, Unit_Types.units_player_melee_reinforce, mkr_spawn_3)
+		end
+		Rule_RemoveMe()
+	end
+	
+end -- Melee
+
+function Reinforcements_Player4()
+	local player_civ = Player_GetRaceName(player4)
+	
+	if SGroup_Count(sg_player4_start) < 0.3 * count_start_player4 then
+		if DC.reinforcement_pre_capture then
+			if player_civ == "malian" then
+				UnitEntry_DeploySquads(player4, sg_player4_reinforcements, Unit_Types.units_player_ranged_reinforce_mal, mkr_spawn_4)
+			elseif player_civ == "chinese" or player_civ == "chinese_ha_01" or player_civ == "jin_dynasty" then
+				UnitEntry_DeploySquads(player4, sg_player4_reinforcements, Unit_Types.units_player_ranged_reinforce_chi, mkr_spawn_4)
+			elseif player_civ == "abbasid" or player_civ == "abbasid_ha_01" then
+				UnitEntry_DeploySquads(player4, sg_player4_reinforcements, Unit_Types.units_player_ranged_reinforce_abb, mkr_spawn_4)
+			elseif player_civ == "rus" or player_civ == "mongol" then
+				UnitEntry_DeploySquads(player4, sg_player4_reinforcements, Unit_Types.units_player_ranged_reinforce_cav, mkr_spawn_4)
+			else
+				UnitEntry_DeploySquads(player4, sg_player4_reinforcements, Unit_Types.units_player_ranged_reinforce, mkr_spawn_4)
+			end
+		
+		
+			SendReinforceNotification(mkr_spawn_4, "$11176787") -- Reinforcements have arrived!
+			Rule_RemoveMe()
+
+		end
+	elseif SGroup_Count(sg_checkpoint_group_2) < 0.1 * count_checkpoint_side2 then -- Switch spawn location (Mining Camp)
+		if player_civ == "malian" then
+			UnitEntry_DeploySquads(player4, sg_player4_reinforcements, Unit_Types.units_player_ranged_reinforce_mal, mkr_spawn_4)
+		elseif player_civ == "chinese" or player_civ == "chinese_ha_01" or player_civ == "jin_dynasty" then
+			UnitEntry_DeploySquads(player4, sg_player4_reinforcements, Unit_Types.units_player_ranged_reinforce_chi, mkr_spawn_4)
+		elseif player_civ == "abbasid" or player_civ == "abbasid_ha_01" then
+			UnitEntry_DeploySquads(player4, sg_player4_reinforcements, Unit_Types.units_player_ranged_reinforce_abb, mkr_spawn_4)
+		elseif player_civ == "rus" or player_civ == "mongol" then
+			UnitEntry_DeploySquads(player4, sg_player4_reinforcements, Unit_Types.units_player_ranged_reinforce_cav, mkr_spawn_4)
+		else
+			UnitEntry_DeploySquads(player4, sg_player4_reinforcements, Unit_Types.units_player_ranged_reinforce, mkr_spawn_4)
+		end
+
+		Rule_RemoveMe()
+	end
+end -- Ranged
+
+-------------------------------------------
+-- Phase 2  
+-------------------------------------------
+
+-- Begin building up main counter offensive
+function Main_Waves()
+	-- SIDE #1
+	
+	-- 05 min
+	Rule_AddInterval(Units_Deploy, 300, { player = player5, sgroup = sg_waves_main_1_01a, unit_type = Unit_Types.wave_city_5m, spawn_loc = mkr_wave1_1a, path = wave_1a })
+	if DC.waves_5min_flank then
+	Rule_AddInterval(Units_Deploy, 300, { player = player5, sgroup = sg_waves_main_1_01b, unit_type = Unit_Types.wave_city_5m, spawn_loc = mkr_wave1_1b, path = wave_1b })
+	end
+	-- 10 min
+	Rule_AddInterval(Units_Deploy, 610, { player = player5, sgroup = sg_waves_main_1_01c, unit_type = Unit_Types.wave_city_10m, spawn_loc = mkr_wave1_1a, path = wave_1a })
+	Rule_AddInterval(Units_Deploy, 600, { player = player5, sgroup = sg_waves_main_1_01d, unit_type = Unit_Types.wave_city_10m_flank, spawn_loc = mkr_wave1_1b, path = wave_1b })
+	-- ~15 min
+	Rule_AddInterval(Units_Deploy, 930, { player = player5, sgroup = sg_waves_main_1_02, unit_type = Unit_Types.wave_city_15m, spawn_loc = mkr_wave1_1a, path = wave_1a })
+	-- ~20 min
+	Rule_AddInterval(Units_Deploy, 1100, { player = player5, sgroup = sg_waves_main_1_03, unit_type = Unit_Types.wave_city_20m, spawn_loc = mkr_wave1_1b, path = wave_1b })
+	if DC.waves_late_25_30 then
+		-- 25 min
+		Rule_AddInterval(Units_Deploy, 1500, { player = player5, sgroup = sg_waves_main_1_04, unit_type = Unit_Types.wave_city_25m, spawn_loc = mkr_wave1_1a, path = wave_1a })
+		-- 30 min
+		Rule_AddInterval(Units_Deploy, 1800, { player = player5, sgroup = sg_waves_main_1_05, unit_type = Unit_Types.wave_city_30m, spawn_loc = mkr_wave1_1a, path = wave_1a })
+	end
+	if DC.waves_hard_40_45 then 
+	-- 40 min
+	Rule_AddInterval(Units_Deploy, 2400, { player = player5, sgroup = sg_waves_main_1_06, unit_type = Unit_Types.wave_city_40m, spawn_loc = mkr_wave1_1a, path = wave_1a })
+	-- 45 min
+	Rule_AddInterval(Units_Deploy, 2700, { player = player5, sgroup = sg_waves_main_1_07, unit_type = Unit_Types.wave_city_45m, spawn_loc = mkr_wave1_1b, path = wave_1b })
+	end
+	if DC.waves_hardest_extra then
+		-- ~20 min
+		Rule_AddInterval(Units_Deploy, 1200, { player = player5, sgroup = sg_waves_main_1_08, unit_type = Unit_Types.wave_city_20m, spawn_loc = mkr_wave1_1b, path = wave_1b })
+		-- 35 min
+		Rule_AddInterval(Units_Deploy, 2100, { player = player5, sgroup = sg_waves_main_1_09, unit_type = Unit_Types.wave_city_45m, spawn_loc = mkr_wave1_1b, path = wave_1b })
+		-- ~45 min
+		Rule_AddInterval(Units_Deploy, 2900, { player = player5, sgroup = sg_waves_main_1_10, unit_type = Unit_Types.wave_city_45m, spawn_loc = mkr_wave1_1a, path = wave_1a })
+	end
+	
+	
+	-- SIDE #2 
+	
+	-- 05 min
+	Rule_AddInterval(Units_Deploy, 300, { player = player5, sgroup = sg_waves_main_2_01a, unit_type = Unit_Types.wave_city_10m, spawn_loc = mkr_wave2_1, path = wave_2a })
+	if DC.waves_5min_flank then
+	Rule_AddInterval(Units_Deploy, 310, { player = player5, sgroup = sg_waves_main_2_01b, unit_type = Unit_Types.wave_city_10m, spawn_loc = mkr_wave2_1, path = wave_2b })
+	end
+	-- 10 min
+	Rule_AddInterval(Units_Deploy, 610, { player = player5, sgroup = sg_waves_main_2_01c, unit_type = Unit_Types.wave_city_10m, spawn_loc = mkr_wave2_1, path = wave_2a })
+	Rule_AddInterval(Units_Deploy, 600, { player = player5, sgroup = sg_waves_main_2_01d, unit_type = Unit_Types.wave_city_10m_flank, spawn_loc = mkr_wave2_1, path = wave_2b })
+	-- ~15 min
+	Rule_AddInterval(Units_Deploy, 930, { player = player5, sgroup = sg_waves_main_2_02, unit_type = Unit_Types.wave_city_15m, spawn_loc = mkr_wave2_1, path = wave_2a })
+	-- ~20 min
+	Rule_AddInterval(Units_Deploy, 1100, { player = player5, sgroup = sg_waves_main_2_03, unit_type = Unit_Types.wave_city_20m, spawn_loc = mkr_wave2_1, path = wave_2b })
+	if DC.waves_late_25_30 then
+		-- 25 min
+		Rule_AddInterval(Units_Deploy, 1500, { player = player5, sgroup = sg_waves_main_2_04, unit_type = Unit_Types.wave_city_25m, spawn_loc = mkr_wave2_1, path = wave_2a })
+		-- 30 min
+		Rule_AddInterval(Units_Deploy, 1800, { player = player5, sgroup = sg_waves_main_2_05, unit_type = Unit_Types.wave_city_30m, spawn_loc = mkr_wave2_1, path = wave_2a })
+	end
+	if DC.waves_hard_40_45 then
+	-- 40 min
+	Rule_AddInterval(Units_Deploy, 2400, { player = player5, sgroup = sg_waves_main_2_06, unit_type = Unit_Types.wave_city_40m, spawn_loc = mkr_wave2_1, path = wave_2a })
+	-- 45 min
+	Rule_AddInterval(Units_Deploy, 2700, { player = player5, sgroup = sg_waves_main_2_07, unit_type = Unit_Types.wave_city_45m, spawn_loc = mkr_wave2_1, path = wave_2b })
+	end
+	if DC.waves_hardest_extra then
+		-- ~20 min
+		Rule_AddInterval(Units_Deploy, 1200, { player = player5, sgroup = sg_waves_main_2_08, unit_type = Unit_Types.wave_city_20m, spawn_loc = mkr_wave2_1, path = wave_2b })
+		-- 35 min
+		Rule_AddInterval(Units_Deploy, 2100, { player = player5, sgroup = sg_waves_main_2_09, unit_type = Unit_Types.wave_city_45m, spawn_loc = mkr_wave2_1, path = wave_2b })
+		-- ~45 min
+		Rule_AddInterval(Units_Deploy, 2900, { player = player5, sgroup = sg_waves_main_2_10, unit_type = Unit_Types.wave_city_45m, spawn_loc = mkr_wave2_1, path = wave_2a })
+	end
+	
+	-- Hardest AI waves
+	Rule_AddOneShot(Hard_Waves, 1800)
+	
+	
+end
+
+--[[ Setup Player villager Reinforcements / City defences / Patrols
+function Setup_Spawns()
+	
+	local player1_civ = Player_GetRaceName(player1)
+	local player2_civ = Player_GetRaceName(player2)
+	local player3_civ = Player_GetRaceName(player3)
+	local player4_civ = Player_GetRaceName(player4)
+	local event_cue_reinforcements = Loc_FormatText("$ae948c95a8c5425d8de28e0c193e0be9:53")  -- "Reinforcements have arrived!"
+	
+	------------
+	-- SIDE 1 --
+	------------
+	
+	-- Spawn Player 1 reinforcements / Villagers, melee
+	if SGroup_Count(sg_player1_villagers) <= 5 and Player_GetStateModelFloat(player1, "has_capital") == 0 then
+		if player1_civ == "malian" then 
+			UnitEntry_DeploySquads(player1, sg_player1_villagers, Unit_Types.units_player_melee_mal, mkr_spawn_1)
+			-- Expansion
+		elseif player1_civ == "french_ha_01" then
+			UnitEntry_DeploySquads(player1, sg_player1_villagers, Unit_Types.units_player_melee_reinforce_cav, mkr_spawn_1)
+			UnitEntry_DeploySquads(player1, sg_player1_villagers, { sbp = SBP.FRENCH_HA_01.UNIT_VILLAGER_1_FRE_HA_01, numSquads = 10}, mkr_spawn_1)
+		else
+			UnitEntry_DeploySquads(player1, sg_player1_villagers, Unit_Types.units_player_melee, mkr_spawn_1)
+		end -- Select faction group
+		
+		-- Notification / mini-map
+		UI_CreateMinimapBlip(mkr_spawn_1, 30, "general")
+		group_spawned = true
+	end
+	
+	-- Spawn Player 2 reinforcements / Villagers, ranged
+	if SGroup_Count(sg_player2_villagers) <= 5 and Player_GetStateModelFloat(player2, "has_capital") == 0 then
+		if player2_civ == "malian" then
+			UnitEntry_DeploySquads(player2, sg_player2_villagers, Unit_Types.units_player_ranged_mal, mkr_spawn_2)
+		elseif player2_civ == "chinese" then
+			UnitEntry_DeploySquads(player2, sg_player2_villagers, Unit_Types.units_player_ranged_chi, mkr_spawn_2)
+			-- Expansion
+		elseif player2_civ == "french_ha_01" then
+			UnitEntry_DeploySquads(player2, sg_player2_villagers, Unit_Types.units_player_melee_reinforce_cav, mkr_spawn_2)
+			UnitEntry_DeploySquads(player2, sg_player2_villagers, { sbp = SBP.FRENCH_HA_01.UNIT_VILLAGER_1_FRE_HA_01, numSquads = 10}, mkr_spawn_2)
+		else
+			UnitEntry_DeploySquads(player2, sg_player2_villagers, Unit_Types.units_player_ranged, mkr_spawn_2)
+		end -- Select faction group
+		
+		-- Notification / mini-map
+		UI_CreateMinimapBlip(mkr_spawn_2, 30, "general")
+		group_spawned = true
+	end
+	
+	------------
+	-- SIDE 2 --
+	------------
+	
+	-- Spawn Player 3 reinforcements / Villagers, melee
+	if SGroup_Count(sg_player3_villagers) <= 5 and Player_GetStateModelFloat(player3, "has_capital") == 0 then
+		if player3_civ == "malian" then 
+			UnitEntry_DeploySquads(player3, sg_player3_villagers, Unit_Types.units_player_melee_mal, mkr_spawn_3)
+			-- Expansion
+		elseif player3_civ == "french_ha_01" then
+			UnitEntry_DeploySquads(player3, sg_player3_villagers, Unit_Types.units_player_melee_reinforce_cav, mkr_spawn_3)
+			UnitEntry_DeploySquads(player3, sg_player3_villagers, { sbp = SBP.FRENCH_HA_01.UNIT_VILLAGER_1_FRE_HA_01, numSquads = 10}, mkr_spawn_3)
+		else
+			UnitEntry_DeploySquads(player3, sg_player3_villagers, Unit_Types.units_player_melee, mkr_spawn_3)
+		end -- Select faction group
+		
+		-- Notification
+		UI_CreateMinimapBlip(mkr_spawn_3, 30, "general")
+		group_spawned = true
+	end
+	
+	-- Notification: Reinforcements have arrived! 
+	if group_spawned == true then
+		local event_cue_villagers
+		UI_CreateEventCueClickable(-1, 30, -1, 0, event_cue_reinforcements, "", "low_priority", "", "sfx_ui_event_queue_campaign_high_priority", 255, 255, 255, 255, ECV_Queue, nothing)
+		group_spawned = false
+	end
+	
+	-- Enemey
+	
+	-- Side 1
+	UnitEntry_DeploySquads(player5, sg_city_walls_1a, Unit_Types.units_ranged_final, mkr_patrol_mid_8) -- #1
+	Cmd_FormationMove(sg_city_walls_1a, mkr_defender_a_1, false, false, mkr_patrol_mid_2)
+	UnitEntry_DeploySquads(player5, sg_city_walls_2a, Unit_Types.units_cityguards_final, mkr_patrol_mid_8) -- #2
+	Cmd_FormationMove(sg_city_walls_2a, mkr_defender_a_2, false, false, mkr_patrol_mid_2)
+	UnitEntry_DeploySquads(player5, sg_city_walls_3a, Unit_Types.units_ranged, mkr_patrol_mid_8) -- #3
+	Cmd_FormationMove(sg_city_walls_3a, mkr_defender_a_3, false, false, mkr_patrol_mid_2)
+	UnitEntry_DeploySquads(player5, sg_city_walls_4a, Unit_Types.units_ranged, mkr_patrol_mid_8) -- #4
+	Cmd_FormationMove(sg_city_walls_4a, mkr_defender_a_4, false, false, mkr_patrol_mid_2)
+	-- Side 2
+	UnitEntry_DeploySquads(player5, sg_city_walls_1b, Unit_Types.units_ranged_final, mkr_patrol_mid_8) -- #1
+	Cmd_FormationMove(sg_city_walls_1b, mkr_defender_b_1, false, false, mkr_defender_b_4)
+	UnitEntry_DeploySquads(player5, sg_city_walls_2b, Unit_Types.units_ranged, mkr_patrol_mid_8) -- #2
+	Cmd_FormationMove(sg_city_walls_2b, mkr_defender_b_2, false, false, mkr_defender_b_4)
+	UnitEntry_DeploySquads(player5, sg_city_walls_3b, Unit_Types.units_ranged, mkr_patrol_mid_8) -- #3
+	Cmd_FormationMove(sg_city_walls_3b, mkr_defender_b_3, false, false, mkr_defender_b_4)
+	UnitEntry_DeploySquads(player5, sg_city_walls_4b, Unit_Types.units_cityguards_final, mkr_patrol_mid_8) -- #4
+	Cmd_FormationMove(sg_city_walls_4b, mkr_defender_b_4, false, false, mkr_patrol_mid_6)
+	
+end
+
+]]
+
+function Setup_Spawns()
+	
+	local player1_civ = Player_GetRaceName(player1)
+	local player2_civ = Player_GetRaceName(player2)
+	local player3_civ = Player_GetRaceName(player3)
+	local player4_civ = Player_GetRaceName(player4)
+	local event_cue_reinforcements = Loc_FormatText("$ae948c95a8c5425d8de28e0c193e0be9:53")  -- "Reinforcements have arrived!"
+	
+	------------
+	-- SIDE 1 --
+	------------
+	
+	-- Spawn Player 1 reinforcements / Villagers, melee
+	if SGroup_Count(sg_player1_villagers) <= 5 then
+		if player1_civ == "malian" then 
+			UnitEntry_DeploySquads(player1, sg_player1_villagers, Unit_Types.units_player_melee_mal, mkr_spawn_1)
+			-- Expansion
+		elseif player1_civ == "french_ha_01" then
+			UnitEntry_DeploySquads(player1, sg_player1_villagers, Unit_Types.units_player_melee_reinforce_cav, mkr_spawn_1)
+			UnitEntry_DeploySquads(player1, sg_player1_villagers, { sbp = SBP.FRENCH_HA_01.UNIT_VILLAGER_1_FRE_HA_01, numSquads = 10}, mkr_tc_player1)
+		else
+			UnitEntry_DeploySquads(player1, sg_player1_villagers, Unit_Types.units_player_melee, mkr_tc_player1)
+		end -- Select faction group
+		
+		-- Notification / mini-map
+		UI_CreateMinimapBlip(mkr_tc_player1, 30, "general")
+		group_spawned = true
+	end
+	
+	-- Spawn Player 2 reinforcements / Villagers, ranged
+	if SGroup_Count(sg_player2_villagers) <= 5 then
+		if player2_civ == "malian" then
+			UnitEntry_DeploySquads(player2, sg_player2_villagers, Unit_Types.units_player_ranged_mal, mkr_tc_player2)
+		elseif player2_civ == "chinese" then
+			UnitEntry_DeploySquads(player2, sg_player2_villagers, Unit_Types.units_player_ranged_chi, mkr_tc_player2)
+			-- Expansion
+		elseif player2_civ == "french_ha_01" then
+			UnitEntry_DeploySquads(player2, sg_player2_villagers, Unit_Types.units_player_melee_reinforce_cav, mkr_tc_player2)
+			UnitEntry_DeploySquads(player2, sg_player2_villagers, { sbp = SBP.FRENCH_HA_01.UNIT_VILLAGER_1_FRE_HA_01, numSquads = 10}, mkr_tc_player2)
+		else
+			UnitEntry_DeploySquads(player2, sg_player2_villagers, Unit_Types.units_player_ranged, mkr_tc_player2)
+		end -- Select faction group
+		
+		-- Notification / mini-map
+		UI_CreateMinimapBlip(mkr_tc_player2, 30, "general")
+		group_spawned = true
+	end
+	
+	------------
+	-- SIDE 2 --
+	------------
+	
+	-- Spawn Player 3 reinforcements / Villagers, melee
+	if SGroup_Count(sg_player3_villagers) <= 5 then
+		if player3_civ == "malian" then 
+			UnitEntry_DeploySquads(player3, sg_player3_villagers, Unit_Types.units_player_melee_mal, mkr_tc_player3)
+			-- Expansion
+		elseif player3_civ == "french_ha_01" then
+			UnitEntry_DeploySquads(player3, sg_player3_villagers, Unit_Types.units_player_melee_reinforce_cav, mkr_tc_player3)
+			UnitEntry_DeploySquads(player3, sg_player3_villagers, { sbp = SBP.FRENCH_HA_01.UNIT_VILLAGER_1_FRE_HA_01, numSquads = 10}, mkr_tc_player3)
+		else
+			UnitEntry_DeploySquads(player3, sg_player3_villagers, Unit_Types.units_player_melee, mkr_tc_player3)
+		end -- Select faction group
+		
+		-- Notification
+		UI_CreateMinimapBlip(mkr_tc_player3, 30, "general")
+		group_spawned = true
+	end
+	
+	-- Spawn Player 4 reinforcements / Villagers, ranged
+	if SGroup_Count(sg_player4_villagers) <= 5 then
+		if player4_civ == "malian" then
+			UnitEntry_DeploySquads(player4, sg_player4_villagers, Unit_Types.units_player_ranged_mal, mkr_tc_player4)
+		elseif player4_civ == "chinese" then
+			UnitEntry_DeploySquads(player4, sg_player4_villagers, Unit_Types.units_player_ranged_chi, mkr_tc_player4)
+			-- Expansion
+		elseif player4_civ == "french_ha_01" then
+			UnitEntry_DeploySquads(player4, sg_player4_villagers, Unit_Types.units_player_melee_reinforce_cav, mkr_tc_player4)
+			UnitEntry_DeploySquads(player4, sg_player4_villagers, { sbp = SBP.FRENCH_HA_01.UNIT_VILLAGER_1_FRE_HA_01, numSquads = 10}, mkr_tc_player4)
+		else
+			UnitEntry_DeploySquads(player4, sg_player4_villagers, Unit_Types.units_player_ranged, mkr_tc_player4)
+		end -- Select faction group
+		
+		-- Notification
+		UI_CreateMinimapBlip(mkr_tc_player4, 30, "general")
+		
+		-- Move units
+		--Cmd_FormationMove(sg_player4_villagers, mkr_village_spawn_pos, false, false, mkr_village_spawn_pos)
+		
+		group_spawned = true
+	end
+	
+	-- Notification: Reinforcements have arrived! 
+	if group_spawned == true then
+		local event_cue_villagers
+		UI_CreateEventCueClickable(-1, 30, -1, 0, event_cue_reinforcements, "", "low_priority", "", "sfx_ui_event_queue_campaign_high_priority", 255, 255, 255, 255, ECV_Queue, nothing)
+		group_spawned = false
+	end
+	
+	-- Enemey
+	
+	-- Side 1
+	UnitEntry_DeploySquads(player5, sg_city_walls_1a, Unit_Types.units_ranged_final, mkr_patrol_mid_8) -- #1
+	Cmd_FormationMove(sg_city_walls_1a, mkr_defender_a_1, false, false, mkr_patrol_mid_2)
+	UnitEntry_DeploySquads(player5, sg_city_walls_2a, Unit_Types.units_cityguards_final, mkr_patrol_mid_8) -- #2
+	Cmd_FormationMove(sg_city_walls_2a, mkr_defender_a_2, false, false, mkr_patrol_mid_2)
+	UnitEntry_DeploySquads(player5, sg_city_walls_3a, Unit_Types.units_ranged, mkr_patrol_mid_8) -- #3
+	Cmd_FormationMove(sg_city_walls_3a, mkr_defender_a_3, false, false, mkr_patrol_mid_2)
+	UnitEntry_DeploySquads(player5, sg_city_walls_4a, Unit_Types.units_ranged, mkr_patrol_mid_8) -- #4
+	Cmd_FormationMove(sg_city_walls_4a, mkr_defender_a_4, false, false, mkr_patrol_mid_2)
+	-- Side 2
+	UnitEntry_DeploySquads(player5, sg_city_walls_1b, Unit_Types.units_ranged_final, mkr_patrol_mid_8) -- #1
+	Cmd_FormationMove(sg_city_walls_1b, mkr_defender_b_1, false, false, mkr_defender_b_4)
+	UnitEntry_DeploySquads(player5, sg_city_walls_2b, Unit_Types.units_ranged, mkr_patrol_mid_8) -- #2
+	Cmd_FormationMove(sg_city_walls_2b, mkr_defender_b_2, false, false, mkr_defender_b_4)
+	UnitEntry_DeploySquads(player5, sg_city_walls_3b, Unit_Types.units_ranged, mkr_patrol_mid_8) -- #3
+	Cmd_FormationMove(sg_city_walls_3b, mkr_defender_b_3, false, false, mkr_defender_b_4)
+	UnitEntry_DeploySquads(player5, sg_city_walls_4b, Unit_Types.units_cityguards_final, mkr_patrol_mid_8) -- #4
+	Cmd_FormationMove(sg_city_walls_4b, mkr_defender_b_4, false, false, mkr_patrol_mid_6)
+	
+end
+
+function Hard_Waves()
+	
+	-- Siege waves
+	if DC.hard_waves_siege then
+		Rule_AddInterval(Units_Deploy, 480, { player = player5, sgroup = sg_waves_main_3_05, unit_type = Unit_Types.wave_siege, spawn_loc = mkr_wave1_1a, path = wave_1a })
+		Rule_AddInterval(Units_Deploy, 480, { player = player5, sgroup = sg_waves_main_3_06, unit_type = Unit_Types.wave_siege, spawn_loc = mkr_wave2_1, path = wave_2a })
+	end
+	-- Extra Infantry waves
+	if DC.hard_waves_infantry then
+		-- Side 1
+		Rule_AddInterval(Units_Deploy, 240, { player = player5, sgroup = sg_waves_main_1_11, unit_type = Unit_Types.wave_no_siege, spawn_loc = mkr_wave1_1a, path = wave_1a })
+		-- Side 2
+		Rule_AddInterval(Units_Deploy, 240, { player = player5, sgroup = sg_waves_main_2_11, unit_type = Unit_Types.wave_no_siege, spawn_loc = mkr_wave2_1, path = wave_2a })
+	end
+end
+
+-------------------------------------------
+-- Phase 3  
+-------------------------------------------
+
+function BreachWalls_Reinforcements()
+	
+	-- Final Keep gate defenders
+	UnitEntry_DeploySquads(player5, sg_city_gates_1, Unit_Types.units_cityguards_final, mkr_city_gate_in1) -- #1
+	Cmd_FormationMove(sg_city_gates_1, mkr_city_gate_1, false, false, mkr_wave2_2a)
+	UnitEntry_DeploySquads(player5, sg_city_gates_2, Unit_Types.units_cityguards_final, mkr_city_gate_in1) -- #2
+	Cmd_FormationMove(sg_city_gates_2, mkr_city_gate_2, false, false, mkr_wave1_4a)
+	UnitEntry_DeploySquads(player5, sg_city_gates_3, Unit_Types.units_cityguards_final, mkr_city_gate_in1) -- #3
+	Cmd_FormationMove(sg_city_gates_3, mkr_city_gate_3, false, false, mkr_wave1_2)
+	UnitEntry_DeploySquads(player5, sg_city_gates_4, Unit_Types.units_cityguards_final, mkr_city_gate_in2) -- #4
+	Cmd_FormationMove(sg_city_gates_4, mkr_wave2_2a, false, false, mkr_city_gate_1)
+	UnitEntry_DeploySquads(player5, sg_city_gates_5, Unit_Types.units_cityguards_final, mkr_city_gate_in2) -- #5
+	Cmd_FormationMove(sg_city_gates_5, mkr_wave2_2b, false, false, mkr_wave2_3b)
+	
+	-- Spawn Patrol / Inner City
+	UnitEntry_DeploySquads(player5, sg_city_patrol_1, Unit_Types.units_cityguards_hard, mkr_wave1_1a) -- #1
+	Rule_AddInterval(Patrol_Cycle, 80, { sgroup = sg_city_patrol_1, path = patrol_city_1 })
+	UnitEntry_DeploySquads(player5, sg_city_patrol_2, Unit_Types.units_cityguards_hard, mkr_wave2_1) -- #1
+	Rule_AddInterval(Patrol_Cycle, 80, { sgroup = sg_city_patrol_2, path = patrol_city_2 })
+	
+	-- Spawn additional counter-attacks
+	if DC.breach_reinforcements then
+		-- Knight Rush
+		Rule_AddOneShot(Units_Deploy, 5, { player = player5, sgroup = sg_waves_main_3_01, unit_type = Unit_Types.wave_city_45m, spawn_loc = mkr_wave1_1a, path = wave_1a })
+		Rule_AddOneShot(Units_Deploy, 5, { player = player5, sgroup = sg_waves_main_3_02, unit_type = Unit_Types.wave_city_45m, spawn_loc = mkr_wave2_1, path = wave_2a })
+		-- Last effort AI push
+		Rule_AddOneShot(Units_Deploy, 60, { player = player5, sgroup = sg_waves_main_3_03, unit_type = Unit_Types.wave_city_40m, spawn_loc = mkr_city_gate_in1, path = wave_3a })
+		Rule_AddOneShot(Units_Deploy, 60, { player = player5, sgroup = sg_waves_main_3_04, unit_type = Unit_Types.wave_city_40m, spawn_loc = mkr_city_gate_in2, path = wave_3b })
+	end
+	
+	
+end
+
+
+

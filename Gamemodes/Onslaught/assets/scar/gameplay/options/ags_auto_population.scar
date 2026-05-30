@@ -1,0 +1,305 @@
+---------------------------------------------------------------------------------------------------
+-- Authors:
+-- Relic
+-- Comrad Ping
+-- Skirp & Hank
+--
+-- Description:
+-- Alters players current population by set value with interval.
+---------------------------------------------------------------------------------------------------
+
+AGS_POPULATION_AUTOMATIC_MODULE = "AGS_PopulationAutomatic"
+_AGS_AutoPop_Caps = {}
+_AGS_AutoPop_InnateCorrected = {}
+_AGS_AutoPop_Corrections = {}  -- Soft-correction tracking per player for reconciler
+_AGS_AutoPop_ForbiddenBPSet = {}   -- Init-time EBP lookup set for event-driven pop-source detection
+_AGS_AutoPop_DeferredPending = false  -- Deferred reconcile one-shot guard
+_AGS_AutoPop_RewardSuppressCount = 0  -- Counter for reward-path unlock suppressions
+
+-- Population-affecting building keys requiring locks per civ.
+-- Landmark-based pop-cap upgrades are intentionally excluded from this module.
+_AGS_POP_LOCK_KEYS = {
+	buildings = {
+		AGS_BP_HOUSE,           -- standard house
+		AGS_BP_TC_CAPITAL,      -- town center capital
+		AGS_BP_TC_CAPITAL_UNIT, -- mongol packed capital town center
+		AGS_BP_TC,              -- town center
+		"house_moving",         -- Mongol nomadic house
+		"cistern",              -- Byzantine cistern (housing-equivalent)
+		"dynasty_village",      -- Chinese Dynasty Village (already locked by blueprint, adding for completeness)
+	},
+}
+
+-- Explicit blueprint names for unique population buildings that do not resolve via
+-- AGS_GetCivilizationEntity key lookups (or have civ-variant aliases).
+_AGS_AUTOPOP_EXPLICIT_POP_BP_NAMES = {
+	"building_dynasty_village_control_chi",
+	"building_dynasty_village_control_chi_ha_01",
+	"building_manor_lan",
+}
+
+---------------------------------------------------------------------------------------------------
+-- Delegates:
+---------------------------------------------------------------------------------------------------
+Core_RegisterModule(AGS_POPULATION_AUTOMATIC_MODULE)
+
+-- Disable buildings that increase population
+function AGS_PopulationAutomatic_UpdateModuleSettings()
+	AGS_Print("AGS_PopulationAutomatic_UpdateModuleSettings")
+	if _mod.pop_cap_incease_on_interval == 0 then 
+		Core_UnregisterModule(AGS_POPULATION_AUTOMATIC_MODULE)
+	end
+end
+
+
+function AGS_PopulationAutomatic_EarlyInitializations()
+	AGS_Print("AGS_PopulationAutomatic_EarlyInitializations")
+	AGS_AutoPopulationStart()
+end
+
+
+function AGS_PopulationAutomatic_PresetFinalize()
+	AGS_Print("AGS_PopulationAutomatic_PresetFinalize")
+	AGS_PopulationAutomatic_ApplyStartCaps()
+	Rule_AddOneShot(AGS_PopulationAutomatic_CompensateInnate, 1)
+end
+
+
+---------------------------------------------------------------------------------------------------
+-- Functions:
+---------------------------------------------------------------------------------------------------
+
+-- Compensate for civ-innate population modifiers (e.g. Mongol +50) after all
+-- init-phase modules have applied their modifiers. Runs once, 1s after PresetFinalize.
+function AGS_PopulationAutomatic_CompensateInnate()
+	for i, player in ipairs(PLAYERS) do
+		local tracked = _AGS_AutoPop_Caps[player.id] or 0
+		local effective = Player_GetCurrentPopulationCap(player.id, CT_Personnel)
+		local correction = tracked - effective
+		_AGS_AutoPop_InnateCorrected[player.id] = correction
+		if correction ~= 0 then
+			Modifier_ApplyToPlayer(
+				Modifier_Create(MAT_Player, "personnel_cap_player_modifier", MUT_Addition, false, correction, ""),
+				player.id, 0
+			)
+			print(string.format("[AUTOPOP_COMPENSATE] P%d [%s] innate correction=%+d (effective=%d tracked=%d)",
+				i, tostring(player.raceName), correction, effective, tracked))
+		end
+	end
+end
+
+function AGS_PopulationAutomatic_NormalizeStartCap(player)
+	local min_cap = AGS_GLOBAL_SETTINGS.MinimumPopulation or 0
+	local max_cap = AGS_GLOBAL_SETTINGS.MaximumPopulation or 200
+	local start_cap = min_cap
+	if start_cap > max_cap then
+		start_cap = max_cap
+	end
+	if start_cap < 0 then
+		start_cap = 0
+	end
+	Player_SetMaxPopulation(player.id, CT_Personnel, start_cap)
+	_AGS_AutoPop_Caps[player.id] = start_cap
+end
+
+function AGS_PopulationAutomatic_ApplyStartCaps()
+	for _, player in ipairs(PLAYERS) do
+		AGS_PopulationAutomatic_NormalizeStartCap(player)
+	end
+end
+
+function AGS_AutoPop_LockExplicitPopulationBlueprints(player)
+	for _, bp_name in ipairs(_AGS_AUTOPOP_EXPLICIT_POP_BP_NAMES or {}) do
+		local ebp = BP_GetEntityBlueprint(bp_name)
+		if ebp ~= nil then
+			Player_SetEntityProductionAvailability(player.id, ebp, ITEM_LOCKED)
+		end
+	end
+end
+
+-- Population Increase Function from CBA S/H
+-- Uses tracked caps instead of engine reads to prevent civ-innate modifier compounding.
+function AGS_IncreasePopulation()		
+	for _, player in ipairs(PLAYERS) do
+		if not player.isEliminated then
+			local tracked = _AGS_AutoPop_Caps[player.id] or 0
+			if tracked < AGS_GLOBAL_SETTINGS.MaximumPopulation then
+				local uiColour = Player_GetUIColour(localPlayer.id)
+				UI_CreateEventCueClickable(-1, 15.0, 0, 20.0, Loc_FormatText("$f5a005650ae44d2b8e05306aa891f90c:272"), Loc_Empty(), "event_with_player_color", "", "", uiColour.r, uiColour.g, uiColour.b, uiColour.a, ECV_Queue, nothing)
+			end
+			break -- Only check the first non-eliminated player
+		end
+	end
+	
+	for _, player in ipairs(PLAYERS) do
+		if not player.isEliminated then
+			local tracked = _AGS_AutoPop_Caps[player.id] or 0
+			if tracked < AGS_GLOBAL_SETTINGS.MaximumPopulation then
+				local new_cap = math.min(tracked + _mod.pop_cap_incease_on_interval, AGS_GLOBAL_SETTINGS.MaximumPopulation)
+				Player_SetMaxPopulation(player.id, CT_Personnel, new_cap)
+				_AGS_AutoPop_Caps[player.id] = new_cap
+			end
+		end
+	end
+end
+
+-- Setup Match settings
+function AGS_AutoPopulationStart()
+	AGS_Print("AGS_AutoPopulationStart")
+	for i, player in ipairs(PLAYERS) do
+		-- Standard building locks (house, town center variants)
+		AGS_SetEntityProductionAvailabilitySafe(player.id, AGS_GetCivilizationEntity(player.raceName, AGS_BP_HOUSE), ITEM_LOCKED, "AGS_AutoPopulationStart/house/" .. tostring(player.raceName))
+		AGS_SetEntityProductionAvailabilitySafe(player.id, AGS_GetCivilizationEntity(player.raceName, AGS_BP_TC_CAPITAL), ITEM_LOCKED, "AGS_AutoPopulationStart/tc_capital/" .. tostring(player.raceName))
+		AGS_SetEntityProductionAvailabilitySafe(player.id, AGS_GetCivilizationEntity(player.raceName, AGS_BP_TC), ITEM_LOCKED, "AGS_AutoPopulationStart/tc/" .. tostring(player.raceName))
+		
+		-- Civ-unique population building locks
+		-- Explicit unique/variant population buildings that are not reliably keyed in AGS entity table.
+		AGS_AutoPop_LockExplicitPopulationBlueprints(player)
+		
+		-- Mongol nomadic house (house_moving) — only Mongol-family civs have this building
+		local faction = AGS_CIV_FACTION_MAP[player.raceName] or player.raceName
+		if faction == "mongol" then
+			AGS_SetEntityProductionAvailabilitySafe(player.id, AGS_GetCivilizationEntity(player.raceName, "house_moving"), ITEM_LOCKED, "AGS_AutoPopulationStart/house_moving/" .. tostring(player.raceName))
+		end
+		
+		-- Byzantine cistern (housing-equivalent) — only Byzantine-family civs have this building
+		if faction == "byzantine" then
+			AGS_SetEntityProductionAvailabilitySafe(player.id, AGS_GetCivilizationEntity(player.raceName, "cistern"), ITEM_LOCKED, "AGS_AutoPopulationStart/cistern/" .. tostring(player.raceName))
+		end
+	end	
+	AGS_PopulationAutomatic_ApplyStartCaps()
+	
+	if(AGS_GLOBAL_SETTINGS.MinimumPopulation < AGS_GLOBAL_SETTINGS.MaximumPopulation) then
+		local uiColour = Player_GetUIColour(localPlayer.id)
+		UI_CreateEventCueClickable(-1, 90, 0, 20.0, Loc_FormatText("$f5a005650ae44d2b8e05306aa891f90c:413",  _mod.pop_cap_incease_on_interval, _mod.pop_interval, AGS_GLOBAL_SETTINGS.MaximumPopulation), Loc_Empty(), "event_with_player_color", "", "", uiColour.r, uiColour.g, uiColour.b, uiColour.a, ECV_Queue, nothing)
+		
+	end
+
+	Rule_AddInterval(AGS_IncreasePopulation, _mod.pop_interval)
+	Rule_AddInterval(AGS_PopulationAutomatic_ReconcileCapDrift, 5)  -- Reconciliation every 5 seconds
+
+	-- PERF: Build EBP lookup set for O(1) event-driven pop-source classification
+	AGS_AutoPop_BuildForbiddenBPSet()
+	-- Event-driven deferred reconcile: closes timing window between engine cap changes and 5s interval
+	Rule_AddGlobalEvent(AGS_AutoPop_OnConstructionComplete, GE_ConstructionComplete)
+	CBA_EntityKillBatch_SetHandler("auto_pop", true)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Population Reconciler: Soft-correction for unapproved cap sources
+---------------------------------------------------------------------------------------------------
+
+-- Continuous reconciliation to enforce auto-pop cap baseline.
+-- Computes delta between tracked cap and effective engine cap, applies soft correction.
+function AGS_PopulationAutomatic_ReconcileCapDrift()
+	for _, player in ipairs(PLAYERS) do
+		if player.isEliminated then
+			_AGS_AutoPop_Corrections[player.id] = nil
+			goto continue
+		end
+		
+		local tracked = _AGS_AutoPop_Caps[player.id] or 0
+		local effective = Player_GetCurrentPopulationCap(player.id, CT_Personnel)
+		local delta = tracked - effective
+		
+		-- Skip if already at baseline (within 1 pop tolerance)
+		if math.abs(delta) <= 1 then
+			_AGS_AutoPop_Corrections[player.id] = 0
+			goto continue
+		end
+		
+		-- Apply soft correction: add a modifier to bring effective cap back to tracked
+		local last_correction = _AGS_AutoPop_Corrections[player.id] or 0
+		if delta ~= last_correction then
+			local correction_diff = delta - last_correction
+			Modifier_ApplyToPlayer(
+				Modifier_Create(MAT_Player, "personnel_cap_player_modifier", MUT_Addition, false, correction_diff, ""),
+				player.id, 0
+			)
+			_AGS_AutoPop_Corrections[player.id] = delta
+			if _AUTOPOP_DEBUG_VERBOSE then
+				print(string.format("[AUTOPOP_RECONCILE] P%d tracked=%d effective=%d delta=%+d correction_applied=%+d",
+					player.playerIndex, tracked, effective, delta, correction_diff))
+			end
+		end
+		
+		::continue::
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Event-driven reconcile: deferred coalesced scheduler
+-- Mirrors CBA_Options_SiegeLimit_ScheduleDeferredRecheck (cba_options.scar).
+-- Multiple simultaneous build/destroy events coalesce into a single reconcile pass (0.25s).
+---------------------------------------------------------------------------------------------------
+
+-- Build a global EBP lookup set from all forbidden building keys across all civs.
+-- Called once at AGS_AutoPopulationStart; enables O(1) fast-path on every construction event.
+function AGS_AutoPop_BuildForbiddenBPSet()
+	_AGS_AutoPop_ForbiddenBPSet = {}
+	for _, player in ipairs(PLAYERS) do
+		for _, key in ipairs(_AGS_POP_LOCK_KEYS.buildings or {}) do
+			local ebp = AGS_GetCivilizationEntity(player.raceName, key)
+			if ebp ~= nil then
+				_AGS_AutoPop_ForbiddenBPSet[ebp] = true
+			end
+		end
+	end
+	-- Explicit unique/variant population BPs (e.g., Lancaster manor, Chinese HA village)
+	for _, bp_name in ipairs(_AGS_AUTOPOP_EXPLICIT_POP_BP_NAMES or {}) do
+		local ebp = BP_GetEntityBlueprint(bp_name)
+		if ebp ~= nil then
+			_AGS_AutoPop_ForbiddenBPSet[ebp] = true
+		end
+	end
+end
+
+-- Schedule a deferred reconcile pass. Coalesces multiple simultaneous events into one pass.
+-- PERF: Deferred coalesced pattern mirrors cba_options.scar siege limit optimization.
+function AGS_AutoPop_ScheduleDeferredReconcile(reason)
+	if not _AGS_AutoPop_DeferredPending then
+		_AGS_AutoPop_DeferredPending = true
+		Rule_AddOneShot(AGS_AutoPop_RunDeferredReconcile, 0.25)
+	end
+end
+
+-- Deferred one-shot worker: clears the pending flag then runs a full reconcile pass.
+function AGS_AutoPop_RunDeferredReconcile()
+	_AGS_AutoPop_DeferredPending = false
+	AGS_PopulationAutomatic_ReconcileCapDrift()
+end
+
+-- Event handler: a building construction completed.
+-- If the completed building is a forbidden pop source, effective cap may have risen
+-- above tracked; schedule deferred reconcile to pull it back to baseline.
+function AGS_AutoPop_OnConstructionComplete(context)
+	if context.pbg == nil then return end
+	if not _AGS_AutoPop_ForbiddenBPSet[context.pbg] then return end
+	local player = Core_GetPlayersTableEntry(context.player)
+	if player == nil or player.isEliminated then return end
+	AGS_AutoPop_ScheduleDeferredReconcile("ConstructionComplete")
+	if _AUTOPOP_DEBUG_VERBOSE then
+		print(string.format("[AUTOPOP_EVENT] ConstructionComplete P%d [%s] forbidden pop building completed; deferred reconcile scheduled",
+			player.playerIndex or 0, tostring(player.raceName)))
+	end
+end
+
+-- Event handler: an entity was killed.
+-- If a forbidden pop building was destroyed the engine cap changes; the existing correction
+-- modifier may now over-correct. Schedule deferred reconcile to re-measure and adjust.
+function AGS_AutoPop_OnEntityKilled(context)
+	if context.victim == nil then return end
+	if not Entity_IsOfType(context.victim, "building") then return end
+	local ok_bp, e_bp = pcall(Entity_GetBlueprint, context.victim)
+	if not ok_bp or e_bp == nil then return end
+	if not _AGS_AutoPop_ForbiddenBPSet[e_bp] then return end
+	local ok_owner, owner_pid = pcall(Entity_GetPlayerOwner, context.victim)
+	if not ok_owner or owner_pid == nil then return end
+	local player = PLAYERS[World_GetPlayerIndex(owner_pid)]
+	if player == nil or player.isEliminated then return end
+	AGS_AutoPop_ScheduleDeferredReconcile("EntityKilled")
+	if _AUTOPOP_DEBUG_VERBOSE then
+		print(string.format("[AUTOPOP_EVENT] EntityKilled P%d [%s] forbidden pop building destroyed; deferred reconcile scheduled",
+			player.playerIndex or 0, tostring(player.raceName)))
+	end
+end

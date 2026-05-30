@@ -1,0 +1,778 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Rewards Engine
+-- Module registration, spawner, objective UI, kill tracking, reward application
+-- Kill point values: rewards/cba_kill_scoring.scar
+-- Onslaught reward trees: rewards/cba_rewards_onslaught.scar
+-- Arena reward trees: rewards/cba_rewards_arena.scar
+---------------------------------------------------------------------------------------------------
+
+import("rewards/cba_kill_scoring.scar")
+import("rewards/cba_rewards_onslaught.scar")
+import("rewards/cba_rewards_arena.scar")
+
+CBA_REWARDS_CBAULE = "CBA_Rewards"
+_CBA = {
+	module = "CBA",
+	group_counter = 0, 
+	rewards = {},
+	center,
+	-- Objective: Eliminate for Rewards
+	obj_kill_title = "DO NOT USE",
+	-- Objective: Eliminate for Villagers 
+}
+
+-- Queued reward spawns when population is near cap (keyed by player index)
+_reward_queue = {}
+
+-- Kill-objective UI coalescing: defer Obj_Set* counter/progress to reduce per-kill UI spam
+_rewards_kill_ui_pending = false
+
+---------------------------------------------------------------------------------------------------
+-- Delegates:
+---------------------------------------------------------------------------------------------------
+
+Core_RegisterModule(CBA_REWARDS_CBAULE)	
+
+function CBA_Rewards_UpdateModuleSettings()
+	if AGS_GLOBAL_SETTINGS.CBA_Rewards == "disabled" then
+		Core_UnregisterModule(CBA_REWARDS_CBAULE)
+	else
+		-- Onslaught uses reward score (killed_number) as authoritative value.
+		-- Disable stock Score module to prevent competing economy-derived writes
+		-- to player.score and total_score that cause visible jump/reset behavior
+		-- between Onslaught's 2-second sync intervals.
+		Core_UnregisterModule("Score")
+	end
+end
+
+function CBA_Rewards_PresetFinalize()
+	
+	if AGS_GLOBAL_SETTINGS.CBA_Rewards == "onslaught" then
+		cba_spawner_interval = 300
+		CBA_Rewards_List_Onslaught()
+		
+		-- Rewards List - Selected Upgrade Blueprints 
+		local REWARD_UPGRADE_ALL = {
+			AGS_UP_A_MELEE_I, -- Attack / Damage
+			AGS_UP_D_MELEE_I, -- Defense/ Armor
+			AGS_UP_A_MELEE_II,
+			AGS_UP_D_MELEE_II,
+			AGS_UP_A_MELEE_III,
+			AGS_UP_D_MELEE_III,
+			AGS_UP_A_RANGED_I,
+			AGS_UP_D_RANGED_I,
+			AGS_UP_A_RANGED_II,
+			AGS_UP_D_RANGED_II,
+			AGS_UP_A_RANGED_III,
+			AGS_UP_D_RANGED_III,
+			AGS_UP_MANATARMS_ELITE,
+			AGS_UP_SPEARMAN_ELITE,
+			AGS_UP_BIOLOGY,
+			AGS_UP_BARDING,
+			AGS_UP_GRAPERED_LANCE,
+			AGS_UP_MILITARY_ACADEMY,
+			AGS_UP_RANGED_INCENDIARY,
+			AGS_UP_ARCHITECTURE,
+			AGS_UP_CHEMISTRY,
+			AGS_UP_SIEGE_WORKS,
+			AGS_UP_SIEGE_SPEED,
+			AGS_UP_SIEGE_ROLLER_TRIGGER,
+			AGS_UP_SIEGE_ADJUSTABLE_CROSSBAR,
+			AGS_UP_SIEGE_ENGINEERS,
+		}
+		local REWARD_UPGRADE_ENG = {
+			"upgrade_longbow_make_camp_eng",
+			"upgrade_ranged_palings_eng",
+			"upgrade_ranged_longbow_arrow_volley_eng",
+			"upgrade_ranged_longbow_armor_pen_eng",
+			"upgrade_ranged_longbow_damage_eng",
+			"upgrade_armor_clad_eng",
+			"upgrade_trebuchet_aoe_eng",
+			"upgrade_ranged_archer_silkstring",
+		}
+		local REWARD_UPGRADE_CHI = {
+			"upgrade_manatarms_battle_hardened_chi",
+			"upgrade_manatarms_aoe_chi",
+			"upgrade_reload_drills_chi",
+			"upgrade_gunpowder_damage_chi",
+		}
+		local REWARD_UPGRADE_FRE = {
+			"upgrade_cavalry_chivalry_fre",
+			"upgrade_ranged_crossbow_stirrups_fre",
+			"upgrade_ranged_crossbow_drills_fre",
+			"upgrade_ranged_crossbow_cranequin_fre",
+			"upgrade_cavalry_cantled_saddle_fre",
+			"upgrade_cavalry_bloodline_fre",
+			"upgrade_cavalry_grapered_lance_fre",
+		}
+		local REWARD_UPGRADE_HRE = {
+			"upgrade_building_fire_armor_hre",
+			"upgrade_man_at_arms_two_handed_hre",
+			"upgrade_reinforced_defenses_hre",
+			"upgrade_landsknecht_charge_drills_hre",
+			"upgrade_infantry_marching_drills_hre",
+			"upgrade_man_at_arms_maces_hre",
+			"upgrade_riveted_chain_armour_hre",
+			"upgrade_gothic_plate_armour_hre",
+		}
+		local REWARD_UPGRADE_MON = {
+			"upgrade_improved_siege_engineers_mon",
+			"upgrade_ranged_armor_i_improved_mon",
+			"upgrade_ranged_armor_ii_improved_mon",
+			"upgrade_ranged_armor_iii_improved_mon",
+			"upgrade_ranged_damage_i_improved_mon",
+			"upgrade_ranged_damage_ii_improved_mon",
+			"upgrade_ranged_damage_iii_improved_mon",
+			"upgrade_melee_armor_i_improved_mon",
+			"upgrade_melee_armor_ii_improved_mon",
+			"upgrade_melee_armor_iii_improved_mon",
+			"upgrade_melee_damage_i_improved_mon",
+			"upgrade_melee_damage_ii_improved_mon",
+			"upgrade_melee_damage_iii_improved_mon",
+			"upgrade_spearman_elite_spear_tactics_improved_mon",
+			"upgrade_manatarms_elite_army_tactics_improved_mon",
+			"upgrade_cavalry_barding_improved_mon",
+			"upgrade_cavalry_grapered_lance_improved_mon",
+			"upgrade_manatarms_elite_army_tactics_improved_mon",
+			"upgrade_tech_university_biology_improved_mon",
+			"upgrade_tech_military_academy_improved_mon",
+		}
+		local REWARD_UPGRADE_RUS = {
+			"upgrade_cavalry_hp_rus",
+			"upgrade_cavalry_melee_damage_rus",
+			"upgrade_siege_improvements_rus",
+			"upgrade_siege_crew_training_rus",
+			"upgrade_siege_fined_tuned_guns_rus",
+			"upgrade_springald_range_rus",
+		}
+		local REWARD_UPGRADE_SUL = {
+			"upgrade_improved_swords_sul",
+			"upgrade_landmark_fire_siege_armor_sul",
+			"upgrade_landmark_force_march_sul",
+			"upgrade_landmark_keep_defense_sul",
+			"upgrade_age3_war_elephant_elite_sul",
+		}
+		local REWARD_UPGRADE_ABB = {
+			"upgrade_camel_archer_comp_bow_abb",
+			"upgrade_mil_camel_archers_improved_weapon_abb",
+			"upgrade_camel_speed_boost_abb",
+			"upgrade_camel_armor_abb",
+			"upgrade_mil_mameluke_shields_abb",
+			"upgrade_mil_camel_support_abb",
+		}
+		local REWARD_UPGRADE_MAL = {
+			"upgrade_stealth_healing_mal",
+			"upgrade_archer_poison_arrow_mal",
+			"upgrade_sofa_armor_mal",
+			"upgrade_sofa_farima_leadership_mal",
+		}
+		
+		-- Disable entities on the Reward List
+		for i, player in ipairs(PLAYERS) do
+			local player_civ = Player_GetRaceName(player.id)
+			
+		local wonder_ebp = AGS_GetCivilizationEntity(player.raceName, AGS_BP_WONDER)
+		if wonder_ebp ~= nil then
+			Player_SetEntityProductionAvailability(player.id, wonder_ebp, ITEM_LOCKED)
+		end
+		local blacksmith_ebp = AGS_GetCivilizationEntity(player.raceName, AGS_BP_BLACKSMITH)
+		if blacksmith_ebp ~= nil then
+			Player_SetEntityProductionAvailability(player.id, blacksmith_ebp, ITEM_LOCKED) -- Upgrades Disabled
+		end
+		if player_civ ~= "mongol" then
+			local uni_ebp = AGS_GetCivilizationEntity(player.raceName, AGS_BP_UNIVERSITY)
+			if uni_ebp ~= nil then
+				Player_SetEntityProductionAvailability(player.id, uni_ebp, ITEM_LOCKED) -- Upgrades Disabled
+			end
+		end
+	end
+	for _, player in ipairs(PLAYERS) do
+			local player_civ = Player_GetRaceName(player.id)
+			local branch_civ = AGS_CIV_FACTION_MAP[player_civ] or player_civ
+			for id, upgrade_bp in pairs(REWARD_UPGRADE_ALL) do
+				Player_SetUpgradeAvailability(player.id, AGS_GetCivilizationUpgrade(player.raceName, upgrade_bp), ITEM_REMOVED)	
+			end
+			if branch_civ == "english" then
+				for id, upgrade_bp in pairs(REWARD_UPGRADE_ENG) do
+					Player_SetUpgradeAvailability(player.id, BP_GetUpgradeBlueprint(upgrade_bp), ITEM_REMOVED)	
+				end
+			end
+			if branch_civ == "chinese" then
+				for id, upgrade_bp in pairs(REWARD_UPGRADE_CHI) do
+					Player_SetUpgradeAvailability(player.id, BP_GetUpgradeBlueprint(upgrade_bp), ITEM_REMOVED)	
+				end
+			end
+			if branch_civ == "french" then
+				for id, upgrade_bp in pairs(REWARD_UPGRADE_FRE) do
+					Player_SetUpgradeAvailability(player.id, BP_GetUpgradeBlueprint(upgrade_bp), ITEM_REMOVED)	
+				end
+			end
+			if branch_civ == "hre" then
+				for id, upgrade_bp in pairs(REWARD_UPGRADE_HRE) do
+					Player_SetUpgradeAvailability(player.id, BP_GetUpgradeBlueprint(upgrade_bp), ITEM_REMOVED)	
+				end
+			end
+			if branch_civ == "mongol" then
+				for id, upgrade_bp in pairs(REWARD_UPGRADE_MON) do
+					Player_SetUpgradeAvailability(player.id, BP_GetUpgradeBlueprint(upgrade_bp), ITEM_REMOVED)	
+				end
+			end
+			if branch_civ == "rus" then
+				for id, upgrade_bp in pairs(REWARD_UPGRADE_RUS) do
+					Player_SetUpgradeAvailability(player.id, BP_GetUpgradeBlueprint(upgrade_bp), ITEM_REMOVED)	
+				end
+			end
+			if branch_civ == "sultanate" then
+				for id, upgrade_bp in pairs(REWARD_UPGRADE_SUL) do
+					Player_SetUpgradeAvailability(player.id, BP_GetUpgradeBlueprint(upgrade_bp), ITEM_REMOVED)	
+				end
+			end
+			if branch_civ == "abbasid" then
+				for id, upgrade_bp in pairs(REWARD_UPGRADE_ABB) do
+					Player_SetUpgradeAvailability(player.id, BP_GetUpgradeBlueprint(upgrade_bp), ITEM_REMOVED)	
+				end
+			end
+			if branch_civ == "malian" then
+				for id, upgrade_bp in pairs(REWARD_UPGRADE_MAL) do
+					Player_SetUpgradeAvailability(player.id, BP_GetUpgradeBlueprint(upgrade_bp), ITEM_REMOVED)	
+				end
+			end
+			if branch_civ == "ottoman" then
+				Player_SetUpgradeAvailability(player.id, BP_GetUpgradeBlueprint("upgrade_ranged_janissary_guns_ott"), ITEM_REMOVED)
+			end
+		end
+		
+	end
+	if AGS_GLOBAL_SETTINGS.CBA_Rewards == "arena" then
+		cba_spawner_interval = 5
+		CBA_Rewards_List_Arena()
+		for _, player in ipairs(PLAYERS) do
+			local branch_civ = AGS_CIV_FACTION_MAP[Player_GetRaceName(player.id)] or Player_GetRaceName(player.id)
+			if branch_civ == "english" then
+				Player_SetUpgradeAvailability(player.id, BP_GetUpgradeBlueprint("upgrade_unit_manatarms_2_eng"), ITEM_LOCKED)
+			end
+		end
+	end
+	
+	for i, player in ipairs(PLAYERS) do				
+		-- Kill Tracker objective
+		player.killed_number = 0
+		player.obj_kill_requirement = 0
+		player.obj_kill_requirement = CBA_Rewards_nextRequirement(player)
+		
+		local player_civ = Player_GetRaceName(player.id)
+		player.unit_type = _CBA.rewards[player_civ][0].unit_upgrade
+		player.unit_num =  _CBA.rewards[player_civ][0].num_upgrade	
+	end
+	
+	-- Score/Objective tracker
+	Rule_AddGlobalEvent(CBA_Rewards_OnEntityKilled, GE_EntityKilled)
+	-- Spawners
+	-- ONE SHOT RULES: wait until startup precache initialization reports ready.
+	Rule_AddOneShot(CBA_Rewards_InitialSpawnWhenReady, 1)
+	-- INTERVAL RULES: The following rule runs the function every x seconds. 
+	Rule_AddInterval(CBA_Rewards_SpawnUnits, cba_spawner_interval)
+	
+	
+end
+
+function CBA_Rewards_Start()
+		CBA_Rewards_SetupObjective()
+end
+
+function CBA_Rewards_OnGameOver()
+	pcall(Rule_Remove, CBA_Rewards_SpawnUnits)
+	pcall(Rule_RemoveGlobalEvent, CBA_Rewards_OnEntityKilled)
+end
+
+-- Initial spawn gate so starter villagers + first reward wave are delayed until
+-- precache initialization has finished in Mod_Start.
+function CBA_Rewards_InitialSpawnWhenReady()
+	if _onslaught_teardown_detected then return end
+	if _LEAVER_PRECACHE_READY ~= true then
+		Rule_AddOneShot(CBA_Rewards_InitialSpawnWhenReady, 1)
+		return
+	end
+	CBA_Rewards_StartingUnits()
+	CBA_Rewards_SpawnUnits()
+end
+
+---------------------------------------------------------------------------------------------------
+-- Functions:
+---------------------------------------------------------------------------------------------------
+
+function CBA_Rewards_ToLocText(value)
+	if value == nil then
+		return "None"
+	end
+	if type(value) == "table" and value.LocString ~= nil then
+		value = value.LocString
+	end
+	if type(value) == "string" then
+		if string.sub(value, 1, 1) == "$" then
+			local ok_loc, formatted = pcall(Loc_FormatText, value)
+			if ok_loc and formatted ~= nil then
+				if type(formatted) == "string" then
+					return formatted
+				end
+				-- Loc_FormatText returns utf8_mt LocString; convert to plain string via Loc_ToAnsi
+				local ok_ta, ta_result = pcall(Loc_ToAnsi, formatted)
+				if ok_ta and type(ta_result) == "string" and ta_result ~= "" then
+					return ta_result
+				end
+				print("[CBA_REWARDS] ToLocText: Loc_ToAnsi failed on Loc_FormatText result (ok=" .. tostring(ok_ta) .. ") type=" .. type(formatted) .. " fallback=tostring")
+				return tostring(formatted)
+			end
+		end
+		return value
+	end
+	-- Handle utf8_mt LocString userdata (e.g. BP_GetUpgradeUIInfo/BP_GetSquadUIInfo .screenName)
+	-- Use Loc_ToAnsi to flatten localized userdata to plain Lua text.
+	local ok_ta, ta_result = pcall(Loc_ToAnsi, value)
+	if ok_ta and type(ta_result) == "string" and ta_result ~= "" then
+		return ta_result
+	end
+	print("[CBA_REWARDS] ToLocText: Loc_ToAnsi failed on userdata (ok=" .. tostring(ok_ta) .. ") type=" .. type(value) .. " fallback=tostring")
+	return tostring(value)
+end
+
+function CBA_Rewards_FormatObjectiveTitle(next_reward_title)
+	-- First try the raw value so Loc IDs / LocString values continue to localize natively.
+	local ok_loc, formatted = pcall(Loc_FormatText, "$f5a005650ae44d2b8e05306aa891f90c:129", next_reward_title)
+	if ok_loc and formatted ~= nil then
+		return formatted
+	end
+
+	-- If raw value fails (e.g. userdata or non-Loc table), normalize to plain text and retry.
+	local val = CBA_Rewards_ToLocText(next_reward_title)
+	local ok_loc_text, formatted_text = pcall(Loc_FormatText, "$f5a005650ae44d2b8e05306aa891f90c:129", val)
+	if ok_loc_text and formatted_text ~= nil then
+		return formatted_text
+	end
+
+	if _CBA ~= nil and not _CBA._loc129_fallback_logged then
+		_CBA._loc129_fallback_logged = true
+		print("[CBA_REWARDS] Loc template :129 unavailable; using fallback objective title. err=" .. tostring(formatted_text or formatted))
+	end
+
+	return "Kills required for: " .. tostring(val)
+end
+
+-- This function creates the objective UI that appears in the top-left corner of each player's screen
+function CBA_Rewards_SetupObjective()
+	
+	-- Objective: Eliminate Enemies for Rewards
+	if _CBA.obj_kill == nil then 
+		
+		-- Create and store objective in the global table created at the start of this script
+		_CBA.obj_kill = Obj_Create(localPlayer.id, _CBA.obj_kill_title, Loc_Empty(), "icons\\races\\common\\buildings\\keep", "ConquestObjectiveTemplate", localPlayer.raceName, OT_Primary, 0, "conquestObj")		
+		
+		
+		local player_civ = Player_GetRaceName(localPlayer.id)
+		
+		
+		
+		local obj_kill_requirement=0
+		for _, player in ipairs(PLAYERS) do
+			if player.id==localPlayer.id then
+				obj_kill_requirement = player.obj_kill_requirement
+				
+			end
+		end
+		
+		local obj_msg = CBA_Rewards_FormatObjectiveTitle(_CBA.rewards[player_civ][obj_kill_requirement].title)
+		
+		Obj_SetTitle(_CBA.obj_kill, obj_msg)
+		-- Sets the objective's state to incomplete
+		Obj_SetState(_CBA.obj_kill, OS_Incomplete)
+		-- Sets the objective to visible so players can see it
+		Obj_SetVisible(_CBA.obj_kill, true)
+		-- Sets the progress element of the objective to visible so players can see it
+		Obj_SetProgressVisible(_CBA.obj_kill, true)		
+		-- Sets the objective progress type to a counter
+		Obj_SetCounterType(_CBA.obj_kill, COUNTER_CountUpTo)
+		-- Set the starting objective progress to 1 because we spawn a House for the player in Mod_SpawnBuilding()
+		Obj_SetCounterCount(_CBA.obj_kill, 0)
+		-- Set the maximum objective progress
+		Obj_SetCounterMax(_CBA.obj_kill, obj_kill_requirement)
+		-- Set the objective progress bar peSrcentage value
+		Obj_SetProgress(_CBA.obj_kill, 0)
+		
+	end
+	
+end
+
+-- This function spawns 'Upgraded' Reward Units next each player's Castle
+function CBA_Rewards_SpawnUnits()
+	if _onslaught_teardown_detected then return end
+	if _LEAVER_PRECACHE_READY ~= true then return end
+	for i, player in ipairs(PLAYERS) do
+		local player_civ = Player_GetRaceName(player.id)
+		
+		-- Spawner #1
+		local unit_type =  player.unit_type -- _CBA.rewards[player_civ][0].unit_upgrade
+		local unit_num =  player.unit_num  
+		CBA_Rewards_SpawnAndMove(player,unit_type,unit_num)
+		
+		-- Spawner #2 // ADD: Check when empty
+		if player.obj_kill_requirement > 100 and AGS_GLOBAL_SETTINGS.CBA_Rewards == "arena" then
+			local unit_type_2 =  player.unit_type_2
+			local unit_num_2 =  player.unit_num_2 
+			CBA_Rewards_SpawnAndMove(player,unit_type_2,unit_num_2)
+		end
+		
+		-- Reinforcement message
+		if player.isLocal and AGS_GLOBAL_SETTINGS.CBA_Rewards == "onslaught" then 
+			local event_cue_text = Loc_FormatText("$f5a005650ae44d2b8e05306aa891f90c:133", unit_num)
+			UI_CreateEventCueClickable(-1, 45, -1, 0, event_cue_text, "", "low_priority", "", "sfx_ui_event_queue_low_priority_play", 255, 255, 255, 255, ECV_Queue, nothing)
+		end
+	end
+	
+	-- Drain queued spawns from previous intervals
+	CBA_Rewards_ProcessQueue()
+end
+
+-- This function spawns a group of Villagers next each player's Castle
+function CBA_Rewards_StartingUnits()
+	if _LEAVER_PRECACHE_READY ~= true then return end
+	for i, player in ipairs(PLAYERS) do
+		local player_civ = Player_GetRaceName(player.id)
+		local unit_type = AGS_GetCivilizationUnit(player_civ, AGS_BP_VILLAGER)
+		local unit_num = 10 
+		CBA_Rewards_SpawnAndMove(player,unit_type,unit_num)
+	end	
+end
+
+function CBA_Rewards_GetSpawnAnchor(player)
+	if player == nil then
+		return nil
+	end
+
+	-- Primary: live keep position (supports runtime keep swaps/repositioning).
+	if player.keep ~= nil and player.keep.entity ~= nil then
+		local ok_keep_pos, keep_pos = pcall(Entity_GetPosition, player.keep.entity)
+		if ok_keep_pos and keep_pos ~= nil then
+			return keep_pos
+		end
+	end
+
+	-- Secondary: cached keep position from Mod_FindKeep.
+	if player.keep ~= nil and player.keep.position ~= nil then
+		return player.keep.position
+	end
+
+	-- Fallback: engine starting position.
+	if player.id ~= nil then
+		local ok, start_pos = pcall(Player_GetStartingPosition, player.id)
+		if ok and start_pos ~= nil then
+			return start_pos
+		end
+	end
+
+	-- Fallback to cached starting position from PLAYERS table
+	if player.startingPos ~= nil then
+		return player.startingPos
+	end
+
+	local player_index = player.playerIndex or player.index or -1
+	print("[CBA_REWARDS] No spawn anchor for player " .. tostring(player_index))
+	return nil
+end
+
+-- Public compatibility wrapper for debug suites and external tooling.
+-- Delegates directly to CBA_Rewards_SpawnAndMove (pop-cap, precache, and queue aware).
+function CBA_Rewards_SpawnReward(player, unit, num)
+	return CBA_Rewards_SpawnAndMove(player, unit, num)
+end
+
+-- This function spawns a Selected Unit from Reward List next each player's Castle
+-- Pop-aware: spawns as many as fit, queues remainder for next interval
+function CBA_Rewards_SpawnAndMove(player, unit, num)
+	
+	-- Check #1 - Player is alive
+	if Core_IsPlayerEliminated(player.id) then
+		return
+	end
+	
+	-- Check #2 - Population headroom
+	-- INSTRUMENTATION: wrap population checks in pcall to detect post-teardown execution
+	local ok_pop, current_pop = pcall(Player_GetCurrentPopulation, player.id, CT_Personnel)
+	if not ok_pop then
+		_onslaught_teardown_detected = true
+		print("[TRACE_CRASH] CBA_Rewards_SpawnAndMove: Player_GetCurrentPopulation FAILED — teardown detected")
+		return
+	end
+	local ok_cap, max_pop = pcall(Player_GetCurrentPopulationCap, player.id, CT_Personnel)
+	if not ok_cap then
+		_onslaught_teardown_detected = true
+		print("[TRACE_CRASH] CBA_Rewards_SpawnAndMove: Player_GetCurrentPopulationCap FAILED — teardown detected")
+		return
+	end
+	local remaining = max_pop - current_pop
+	local spawn_count = math.min(num, math.max(0, remaining))
+	
+	-- Queue remainder if we can't fit everything
+	if spawn_count < num then
+		local player_idx = World_GetPlayerIndex(player.id)
+		_reward_queue[player_idx] = _reward_queue[player_idx] or {}
+		table.insert(_reward_queue[player_idx], {unit = unit, num = num - spawn_count})
+		if player.isLocal then
+			local event_cue_text = Loc_FormatText("$f5a005650ae44d2b8e05306aa891f90c:133", num - spawn_count)
+			UI_CreateEventCueClickable(-1, 45, -1, 0, event_cue_text, "", "low_priority", "", "sfx_ui_event_queue_low_priority_play", 200, 200, 100, 255, ECV_Queue, nothing)
+		end
+	end
+	
+	if spawn_count <= 0 then
+		return
+	end
+	
+	-- Check #3 - Player's Castle
+	local spawn_anchor = CBA_Rewards_GetSpawnAnchor(player)
+	if spawn_anchor == nil then
+		return
+	end
+	local spawn_position = Util_GetOffsetPosition(spawn_anchor, 20, 10)
+	-- PERF: reuse per-player SGroup to prevent unbounded SGroup accumulation
+	local sgroup_name = "sg_reward_" .. tostring(player.id)
+	local sg_player_unit_ = SGroup_CreateIfNotFound(sgroup_name)
+	SGroup_Clear(sg_player_unit_)
+	local reward_bp_name = nil
+	local ok_bp_name, bp_name = pcall(BP_GetName, unit)
+	if ok_bp_name and bp_name ~= nil then
+		reward_bp_name = bp_name
+	end
+	if reward_bp_name ~= nil and type(_Leaver_RuntimeTrackPrecache) == "function" then
+		if type(_Leaver_EnsureRuntimeUnitPrecache) == "function" then
+			_Leaver_EnsureRuntimeUnitPrecache(reward_bp_name, unit, player.id, "reward_spawn", "reward_unit")
+		end
+		_Leaver_RuntimeTrackPrecache(reward_bp_name, player.id, "reward_spawn", "reward_unit")
+	end
+	-- INSTRUMENTATION: wrap unit deployment in pcall to detect post-teardown execution
+	local ok_deploy, deploy_result = pcall(UnitEntry_DeploySquads, player.id, sg_player_unit_, {{sbp = unit, numSquads = spawn_count }}, spawn_position)
+	if not ok_deploy then
+		_onslaught_teardown_detected = true
+		print("[TRACE_CRASH] CBA_Rewards_SpawnAndMove: UnitEntry_DeploySquads FAILED — teardown detected")
+		return
+	end
+	
+	-- Disable move command for quick selection 'idle' military
+	if AGS_GLOBAL_SETTINGS.CBA_Rewards == "onslaught" then
+		local move_position = Util_GetPositionFromAtoB(spawn_anchor,_CBA.center, 20)
+		Cmd_FormationMove(sg_player_unit_, move_position, false)
+	end
+
+end
+
+-- NOTE: Going above maxnumber causes error
+function CBA_Rewards_nextRequirement(player)
+	local player_civ = Player_GetRaceName(player.id)
+	
+	maxnumber=133337
+	for i,reward in pairs(_CBA.rewards[player_civ]) do
+		if reward ~= nil and i > player.obj_kill_requirement and i < maxnumber then
+			maxnumber = i
+		end
+	end
+	return maxnumber
+end
+
+-- Deferred flush for kill-objective UI (coalesces rapid Obj_Set* calls)
+function _CBA_Rewards_FlushKillUI()
+	_rewards_kill_ui_pending = false
+	local player = PLAYERS[World_GetPlayerIndex(localPlayer.id)]
+	if player == nil then return end
+	Obj_SetCounterMax(_CBA.obj_kill, player.obj_kill_requirement)
+	Obj_SetCounterCount(_CBA.obj_kill, player.killed_number)
+	Obj_SetProgress(_CBA.obj_kill, player.killed_number / player.obj_kill_requirement)
+end
+
+-- Kill Tracker /  Objective Config / Reward List Functions
+function CBA_Rewards_OnEntityKilled(context)
+	if _onslaught_teardown_detected then return end
+	
+	if context.killer==nil then
+		return 
+	end
+	
+	if context.victimOwner==nil then
+		return 
+	end
+	
+	local entity = Entity_FromID(context.killer.EntityID)
+	local player = Util_GetPlayerOwner(entity)
+	if player==nil then
+		return
+	end
+	player = PLAYERS[World_GetPlayerIndex(player)]
+	
+	-- Skip scoring for same-team kills (friendly fire / self-kill)
+	local victim_owner = Core_GetPlayersTableEntry(context.victimOwner)
+	if victim_owner ~= nil then
+		local killer_team = Player_GetTeam(player.id)
+		local victim_team = Player_GetTeam(victim_owner.id)
+		if killer_team == victim_team then
+			return
+		end
+	end
+	
+	-- Score Settings (point values defined in rewards/cba_kill_scoring.scar)
+	player.killed_number = player.killed_number + CBA_GetKillPoints(context.victim)
+
+
+	-- Objective Settings
+	local player_civ = Player_GetRaceName(player.id)
+	
+	if player.id == localPlayer.id then
+		
+		if player.killed_number >= player.obj_kill_requirement then
+			local nxt = CBA_Rewards_nextRequirement(player)
+			local str
+			
+			if _CBA.rewards[player_civ][nxt]==nil then
+				str="None"
+			else
+				str = _CBA.rewards[player_civ][nxt].title
+				
+			end
+			
+			local obj_kill_msg = CBA_Rewards_FormatObjectiveTitle(str)
+			
+			Obj_SetTitle(_CBA.obj_kill, obj_kill_msg)
+		end
+		
+		if not _rewards_kill_ui_pending then
+			_rewards_kill_ui_pending = true
+			Rule_AddOneShot(_CBA_Rewards_FlushKillUI, 0.25)
+		end
+	end
+	
+	-- Functions Reward list
+	if player.killed_number >= player.obj_kill_requirement then
+		
+		local reward = _CBA.rewards[player_civ][player.obj_kill_requirement]
+		if reward ~= nil then
+			
+			if reward.age ~= nil then
+				local age = Player_GetCurrentAge(player.id)
+				if age < reward.age then
+					Player_SetCurrentAge(player.id, age + 1)
+				end
+			end
+			if reward.unit ~= nil then
+				CBA_Rewards_SpawnAndMove(player,reward.unit,reward.num)
+				-- Message: Reward Received
+				if player.isLocal then
+					local event_cue_text = Loc_FormatText("$f5a005650ae44d2b8e05306aa891f90c:134") -- "Reward received"
+					UI_CreateEventCueClickable(-1, 45, -1, 0, event_cue_text, "", "low_priority", "", "sfx_ui_event_queue_low_priority_play", 255, 255, 255, 255, ECV_Queue, nothing)				
+				end
+			end
+			if reward.unit_upgrade ~= nil then
+				player.unit_type = reward.unit_upgrade
+				player.unit_num = reward.num_upgrade
+			end
+			if reward.unit_upgrade_2 ~= nil then
+				player.unit_type_2 = reward.unit_upgrade_2
+				player.unit_num_2 = reward.num_upgrade_2
+			end	-- Duplicate 		
+			if reward.resource ~= nil then
+				Player_AddResource(player.id,reward.resource,reward.rvalue,RES_Gift)
+			end
+			if reward.upgrade ~= nil then
+				AGS_CompleteUpgradeSafe(player.id, AGS_GetCivilizationUpgrade(player.raceName, reward.upgrade), "CBA_Rewards_Apply/upgrade/" .. tostring(player.raceName) .. "/" .. tostring(reward.upgrade))
+				-- After granting Siege Engineers, re-evaluate all limits so the
+				-- FieldConstruct_Gate recognises the upgrade and unlocks field production.
+				if reward.upgrade == AGS_UP_SIEGE_ENGINEERS then
+					CBA_Options_RevalidateAll(player)
+				end
+			end
+			if reward.upgradeBP ~= nil then
+				Player_CompleteUpgrade(player.id, BP_GetUpgradeBlueprint(reward.upgradeBP))
+			end
+			if reward.restriction ~= nil then
+				-- Auto-pop: suppress restriction unlock if building is a forbidden population source.
+				-- Houses and equivalent pop buildings must stay locked to prevent cap drift exploit.
+				local suppress_unlock = false
+				if _mod.pop_cap_incease_on_interval ~= nil and _mod.pop_cap_incease_on_interval ~= 0 and _AGS_POP_LOCK_KEYS ~= nil then
+					for _, bk in ipairs(_AGS_POP_LOCK_KEYS.buildings or {}) do
+						if bk == reward.restriction then
+							suppress_unlock = true
+							break
+						end
+					end
+				end
+				if suppress_unlock then
+					_AGS_AutoPop_RewardSuppressCount = (_AGS_AutoPop_RewardSuppressCount or 0) + 1
+					print(string.format("[AUTOPOP_REWARD_SUPPRESS] P%d [%s] restriction=%s suppressed (forbidden pop source under auto-pop, total_suppressed=%d)",
+						player.playerIndex or 0, tostring(player.raceName), tostring(reward.restriction), _AGS_AutoPop_RewardSuppressCount))
+				else
+					AGS_SetEntityProductionAvailabilitySafe(player.id, AGS_GetCivilizationEntity(player.raceName, reward.restriction), ITEM_UNLOCKED, "CBA_Rewards_Apply/restriction/" .. tostring(player.raceName) .. "/" .. tostring(reward.restriction))
+				end
+			end
+		end
+		
+		player.obj_kill_requirement =  CBA_Rewards_nextRequirement(player)
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Reward Queue Processing
+-- Called inside CBA_Rewards_SpawnUnits interval — drains up to 1 entry per player per tick.
+---------------------------------------------------------------------------------------------------
+
+function CBA_Rewards_ProcessQueue()
+	for player_idx, queue in pairs(_reward_queue) do
+		if #queue > 0 then
+			local player = PLAYERS[player_idx]
+			if player ~= nil and not Core_IsPlayerEliminated(player.id) then
+				local entry = queue[1]
+				local current_pop = Player_GetCurrentPopulation(player.id, CT_Personnel)
+				local max_pop = Player_GetCurrentPopulationCap(player.id, CT_Personnel)
+				local remaining = max_pop - current_pop
+				if remaining > 0 then
+					local spawn_count = math.min(entry.num, remaining)
+					local spawn_anchor = CBA_Rewards_GetSpawnAnchor(player)
+					if spawn_anchor ~= nil then
+						local spawn_position = Util_GetOffsetPosition(spawn_anchor, 20, 10)
+						-- PERF: reuse per-player SGroup; squads from prior spawn already received commands
+						local sgroup_name = "sg_reward_" .. tostring(player.id)
+						local sg_player_unit_ = SGroup_CreateIfNotFound(sgroup_name)
+						SGroup_Clear(sg_player_unit_)
+						local queue_bp_name = nil
+						local ok_bp_name, bp_name = pcall(BP_GetName, entry.unit)
+						if ok_bp_name and bp_name ~= nil then
+							queue_bp_name = bp_name
+						end
+						if queue_bp_name ~= nil and type(_Leaver_RuntimeTrackPrecache) == "function" then
+							if type(_Leaver_EnsureRuntimeUnitPrecache) == "function" then
+								_Leaver_EnsureRuntimeUnitPrecache(queue_bp_name, entry.unit, player.id, "reward_queue", "reward_unit")
+							end
+							_Leaver_RuntimeTrackPrecache(queue_bp_name, player.id, "reward_queue", "reward_unit")
+						end
+						local ok_deploy_queue, deploy_result_queue = pcall(UnitEntry_DeploySquads, player.id, sg_player_unit_, {{sbp = entry.unit, numSquads = spawn_count }}, spawn_position)
+						if not ok_deploy_queue then
+							if _onslaught_teardown_detected then
+								print("[TRACE_CRASH] CBA_Rewards_ProcessQueue: UnitEntry_DeploySquads FAILED — teardown detected")
+							else
+								print(string.format("[TRACE_CRASH] CBA_Rewards_ProcessQueue: UnitEntry_DeploySquads FAILED player=%s bp=%s err=%s",
+									tostring(player.id), tostring(queue_bp_name or "nil"), tostring(deploy_result_queue)))
+							end
+						end
+						if AGS_GLOBAL_SETTINGS.CBA_Rewards == "onslaught" then
+							local move_position = Util_GetPositionFromAtoB(spawn_anchor, _CBA.center, 20)
+							Cmd_FormationMove(sg_player_unit_, move_position, false)
+						end
+					end
+					entry.num = entry.num - spawn_count
+					if entry.num <= 0 then
+						table.remove(queue, 1)
+					end
+				end
+			else
+				-- Player eliminated, discard their queue
+				_reward_queue[player_idx] = nil
+			end
+		else
+			_reward_queue[player_idx] = nil
+		end
+	end
+end

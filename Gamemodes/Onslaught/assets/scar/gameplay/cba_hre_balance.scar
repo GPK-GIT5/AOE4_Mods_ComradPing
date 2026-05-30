@@ -1,0 +1,77 @@
+---------------------------------------------------------------------------------------------------
+-- Authors:
+-- Community Balancing (Balance for HRE DLC variant with Unlimited Resources)
+--
+-- Description:
+-- Applies production time penalty to HRE_HA_01 (DLC) units when Unlimited Resources is enabled.
+-- This prevents HRE's powerful units from becoming overpowered with infinite resources.
+-- Applies a +75% production time penalty (0.5714 production_speed_modifier multiplier).
+---------------------------------------------------------------------------------------------------
+
+CBA_HRE_BALANCE_MODULE = "CBA_HREBalance"
+CBA_HRE_BALANCE_MODIFIERS = { }
+
+---------------------------------------------------------------------------------------------------
+-- Delegates:
+---------------------------------------------------------------------------------------------------
+
+Core_RegisterModule(CBA_HRE_BALANCE_MODULE)	
+
+function CBA_HREBalance_UpdateModuleSettings()
+	AGS_Print("CBA_HREBalance_UpdateModuleSettings")
+	-- Only apply penalty when Unlimited Resources is enabled
+	if _mod.resource_amount ~= "unlimited" then
+		Core_UnregisterModule(CBA_HRE_BALANCE_MODULE)
+	end
+end
+
+function CBA_HREBalance_PresetFinalize()	
+	AGS_Print("CBA_HREBalance_PresetFinalize")
+	-- Only apply during Unlimited Resources mode
+	if _mod.resource_amount ~= "unlimited" then
+		AGS_Print("CBA_HREBalance_PresetFinalize: Unlimited Resources not enabled, skipping")
+		return
+	end
+	
+	CBA_HREBalance_ApplyPenalty(BP_GetSquadBlueprints())	
+end
+
+---------------------------------------------------------------------------------------------------
+-- Functions:
+---------------------------------------------------------------------------------------------------
+
+-- Apply production penalty to all HRE_HA_01 squad blueprints
+function CBA_HREBalance_ApplyPenalty(squad_blueprints)
+	for _, squad_bp in pairs(squad_blueprints) do 
+		-- Check if this squad belongs to HRE_HA_01 by blueprint name association
+		-- HRE_HA_01 squads typically have "_hre_ha_01" in their blueprint name
+		if squad_bp ~= nil then
+			local bp_name = BP_GetName(squad_bp)
+			if bp_name ~= nil and string.find(bp_name, "_hre_ha_01") ~= nil then
+				-- Track applied modifiers to avoid duplicates per blueprint
+				if CBA_HRE_BALANCE_MODIFIERS[squad_bp.PropertyBagGroupID] == nil then
+					CBA_HRE_BALANCE_MODIFIERS[squad_bp.PropertyBagGroupID] = true
+					-- Apply production time penalty to all players
+					for _, player in pairs(PLAYERS) do	
+						CBA_HREBalance_ApplyModifier(player.id, squad_bp, 0.5714)
+					end
+					AGS_Print(string.format("CBA_HREBalance: Applied penalty to squad %s", bp_name))
+				end
+			end
+		end
+	end
+end
+
+-- Apply production_speed_modifier to a specific HRE squad blueprint for a player
+-- modifier_value of 0.5714 = 1.75x slower production (75% longer production time)
+function CBA_HREBalance_ApplyModifier(player_id, squad_bp, modifier_value)
+	local modifier = Modifier_Create(MAT_SquadType, "production_speed_modifier", MUT_Multiplication, false, modifier_value, squad_bp)
+	if modifier ~= nil then
+		local ok, result = pcall(Modifier_ApplyToPlayer, modifier, player_id, 0.0)
+		if not ok then
+			AGS_Print(string.format("[CBA_HREBalance] Modifier apply failed for P%d: %s", player_id, tostring(result)))
+		end
+	else
+		AGS_Print(string.format("[CBA_HREBalance] Failed to create modifier for P%d on squad %s", player_id, BP_GetName(squad_bp)))
+	end
+end	

@@ -1,0 +1,1979 @@
+---------------------------------------------------------------------------------------------------
+-- Description:
+-- This function ages up the player every set minutes
+---------------------------------------------------------------------------------------------------
+
+_autoage = {
+	module = "AutoAge",
+	objective_main_title = "$f5a005650ae44d2b8e05306aa891f90c:277", -- "Time remaining until next Age unlocked"
+	objective_secondary_title = "$999578", -- "Place a landmark"
+	objective_secondary_requirement = 4,
+	options = {},
+	icons = {
+		objective = "icons\\races\\common\\victory_conditions\\victory_condition_conquest",
+	},
+}
+
+CBA_AUTO_AGE_AUTOAGE_MODULE = "CBA_AutoAge"
+
+_AUTOAGE_SPECIAL_UPGRADES = {
+	templar = {
+		feudal = {
+			"upgrade_age_dark_com_1_tem",
+			"upgrade_age_dark_com_2_tem",
+			"upgrade_age_dark_com_3_tem",
+		},
+		castle = {
+			"upgrade_age_feudal_com_1_tem",
+			"upgrade_age_feudal_com_2_tem",
+			"upgrade_age_feudal_com_3_tem",
+		},
+		imperial = {
+			"upgrade_age_castle_com_1_tem",
+			"upgrade_age_castle_com_2_tem",
+			"upgrade_age_castle_com_3_tem",
+		},
+	},
+	mongol_ha_gol = {
+		feudal = {
+			"upgrade_tent_dark_1_khan_mon_ha_gol",
+			"upgrade_tent_dark_2_cart_mon_ha_gol",
+		},
+		castle = {
+			"upgrade_tent_feudal_1_pasture_mon_ha_gol",
+			"upgrade_tent_feudal_2_relics_mon_ha_gol",
+		},
+		imperial = {
+			"upgrade_tent_castle_1_tribute_mon_ha_gol",
+			"upgrade_tent_castle_2_batch_production_mon_ha_gol",
+		},
+	},
+	abbasid = {
+		feudal = {
+			"upgrade_add_culture_wing",
+			"upgrade_add_economy_wing",
+			"upgrade_add_military_wing",
+			"upgrade_add_trade_wing",
+		},
+		castle = {
+			"upgrade_add_culture_wing_feudal",
+			"upgrade_add_economy_wing_feudal",
+			"upgrade_add_military_wing_feudal",
+			"upgrade_add_trade_wing_feudal",
+		},
+		imperial = {
+			"upgrade_add_culture_wing_castle",
+			"upgrade_add_economy_wing_castle",
+			"upgrade_add_military_wing_castle",
+			"upgrade_add_trade_wing_castle",
+		},
+	},
+	abbasid_ha_01 = {
+		feudal = {
+			"upgrade_add_culture_wing_dark_a_abb_ha_01",
+			"upgrade_add_economy_wing_dark_a_abb_ha_01",
+			"upgrade_add_military_wing_dark_a_abb_ha_01",
+			"upgrade_add_trade_wing_dark_a_abb_ha_01",
+		},
+		castle = {
+			"upgrade_add_culture_wing_feudal_a_abb_ha_01",
+			"upgrade_add_economy_wing_feudal_a_abb_ha_01",
+			"upgrade_add_military_wing_feudal_a_abb_ha_01",
+			"upgrade_add_trade_wing_feudal_a_abb_ha_01",
+		},
+		imperial = {
+			"upgrade_add_culture_wing_castle_a_abb_ha_01",
+			"upgrade_add_economy_wing_castle_a_abb_ha_01",
+			"upgrade_add_military_wing_castle_a_abb_ha_01",
+			"upgrade_add_trade_wing_castle_a_abb_ha_01",
+		},
+	},
+}
+
+---------------------------------------------------------------------------------------------------
+-- Delegates:
+---------------------------------------------------------------------------------------------------
+
+Core_RegisterModule(CBA_AUTO_AGE_AUTOAGE_MODULE)	
+
+function CBA_AutoAge_UpdateModuleSettings()
+	AGS_Print("CBA_AutoAge_UpdateModuleSettings")
+	if AGS_GLOBAL_SETTINGS.AutoAge == 0 or AGS_GLOBAL_SETTINGS.StartingAge == AGS_GS_AGE_IMPERIAL then
+		Core_UnregisterModule(CBA_AUTO_AGE_AUTOAGE_MODULE)
+	end
+end
+
+function CBA_AutoAge_PresetFinalize()
+	AGS_Print("CBA_AutoAge_PresetFinalize")
+	
+	-- Register synchronized handler for BoonUI special-age choices.
+	-- All gameplay mutations driven by the BoonUI panel are routed through this
+	-- event so they execute identically on every peer (deterministic MP).
+	-- See docs/game_systems/systems/mp-deterministic-mutation-pattern.md.
+	Network_RegisterEvent("CBA_AutoAge_ApplySpecialChoiceNtw")
+	
+	-- Functions
+	_AUTOAGE_DIAG_PASS = 0
+	CBA_AutoAge_SetMaxAge()
+	Rule_AddOneShot(CBA_AutoAge_ReapplyStartingRestrictions, 1)
+	Rule_AddOneShot(CBA_AutoAge_ReapplyStartingRestrictions, 3)
+	Rule_AddOneShot(CBA_AutoAge_ReapplyStartingRestrictions, 5)
+	CBA_AutoAge_SetupObjective()
+	CBA_Auto_Age()
+	-- Rules
+	Rule_AddInterval(CBA_AutoAge_UpdateTimer, 1)
+	Rule_AddGlobalEvent(CBA_AutoAge_ConstructionComplete, GE_ConstructionComplete)
+	Rule_AddGlobalEvent(CBA_AutoAge_UpgradeComplete, GE_UpgradeComplete)
+	
+end
+
+function CBA_AutoAge_PlayerHasAnyUpgrade(player_id, upgrades)
+	for _, upg_name in ipairs(upgrades) do
+		local ok_bp, ubp = pcall(BP_GetUpgradeBlueprint, upg_name)
+		if not ok_bp then
+			ubp = nil
+		end
+		if ubp ~= nil and Player_HasUpgrade(player_id, ubp) then
+			return true
+		end
+	end
+	return false
+end
+
+function CBA_AutoAge_SetUpgradeAvailabilitySafe(player_id, upg_name, lock_type, context)
+	local ok_bp, ubp = pcall(BP_GetUpgradeBlueprint, upg_name)
+	if not ok_bp or ubp == nil then
+		print(string.format("[AUTOAGE][WARN] missing upgrade blueprint context=%s name=%s",
+			tostring(context), tostring(upg_name)))
+		return false
+	end
+
+	local ok_set = pcall(Player_SetUpgradeAvailability, player_id, ubp, lock_type)
+	if not ok_set then
+		print(string.format("[AUTOAGE][WARN] failed Player_SetUpgradeAvailability context=%s player=%s name=%s lock=%s",
+			tostring(context), tostring(player_id), tostring(upg_name), tostring(lock_type)))
+		return false
+	end
+
+	return true
+end
+
+-- Golden Tent building is now unrestricted; upgrades remain controlled via SyncSpecialUpgradeAvailability.
+-- Retained as a no-op stub for call-site compatibility.
+function CBA_AutoAge_EnforceGoldenTentLock(player, context)
+	return false
+end
+
+---------------------------------------------------------------------------------------------------
+-- Unified age-menu management
+-- Replaces engine Player_SetMaximumAge which only handles 9 base + campaign civs.
+-- Covers all 23 playable civs via AGS_CIV_PREFIXES.
+-- Derived from construction-menu-map data extraction (docs/api_reference/indexes/construction-menu-map).
+---------------------------------------------------------------------------------------------------
+
+-- Wing upgrade names for Abbasid-family civs (age -> list of upgrade BP strings).
+-- Ayyubid has A/B variants per wing per tier; base Abbasid has one per wing per tier.
+_AUTOAGE_WING_UPGRADES = {
+	abbasid = {
+		dark = {
+			"upgrade_add_culture_wing",
+			"upgrade_add_economy_wing",
+			"upgrade_add_military_wing",
+			"upgrade_add_trade_wing",
+		},
+		feudal = {
+			"upgrade_add_culture_wing_feudal",
+			"upgrade_add_economy_wing_feudal",
+			"upgrade_add_military_wing_feudal",
+			"upgrade_add_trade_wing_feudal",
+		},
+		castle = {
+			"upgrade_add_culture_wing_castle",
+			"upgrade_add_economy_wing_castle",
+			"upgrade_add_military_wing_castle",
+			"upgrade_add_trade_wing_castle",
+		},
+		imperial = {
+			"upgrade_add_culture_wing_imperial",
+			"upgrade_add_economy_wing_imperial",
+			"upgrade_add_military_wing_imperial",
+			"upgrade_add_trade_wing_imperial",
+		},
+	},
+	abbasid_ha_01 = {
+		dark = {
+			"upgrade_add_culture_wing_dark_a_abb_ha_01",
+			"upgrade_add_culture_wing_dark_b_abb_ha_01",
+			"upgrade_add_economy_wing_dark_a_abb_ha_01",
+			"upgrade_add_economy_wing_dark_b_abb_ha_01",
+			"upgrade_add_military_wing_dark_a_abb_ha_01",
+			"upgrade_add_military_wing_dark_b_abb_ha_01",
+			"upgrade_add_trade_wing_dark_a_abb_ha_01",
+			"upgrade_add_trade_wing_dark_b_abb_ha_01",
+		},
+		feudal = {
+			"upgrade_add_culture_wing_feudal_a_abb_ha_01",
+			"upgrade_add_culture_wing_feudal_b_abb_ha_01",
+			"upgrade_add_economy_wing_feudal_a_abb_ha_01",
+			"upgrade_add_economy_wing_feudal_b_abb_ha_01",
+			"upgrade_add_military_wing_feudal_a_abb_ha_01",
+			"upgrade_add_military_wing_feudal_b_abb_ha_01",
+			"upgrade_add_trade_wing_feudal_a_abb_ha_01",
+			"upgrade_add_trade_wing_feudal_b_abb_ha_01",
+		},
+		castle = {
+			"upgrade_add_culture_wing_castle_a_abb_ha_01",
+			"upgrade_add_culture_wing_castle_b_abb_ha_01",
+			"upgrade_add_economy_wing_castle_a_abb_ha_01",
+			"upgrade_add_economy_wing_castle_b_abb_ha_01",
+			"upgrade_add_military_wing_castle_a_abb_ha_01",
+			"upgrade_add_military_wing_castle_b_abb_ha_01",
+			"upgrade_add_trade_wing_castle_a_abb_ha_01",
+			"upgrade_add_trade_wing_castle_b_abb_ha_01",
+		},
+		imperial = {
+			"upgrade_add_culture_wing_imperial_a_abb_ha_01",
+			"upgrade_add_culture_wing_imperial_b_abb_ha_01",
+			"upgrade_add_economy_wing_imperial_a_abb_ha_01",
+			"upgrade_add_economy_wing_imperial_b_abb_ha_01",
+			"upgrade_add_military_wing_imperial_a_abb_ha_01",
+			"upgrade_add_military_wing_imperial_b_abb_ha_01",
+			"upgrade_add_trade_wing_imperial_a_abb_ha_01",
+			"upgrade_add_trade_wing_imperial_b_abb_ha_01",
+		},
+	},
+}
+
+-- Runtime race alias normalization for civ ids that may vary by build/profile.
+_AUTOAGE_RACE_ALIASES = {
+	japanese_ha = "japanese_ha_sen",
+	byzantine_ha = "byzantine_ha_mac",
+	sultanate_ha = "sultanate_ha_tug",
+}
+
+-- Authoritative menu names per civ — exhaustive list of candidates to try.
+-- For HA variant civs, includes BOTH variant-specific AND parent-civ names.
+-- When locking, ALL candidates are tried (not just the first that succeeds).
+-- Source: construction-menu-map.lua + AGS_CIV_PREFIXES derivation.
+_AUTOAGE_CIV_MENUS = {
+	abbasid = {
+		age_type = "wing",
+		age_menus = { [2] = {"abb_age2"}, [3] = {"abb_age3"}, [4] = {"abb_age4"} },
+		wonder_menus = {},
+	},
+	abbasid_ha_01 = {
+		age_type = "wing",
+		age_menus = { [2] = {"abb_ha_01_age2", "abb_age2"}, [3] = {"abb_ha_01_age3", "abb_age3"}, [4] = {"abb_ha_01_age4", "abb_age4"} },
+		wonder_menus = {},
+	},
+	byzantine = {
+		age_menus = { [2] = {"byz_age2"}, [3] = {"byz_age3"}, [4] = {"byz_age4"} },
+		wonder_menus = { [1] = {"byz_age1_wonders"}, [2] = {"byz_age2_wonders"}, [3] = {"byz_age3_wonders"} },
+	},
+	byzantine_ha_mac = {
+		age_menus = { [2] = {"byz_ha_mac_age2", "byz_age2"}, [3] = {"byz_ha_mac_age3", "byz_age3"}, [4] = {"byz_ha_mac_age4", "byz_age4"} },
+		wonder_menus = { [1] = {"byz_ha_mac_age1_wonders", "byz_age1_wonders"}, [2] = {"byz_ha_mac_age2_wonders", "byz_age2_wonders"}, [3] = {"byz_ha_mac_age3_wonders", "byz_age3_wonders"} },
+	},
+	chinese = {
+		age_menus = { [2] = {"chi_age2"}, [3] = {"chi_age3"}, [4] = {"chi_age4"} },
+		wonder_menus = { [1] = {"chi_age1_wonders"}, [2] = {"chi_age2_wonders"}, [3] = {"chi_age3_wonders"} },
+	},
+	chinese_ha_01 = {
+		age_menus = { [2] = {"chi_ha_01_age2", "chi_age2"}, [3] = {"chi_ha_01_age3", "chi_age3"}, [4] = {"chi_ha_01_age4", "chi_age4"} },
+		wonder_menus = { [1] = {"chi_ha_01_age1_wonders", "chi_age1_wonders"}, [2] = {"chi_ha_01_age2_wonders", "chi_age2_wonders"}, [3] = {"chi_ha_01_age3_wonders", "chi_age3_wonders"} },
+	},
+	english = {
+		age_menus = { [2] = {"eng_age2"}, [3] = {"eng_age3"}, [4] = {"eng_age4"} },
+		wonder_menus = { [1] = {"eng_age1_wonders"}, [2] = {"eng_age2_wonders"}, [3] = {"eng_age3_wonders"} },
+	},
+	french = {
+		age_menus = { [2] = {"fre_age2"}, [3] = {"fre_age3"}, [4] = {"fre_age4"} },
+		wonder_menus = { [1] = {"fre_age1_wonders"}, [2] = {"fre_age2_wonders"}, [3] = {"fre_age3_wonders"} },
+	},
+	french_ha_01 = {
+		age_menus = { [2] = {"fre_ha_01_age2", "fre_age2"}, [3] = {"fre_ha_01_age3", "fre_age3"}, [4] = {"fre_ha_01_age4", "fre_age4"} },
+		wonder_menus = { [1] = {"fre_ha_01_age1_wonders", "fre_age1_wonders"}, [2] = {"fre_ha_01_age2_wonders", "fre_age2_wonders"}, [3] = {"fre_ha_01_age3_wonders", "fre_age3_wonders"} },
+	},
+	hre = {
+		age_menus = { [2] = {"hre_age2"}, [3] = {"hre_age3"}, [4] = {"hre_age4"} },
+		wonder_menus = { [1] = {"hre_age1_wonders"}, [2] = {"hre_age2_wonders"}, [3] = {"hre_age3_wonders"} },
+	},
+	hre_ha_01 = {
+		age_menus = { [2] = {"hre_ha_01_age2", "hre_age2"}, [3] = {"hre_ha_01_age3", "hre_age3"}, [4] = {"hre_ha_01_age4", "hre_age4"} },
+		wonder_menus = { [1] = {"hre_ha_01_age1_wonders", "hre_age1_wonders"}, [2] = {"hre_ha_01_age2_wonders", "hre_age2_wonders"}, [3] = {"hre_ha_01_age3_wonders", "hre_age3_wonders"} },
+	},
+	japanese = {
+		age_menus = { [2] = {"jpn_age2"}, [3] = {"jpn_age3"}, [4] = {"jpn_age4"} },
+		wonder_menus = { [1] = {"jpn_age1_wonders"}, [2] = {"jpn_age2_wonders"}, [3] = {"jpn_age3_wonders"} },
+	},
+	japanese_ha_sen = {
+		age_menus = { [2] = {"jpn_ha_sen_age2", "jpn_age2"}, [3] = {"jpn_ha_sen_age3", "jpn_age3"}, [4] = {"jpn_ha_sen_age4", "jpn_age4"} },
+		wonder_menus = { [1] = {"jpn_ha_sen_age1_wonders", "jpn_age1_wonders"}, [2] = {"jpn_ha_sen_age2_wonders", "jpn_age2_wonders"}, [3] = {"jpn_ha_sen_age3_wonders", "jpn_age3_wonders"} },
+	},
+	-- Jin uses no jin_-prefixed construction menus. Source of truth:
+	-- attrib/instances/sbps/races/jin_dynasty/unit_villager_1_jin.xml &
+	-- unit_mounted_villager_1_jin.xml — `construction_menu` references are:
+	--   age1 landmarks   = fre_age1            (not locked by AutoAge)
+	--   age2 landmarks   = chi_age2
+	--   age3 landmarks   = fre_age3
+	--   age4 landmarks   = fre_age4
+	--   age1 wonders     = fre_age1_wonders
+	--   age2 wonders     = fre_age2_wonders
+	--   age3 wonders     = chi_age3_wonders
+	-- Locks are per-player, so referencing chi_/fre_ menus here only affects Jin players.
+	jin_dynasty = {
+		age_menus = { [2] = {"chi_age2"}, [3] = {"fre_age3"}, [4] = {"fre_age4"} },
+		wonder_menus = { [1] = {"fre_age1_wonders"}, [2] = {"fre_age2_wonders"}, [3] = {"chi_age3_wonders"} },
+	},
+	lancaster = {
+		age_menus = { [2] = {"lan_age2", "eng_age2"}, [3] = {"lan_age3", "eng_age3"}, [4] = {"lan_age4", "eng_age4"} },
+		wonder_menus = { [1] = {"lan_age1_wonders", "eng_age1_wonders"}, [2] = {"lan_age2_wonders", "eng_age2_wonders"}, [3] = {"lan_age3_wonders", "eng_age3_wonders"} },
+	},
+	malian = {
+		age_menus = { [2] = {"mal_age2"}, [3] = {"mal_age3"}, [4] = {"mal_age4"} },
+		wonder_menus = { [1] = {"mal_age1_wonders"}, [2] = {"mal_age2_wonders"}, [3] = {"mal_age3_wonders"} },
+	},
+	mongol = {
+		age_menus = { [2] = {"mon_age2"}, [3] = {"mon_age3"}, [4] = {"mon_age4"} },
+		wonder_menus = { [1] = {"mon_age1_wonders"}, [2] = {"mon_age2_wonders"}, [3] = {"mon_age3_wonders"} },
+	},
+	mongol_ha_gol = {
+		age_type = "upgrade",
+		age_menus = { [2] = {"mon_ha_gol_age2", "mon_age2"}, [3] = {"mon_ha_gol_age3", "mon_age3"}, [4] = {"mon_ha_gol_age4", "mon_age4"} },
+		wonder_menus = { [1] = {"mon_ha_gol_age1_wonders", "mon_age1_wonders"} },
+	},
+	ottoman = {
+		-- cardinal.scar line 699: ottoman = "sul_" — no separate ott_* construction menus exist;
+		-- Ottoman reuses Sultanate landmark menu IDs at runtime.
+		age_menus = { [2] = {"sul_age2"}, [3] = {"sul_age3"}, [4] = {"sul_age4"} },
+		wonder_menus = { [1] = {"sul_age1_wonders"}, [2] = {"sul_age2_wonders"}, [3] = {"sul_age3_wonders"} },
+	},
+	rus = {
+		age_menus = { [2] = {"rus_age2"}, [3] = {"rus_age3"}, [4] = {"rus_age4"} },
+		wonder_menus = { [1] = {"rus_age1_wonders"}, [2] = {"rus_age2_wonders"}, [3] = {"rus_age3_wonders"} },
+	},
+	sultanate = {
+		age_menus = { [2] = {"sul_age2"}, [3] = {"sul_age3"}, [4] = {"sul_age4"} },
+		wonder_menus = { [1] = {"sul_age1_wonders"}, [2] = {"sul_age2_wonders"}, [3] = {"sul_age3_wonders"} },
+	},
+	sultanate_ha_tug = {
+		age_menus = { [2] = {"sul_ha_tug_age2", "sul_age2"}, [3] = {"sul_ha_tug_age3", "sul_age3"}, [4] = {"sul_ha_tug_age4", "sul_age4"} },
+		wonder_menus = { [1] = {"sul_ha_tug_age1_wonders", "sul_age1_wonders"}, [2] = {"sul_ha_tug_age2_wonders", "sul_age2_wonders"}, [3] = {"sul_ha_tug_age3_wonders", "sul_age3_wonders"} },
+	},
+	templar = {
+		age_type = "upgrade",
+		age_menus = { [2] = {"tem_age2", "fre_age2"}, [3] = {"tem_age3", "fre_age3"}, [4] = {"tem_age4", "fre_age4"} },
+		wonder_menus = {},
+	},
+}
+
+-- Diagnostic tracking is opt-in via DevMenu logging.
+_AUTOAGE_DIAG_ENABLED = false
+_AUTOAGE_DIAG_PASS = 0
+
+-- Opt-in informational logging; warnings remain enabled by default.
+_AUTOAGE_DEBUG_LOGS = false
+_AUTOAGE_WARN_ONCE = _AUTOAGE_WARN_ONCE or {}
+_AUTOAGE_INFO_LOGGING_ENABLED = _AUTOAGE_INFO_LOGGING_ENABLED
+
+local function _AutoAge_IsSharedLoggingEnabled()
+	if type(AGS_IsDebugLoggingEnabled) == "function" then
+		return AGS_IsDebugLoggingEnabled() == true
+	end
+	return true
+end
+
+local function _AutoAge_IsLegacyInfoLoggingEnabled()
+	return _AUTOAGE_DEBUG_LOGS == true
+end
+
+local function _AutoAge_ShouldLogInfo()
+	if not _AutoAge_IsSharedLoggingEnabled() then
+		return false
+	end
+	if _AUTOAGE_INFO_LOGGING_ENABLED ~= nil then
+		return _AUTOAGE_INFO_LOGGING_ENABLED == true
+	end
+	return _AutoAge_IsLegacyInfoLoggingEnabled()
+end
+
+local function _AutoAge_LogInfo(message)
+	if _AutoAge_ShouldLogInfo() then
+		print(message)
+	end
+end
+
+local function _AutoAge_LogTrace(message)
+	if _AutoAge_ShouldLogInfo() then
+		print(message)
+	end
+end
+
+local function _AutoAge_LogDiag(message)
+	if _AutoAge_IsSharedLoggingEnabled() and _AUTOAGE_DIAG_ENABLED == true then
+		print(message)
+	end
+end
+
+local function _AutoAge_LogWarn(message, once_key)
+	if once_key ~= nil then
+		if _AUTOAGE_WARN_ONCE[once_key] then
+			return
+		end
+		_AUTOAGE_WARN_ONCE[once_key] = true
+	end
+	print(message)
+end
+
+function CBA_AutoAge_ResolveRaceName(playerID)
+	local raceName = Player_GetRaceName(playerID)
+	if raceName == nil then
+		return nil, nil
+	end
+
+	local normalized = _AUTOAGE_RACE_ALIASES[raceName]
+	if normalized ~= nil then
+		return normalized, raceName
+	end
+
+	return raceName, raceName
+end
+
+function CBA_AutoAge_SetConstructionMenuAvailabilitySafe(playerID, menuName, state, context, suppressLog)
+	local ok_set, err = pcall(Player_SetConstructionMenuAvailability, playerID, menuName, state)
+	if not ok_set then
+		if not suppressLog then
+			print(string.format("[AUTOAGE][WARN] failed Player_SetConstructionMenuAvailability context=%s player=%s menu=%s state=%s err=%s",
+				tostring(context), tostring(playerID), tostring(menuName), tostring(state), tostring(err)))
+		end
+		return false
+	end
+
+	return true
+end
+
+function CBA_AutoAge_GetMenuPrefixesForRace(raceName)
+	local prefixes = {}
+	local seen = {}
+
+	local function pushPrefix(prefix)
+		if prefix == nil or prefix == "" or seen[prefix] then
+			return
+		end
+		seen[prefix] = true
+		table.insert(prefixes, prefix)
+	end
+
+	pushPrefix(AGS_CIV_PREFIXES[raceName])
+
+	local parentRace = nil
+	if AGS_CIV_FACTION_MAP ~= nil then
+		parentRace = AGS_CIV_FACTION_MAP[raceName]
+	end
+	if parentRace == nil and AGS_CIV_PARENT_MAP ~= nil then
+		parentRace = AGS_CIV_PARENT_MAP[raceName]
+	end
+	if parentRace ~= nil then
+		pushPrefix(AGS_CIV_PREFIXES[parentRace])
+	end
+
+	return prefixes
+end
+
+function CBA_AutoAge_SetMenuAvailabilityWithFallback(playerID, raceName, menuSuffix, state, context)
+	local prefixes = CBA_AutoAge_GetMenuPrefixesForRace(raceName)
+	if #prefixes == 0 then
+		_AutoAge_LogWarn(string.format("[AUTOAGE][WARN] no menu prefix candidates race=%s player=%s context=%s suffix=%s",
+			tostring(raceName), tostring(playerID), tostring(context), tostring(menuSuffix)),
+			"no_prefix|" .. tostring(raceName) .. "|" .. tostring(context) .. "|" .. tostring(menuSuffix))
+		return false
+	end
+
+	-- Try ALL prefix candidates, not just the first that succeeds.
+	-- Parent-prefix fallback may silently "succeed" without affecting the variant player's actual menu.
+	local tried = {}
+	local any_succeeded = false
+	local first_success = nil
+	for idx, prefix in ipairs(prefixes) do
+		local menuName = prefix .. menuSuffix
+		table.insert(tried, menuName)
+		local ok = CBA_AutoAge_SetConstructionMenuAvailabilitySafe(playerID, menuName, state, context, true)
+		if ok then
+			any_succeeded = true
+			if first_success == nil then
+				first_success = menuName
+			end
+			if idx > 1 then
+				_AutoAge_LogInfo(string.format("[AUTOAGE] menu fallback also applied race=%s player=%s context=%s using=%s",
+					tostring(raceName), tostring(playerID), tostring(context), tostring(menuName)))
+			end
+		end
+	end
+
+	if any_succeeded then
+		return true
+	end
+
+	_AutoAge_LogWarn(string.format("[AUTOAGE][WARN] unresolved menu race=%s player=%s context=%s suffix=%s tried=%s",
+		tostring(raceName), tostring(playerID), tostring(context), tostring(menuSuffix), table.concat(tried, ",")),
+		"unresolved|" .. tostring(raceName) .. "|" .. tostring(context) .. "|" .. tostring(menuSuffix))
+	return false
+end
+
+-- Exhaustive menu lock: tries ALL candidate menu names from _AUTOAGE_CIV_MENUS.
+-- Returns {succeeded=count, failed=count, details={...}}
+function CBA_AutoAge_LockMenuExhaustive(playerID, candidates, state, context)
+	local result = { succeeded = 0, failed = 0, details = {} }
+	if candidates == nil then
+		return result
+	end
+	for _, menuName in ipairs(candidates) do
+		local ok = CBA_AutoAge_SetConstructionMenuAvailabilitySafe(playerID, menuName, state, context, true)
+		if ok then
+			result.succeeded = result.succeeded + 1
+		else
+			result.failed = result.failed + 1
+		end
+		table.insert(result.details, { name = menuName, ok = ok })
+	end
+	return result
+end
+
+-- Set maximum age for a player with correct menu handling for ALL civs.
+-- Replaces Player_SetMaximumAge which silently no-ops for 13 civs.
+-- Uses _AUTOAGE_CIV_MENUS for exhaustive menu name coverage; falls back to prefix construction.
+function CBA_AutoAge_SetMaximumAge(playerID, maximumAge)
+	-- Imperial or above: proceed to unlock all menus that were previously ITEM_REMOVED.
+	-- The loop logic naturally sets everything to ITEM_DEFAULT (age/wonder menus) or
+	-- ITEM_LOCKED (wing tiers) when maximumAge >= 4, which is the correct Imperial state.
+
+	local resolvedRaceName, rawRaceName = CBA_AutoAge_ResolveRaceName(playerID)
+	if resolvedRaceName == nil then
+		print(string.format("[AUTOAGE][WARN] CBA_AutoAge_SetMaximumAge nil race player=%s — menus not locked",
+			tostring(playerID)))
+		Player_SetStateModelInt(playerID, "player_max_age", maximumAge)
+		return
+	end
+
+	local prefix = AGS_CIV_PREFIXES[resolvedRaceName]
+	local diag = _AutoAge_IsSharedLoggingEnabled() and _AUTOAGE_DIAG_ENABLED == true
+	local diag_results = {}
+
+	if prefix == nil then
+		print(string.format("[AUTOAGE][WARN] CBA_AutoAge_SetMaximumAge unknown race=%s player=%s — menus not locked",
+			tostring(resolvedRaceName), tostring(playerID)))
+	else
+		if rawRaceName ~= nil and rawRaceName ~= resolvedRaceName then
+			_AutoAge_LogInfo(string.format("[AUTOAGE] race alias normalized raw=%s resolved=%s player=%s",
+				tostring(rawRaceName), tostring(resolvedRaceName), tostring(playerID)))
+		end
+
+		local civMenus = _AUTOAGE_CIV_MENUS[resolvedRaceName]
+
+		-- Lock/unlock age construction menus
+		for age = 2, 4 do
+			local state = (maximumAge < age) and ITEM_REMOVED or ITEM_DEFAULT
+			local candidates = civMenus and civMenus.age_menus and civMenus.age_menus[age]
+			local locked_any = false
+
+			if candidates ~= nil and #candidates > 0 then
+				-- Exhaustive: try ALL candidate menu names from CIV_MENUS table
+				local result = CBA_AutoAge_LockMenuExhaustive(playerID, candidates, state, "SetMaximumAge/age" .. age)
+				locked_any = result.succeeded > 0
+				if diag then
+					for _, d in ipairs(result.details) do
+						table.insert(diag_results, { menu = d.name, ok = d.ok, tier = "age" .. age })
+					end
+				end
+			end
+
+			if not locked_any then
+				-- Fallback: prefix construction (original approach)
+				local menuSuffix = "age" .. tostring(age)
+				local fb_ok = CBA_AutoAge_SetMenuAvailabilityWithFallback(playerID, resolvedRaceName, menuSuffix, state,
+					"CBA_AutoAge_SetMaximumAge/age")
+				if diag and not fb_ok then
+					table.insert(diag_results, { menu = prefix .. menuSuffix, ok = false, tier = "age" .. age, note = "fallback_also_failed" })
+				end
+			end
+		end
+
+		-- Wing civs: lock/unlock wing upgrade availability
+		local wingCfg = _AUTOAGE_WING_UPGRADES[resolvedRaceName]
+		if wingCfg ~= nil then
+			local function setWingTier(tierName, lock)
+				local upgrades = wingCfg[tierName]
+				if upgrades ~= nil then
+					for _, upg_name in ipairs(upgrades) do
+						CBA_AutoAge_SetUpgradeAvailabilitySafe(playerID, upg_name, lock,
+							"CBA_AutoAge_SetMaximumAge/" .. tierName)
+					end
+				end
+			end
+
+			-- Wing tiers: ITEM_REMOVED while max age hasn't reached, ITEM_LOCKED once reachable.
+			-- Kept ITEM_LOCKED (not ITEM_DEFAULT) to prevent manual research at HoW;
+			-- Player_CompleteUpgrade in BoonSelection callback bypasses the lock.
+			setWingTier("dark",     maximumAge < 2 and ITEM_REMOVED or ITEM_LOCKED)
+			setWingTier("feudal",   maximumAge < 3 and ITEM_REMOVED or ITEM_LOCKED)
+			setWingTier("castle",   maximumAge < 4 and ITEM_REMOVED or ITEM_LOCKED)
+			setWingTier("imperial", maximumAge < 4 and ITEM_REMOVED or ITEM_LOCKED)
+		else
+			-- Non-wing civs: lock/unlock wonder/landmark menus
+			for wonderAge = 1, 3 do
+				local state = (maximumAge < (wonderAge + 1)) and ITEM_REMOVED or ITEM_DEFAULT
+				local candidates = civMenus and civMenus.wonder_menus and civMenus.wonder_menus[wonderAge]
+				local locked_any = false
+
+				if candidates ~= nil and #candidates > 0 then
+					local result = CBA_AutoAge_LockMenuExhaustive(playerID, candidates, state, "SetMaximumAge/wonder" .. wonderAge)
+					locked_any = result.succeeded > 0
+					if diag then
+						for _, d in ipairs(result.details) do
+							table.insert(diag_results, { menu = d.name, ok = d.ok, tier = "wonder" .. wonderAge })
+						end
+					end
+				end
+
+				if not locked_any then
+					local menuSuffix = "age" .. tostring(wonderAge) .. "_wonders"
+					local fb_ok = CBA_AutoAge_SetMenuAvailabilityWithFallback(playerID, resolvedRaceName, menuSuffix, state,
+						"CBA_AutoAge_SetMaximumAge/wonders")
+					if diag and not fb_ok then
+						table.insert(diag_results, { menu = prefix .. menuSuffix, ok = false, tier = "wonder" .. wonderAge, note = "fallback_also_failed" })
+					end
+				end
+			end
+		end
+
+		-- Supplementary: native Player_SetMaximumAge from cardinal.scar (handles 9 base + campaign civs).
+		-- Does not cover DLC civs but provides a redundant safety net for base civs.
+		pcall(Player_SetMaximumAge, playerID, maximumAge)
+	end
+
+	Player_SetStateModelInt(playerID, "player_max_age", maximumAge)
+
+	-- Diagnostic summary
+	if diag and #diag_results > 0 then
+		local ok_count = 0
+		local fail_count = 0
+		local failed_menus = {}
+		for _, d in ipairs(diag_results) do
+			if d.ok then
+				ok_count = ok_count + 1
+			else
+				fail_count = fail_count + 1
+				table.insert(failed_menus, d.menu .. "(" .. d.tier .. ")")
+			end
+		end
+		local failed_str = #failed_menus > 0 and table.concat(failed_menus, ",") or "none"
+		_AutoAge_LogDiag(string.format("[AUTOAGE][DIAG] pass=%d player=%s race=%s maxAge=%d locked=%d/%d failed=[%s]",
+			_AUTOAGE_DIAG_PASS, tostring(playerID), tostring(resolvedRaceName), maximumAge,
+			ok_count, ok_count + fail_count, failed_str))
+	end
+end
+
+-- Re-assert menu locks for a player based on their current max age state model value.
+-- Safe to call at any time; reads the stored max age and re-applies all locks.
+function CBA_AutoAge_ReassertPlayerLocks(player)
+	if player == nil or player.id == nil or player.isEliminated then
+		return
+	end
+	local maxAge = Player_GetStateModelInt(player.id, "player_max_age")
+	if maxAge == nil or maxAge <= 0 then
+		return
+	end
+	CBA_AutoAge_SetMaximumAge(player.id, maxAge)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Unified age advancement helper
+-- Advances a player's age to match their landmark/upgrade progress (obj_build_count),
+-- capped by the maximum age the timer has unlocked (player_max_age).
+-- Safe to call at any time; no-ops if the player is already at the correct age.
+--
+-- Force-advance policy: ONLY civs whose upgrades do NOT natively advance the age
+-- (entries in _AUTOAGE_SPECIAL_NEEDS_FORCE_AGE: abbasid, abbasid_ha_01 — wing upgrades
+-- at the House of Wisdom don't trigger age-up natively) are auto-advanced here.
+--
+-- All other civs must NOT be force-advanced from this helper:
+--   • Landmark civs (18 total, including vanilla Mongols) — engine advances on landmark
+--     completion. Pre-empting would race with the engine.
+--   • Horde (mongol_ha_gol) & Templar — tent/commandery upgrades advance the age natively
+--     via the engine's upgrade effects. Pre-empting causes age SKIPS: if the script sets
+--     age=N and the engine then applies "+1 from upgrade", the player jumps to N+1, skipping
+--     the intended age (observed: Horde 1→3 when force-age is called before boon pick).
+--
+-- The auto-age timer still raises the max-age cap (via CBA_AutoAge_SetMaximumAge) so the
+-- next-age menus / wings / boon choices unlock on schedule; the actual age transition
+-- happens through the native / landmark path.
+---------------------------------------------------------------------------------------------------
+function CBA_AutoAge_TryAdvanceAge(player)
+	if player == nil or player.id == nil or player.isEliminated then return false end
+
+	-- Gate: only civs whose upgrades require scripted force-age are advanced here.
+	-- Landmark civs + civs with native-age-up upgrades (Horde, Templar) age via their
+	-- own mechanism; pre-empting can cause the engine to double-increment and skip ages.
+	local race_ok, race_name = pcall(Player_GetRaceName, player.id)
+	if race_ok and race_name ~= nil and not _AUTOAGE_SPECIAL_NEEDS_FORCE_AGE[race_name] then
+		return false
+	end
+
+	local age = Player_GetCurrentAge(player.id)
+	if age >= 4 then return false end
+
+	local max_age = Player_GetStateModelInt(player.id, "player_max_age")
+	if max_age == nil or max_age <= 0 then max_age = age end
+
+	local build_count = player.obj_build_count or age
+	local build_count_raw = player.obj_build_count
+	local target = math.min(build_count, max_age)
+
+	if target <= age then
+		-- Throttled trace: only log on state change (not every 1s tick)
+		if build_count ~= age or max_age ~= age then
+			local snap_key = tostring(player.id)
+			local snap = string.format("%d_%d_%s_%d", age, max_age, tostring(build_count_raw), target)
+			if _autoage_noop_snap == nil then _autoage_noop_snap = {} end
+			if _autoage_noop_snap[snap_key] ~= snap then
+				_autoage_noop_snap[snap_key] = snap
+				local civ = "<unknown>"
+				local ok, cn = pcall(Player_GetRaceName, player.id)
+				if ok and cn ~= nil then civ = tostring(cn) end
+				_AutoAge_LogTrace(string.format("[AUTOAGE][TRACE] TryAdvanceAge NO-OP player=%s civ=%s age=%d max_age=%d build_count=%s(raw=%s) target=%d reason=target<=age",
+					tostring(player.id), civ, age, max_age, tostring(build_count), tostring(build_count_raw), target))
+			end
+		end
+		return false
+	end
+
+	local civ = "<unknown>"
+	local ok, cn = pcall(Player_GetRaceName, player.id)
+	if ok and cn ~= nil then civ = tostring(cn) end
+	_AutoAge_LogTrace(string.format("[AUTOAGE][TRACE] TryAdvanceAge ADVANCING player=%s civ=%s age=%d->%d max_age=%d build_count=%s(raw=%s)",
+		tostring(player.id), civ, age, target, max_age, tostring(build_count), tostring(build_count_raw)))
+
+	Player_SetCurrentAge(player.id, target)
+	CBA_Options_RevalidateAll(player)
+
+	-- Re-assert menu availability so next-age landmarks are accessible.
+	CBA_AutoAge_ReassertPlayerLocks(player)
+
+	if player.isLocal and _autoage.objective_main ~= nil then
+		Obj_CreatePopup(_autoage.objective_main, _autoage.objective_main_title, "")
+	end
+
+	local new_age = Player_GetCurrentAge(player.id)
+	_AutoAge_LogTrace(string.format("[AUTOAGE][TRACE] TryAdvanceAge DONE player=%s civ=%s confirmed_age=%d",
+		tostring(player.id), civ, new_age))
+
+	return true
+end
+
+function CBA_AutoAge_SyncSpecialUpgradeAvailability(player)
+	if player == nil or player.id == nil or player.isEliminated then
+		return
+	end
+
+	local player_civ = Player_GetRaceName(player.id)
+	local civ_cfg = _AUTOAGE_SPECIAL_UPGRADES[player_civ]
+	if civ_cfg == nil then
+		return
+	end
+
+	-- All special-civ upgrades are kept ITEM_LOCKED to prevent manual research.
+	-- Player_CompleteUpgrade in the BoonSelection callback bypasses the lock.
+	for _, upg_name in ipairs(civ_cfg.feudal) do
+		CBA_AutoAge_SetUpgradeAvailabilitySafe(player.id, upg_name, ITEM_LOCKED,
+			"CBA_AutoAge_SyncSpecialUpgradeAvailability/feudal")
+	end
+
+	for _, upg_name in ipairs(civ_cfg.castle) do
+		CBA_AutoAge_SetUpgradeAvailabilitySafe(player.id, upg_name, ITEM_LOCKED,
+			"CBA_AutoAge_SyncSpecialUpgradeAvailability/castle")
+	end
+
+	for _, upg_name in ipairs(civ_cfg.imperial) do
+		CBA_AutoAge_SetUpgradeAvailabilitySafe(player.id, upg_name, ITEM_LOCKED,
+			"CBA_AutoAge_SyncSpecialUpgradeAvailability/imperial")
+	end
+
+	-- Wing civs: after Age 4 with all 3 picks done, unlock leftover family's upgrades.
+	if _AUTOAGE_SPECIAL_NEEDS_FORCE_AGE[player_civ] then
+		CBA_AutoAge_UnlockLeftoverWings(player)
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Imperial leftover unlock
+-- At Age 4, once all 3 age-up wing picks are complete, the remaining (unpicked) family's
+-- upgrades are unlocked for manual research (or auto-completed if toggle is set).
+---------------------------------------------------------------------------------------------------
+
+function CBA_AutoAge_UnlockLeftoverWings(player)
+	if player == nil or player.id == nil or player.isEliminated then return end
+
+	local age = Player_GetCurrentAge(player.id)
+	if age < 4 then return end
+
+	local player_civ = Player_GetRaceName(player.id)
+	local civ_cfg = _AUTOAGE_SPECIAL_UPGRADES[player_civ]
+	if civ_cfg == nil then return end
+
+	-- All 3 age-up tiers must have a completed pick.
+	local has_feudal = CBA_AutoAge_PlayerHasAnyUpgrade(player.id, civ_cfg.feudal)
+	local has_castle = CBA_AutoAge_PlayerHasAnyUpgrade(player.id, civ_cfg.castle)
+	local has_imperial = CBA_AutoAge_PlayerHasAnyUpgrade(player.id, civ_cfg.imperial)
+	if not (has_feudal and has_castle and has_imperial) then return end
+
+	-- Determine unpicked families.
+	local chosen_families = BoonSelection_GetChosenWingFamilies(player.id, player_civ)
+	local unpicked = {}
+	for _, family in ipairs(_BOON_WING_FAMILIES) do
+		if not chosen_families[family] then
+			table.insert(unpicked, family)
+		end
+	end
+	if #unpicked == 0 then return end
+
+	-- Scan full wing upgrade table (dark/feudal/castle/imperial tiers) for leftover families.
+	local wing_cfg = _AUTOAGE_WING_UPGRADES[player_civ]
+	if wing_cfg == nil then return end
+
+	for _, family in ipairs(unpicked) do
+		for _, tier_name in ipairs({"dark", "feudal", "castle", "imperial"}) do
+			local tier_wings = wing_cfg[tier_name]
+			if tier_wings ~= nil then
+				for _, upg_name in ipairs(tier_wings) do
+					local wing_family = BoonSelection_GetWingFamily(upg_name)
+					if wing_family == family then
+						local ok_bp, ubp = pcall(BP_GetUpgradeBlueprint, upg_name)
+						if ok_bp and ubp ~= nil and not Player_HasUpgrade(player.id, ubp) then
+							if _AUTOAGE_WING_AUTOCOMPLETE_LEFTOVER then
+								pcall(Player_CompleteUpgrade, player.id, ubp)
+								_AutoAge_LogInfo(string.format("[AUTOAGE] leftover wing auto-completed civ=%s player=%s family=%s upgrade=%s",
+									tostring(player_civ), tostring(player.id), family, upg_name))
+							else
+								CBA_AutoAge_SetUpgradeAvailabilitySafe(player.id, upg_name, ITEM_DEFAULT,
+									"CBA_AutoAge_UnlockLeftoverWings/" .. family)
+								_AutoAge_LogInfo(string.format("[AUTOAGE] leftover wing unlocked civ=%s player=%s family=%s upgrade=%s",
+									tostring(player_civ), tostring(player.id), family, upg_name))
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+end
+
+local _AUTOAGE_SPECIAL_AUTOPICK_INDEX = {
+	templar = { feudal = 1, castle = 1, imperial = 1 },
+	mongol_ha_gol = { feudal = 1, castle = 1, imperial = 1 },
+	abbasid = { feudal = 1, castle = 1, imperial = 1 },
+	abbasid_ha_01 = { feudal = 1, castle = 1, imperial = 1 },
+}
+
+-- Civs whose wing/tent upgrades do NOT trigger age advancement natively.
+-- The callback must explicitly call Player_SetCurrentAge + CBA_Options_RevalidateAll.
+_AUTOAGE_SPECIAL_NEEDS_FORCE_AGE = {
+	abbasid = true,
+	abbasid_ha_01 = true,
+}
+
+local _AUTOAGE_TEMPLAR_CHOICE_TIMEOUT = 30
+
+-- When true, leftover (unpicked) wing upgrades are auto-completed at Age 4 instead of just unlocked.
+_AUTOAGE_WING_AUTOCOMPLETE_LEFTOVER = false
+
+function CBA_AutoAge_GetSpecialTierByTargetAge(target_age)
+	if target_age == 2 then return "feudal" end
+	if target_age == 3 then return "castle" end
+	if target_age == 4 then return "imperial" end
+	return nil
+end
+
+function CBA_AutoAge_GetAutopickUpgradeName(player_civ, tier_name, upgrades)
+	if upgrades == nil or #upgrades == 0 then
+		return nil, 0
+	end
+
+	local civ_cfg = _AUTOAGE_SPECIAL_AUTOPICK_INDEX[player_civ]
+	local idx = 1
+	if civ_cfg ~= nil and civ_cfg[tier_name] ~= nil then
+		idx = civ_cfg[tier_name]
+	end
+
+	if type(idx) ~= "number" then
+		idx = 1
+	end
+	if idx < 1 then
+		idx = 1
+	end
+	if idx > #upgrades then
+		idx = #upgrades
+	end
+
+	return upgrades[idx], idx
+end
+
+function CBA_AutoAge_TryAutoSelectSpecialUpgrade(player, target_age)
+	if player == nil or player.id == nil or player.isEliminated then
+		return false
+	end
+
+	local player_civ = Player_GetRaceName(player.id)
+	local civ_cfg = _AUTOAGE_SPECIAL_UPGRADES[player_civ]
+	if civ_cfg == nil then
+		return false
+	end
+
+	local tier_name = CBA_AutoAge_GetSpecialTierByTargetAge(target_age)
+	if tier_name == nil then
+		return false
+	end
+
+	local tier_upgrades = civ_cfg[tier_name]
+	if tier_upgrades == nil or #tier_upgrades == 0 then
+		print(string.format("[AUTOAGE][WARN] special autopick missing tier upgrades civ=%s tier=%s",
+			tostring(player_civ), tostring(tier_name)))
+		return false
+	end
+
+	if CBA_AutoAge_PlayerHasAnyUpgrade(player.id, tier_upgrades) then
+		return true
+	end
+
+	CBA_AutoAge_SyncSpecialUpgradeAvailability(player)
+
+	-- Wing civs: pick the first available non-chosen family to enforce uniqueness.
+	local upg_name, chosen_index
+	if _AUTOAGE_SPECIAL_NEEDS_FORCE_AGE[player_civ] then
+		local chosen_families = BoonSelection_GetChosenWingFamilies(player.id, player_civ)
+		for i, name in ipairs(tier_upgrades) do
+			local family = BoonSelection_GetWingFamily(name)
+			if family == nil or not chosen_families[family] then
+				upg_name = name
+				chosen_index = i
+				break
+			end
+		end
+		if upg_name == nil then
+			-- All families chosen; fallback to default picker.
+			upg_name, chosen_index = CBA_AutoAge_GetAutopickUpgradeName(player_civ, tier_name, tier_upgrades)
+		end
+	else
+		upg_name, chosen_index = CBA_AutoAge_GetAutopickUpgradeName(player_civ, tier_name, tier_upgrades)
+	end
+	if upg_name == nil then
+		print(string.format("[AUTOAGE][WARN] special autopick failed civ=%s tier=%s reason=no_upgrade_choice",
+			tostring(player_civ), tostring(tier_name)))
+		return false
+	end
+
+	local ok_bp, upg_bp = pcall(BP_GetUpgradeBlueprint, upg_name)
+	if not ok_bp or upg_bp == nil then
+		print(string.format("[AUTOAGE][WARN] special autopick missing upgrade blueprint civ=%s tier=%s upgrade=%s",
+			tostring(player_civ), tostring(tier_name), tostring(upg_name)))
+		return false
+	end
+
+	local ok_complete = pcall(Player_CompleteUpgrade, player.id, upg_bp)
+	if not ok_complete then
+		print(string.format("[AUTOAGE][WARN] special autopick failed Player_CompleteUpgrade civ=%s tier=%s upgrade=%s",
+			tostring(player_civ), tostring(tier_name), tostring(upg_name)))
+		return false
+	end
+
+	_AutoAge_LogInfo(string.format("[AUTOAGE] special autopick applied civ=%s player=%s tier=%s choice=%d/%d upgrade=%s",
+		tostring(player_civ), tostring(player.id), tostring(tier_name), chosen_index, #tier_upgrades, tostring(upg_name)))
+
+	-- Wing civs need explicit age advancement (wings don't trigger age-up natively).
+	if _AUTOAGE_SPECIAL_NEEDS_FORCE_AGE[player_civ] then
+		pcall(Player_SetCurrentAge, player.id, target_age)
+		CBA_Options_RevalidateAll(player)
+		_AutoAge_LogInfo(string.format("[AUTOAGE] force-age applied civ=%s player=%s target_age=%d",
+			tostring(player_civ), tostring(player.id), target_age))
+	end
+
+	return true
+end
+
+-- Present any special-upgrade civ (Templar, Abbasid, Ayyubid, Golden Horde) with a
+-- BoonSelection card panel. AI players auto-pick deterministically on every peer.
+-- Human players: only the local-owning peer shows the panel and broadcasts the
+-- selection via Network_CallEvent; non-owning peers wait for the broadcast.
+-- All gameplay mutation runs inside CBA_AutoAge_ApplySpecialChoiceNtw.
+function CBA_AutoAge_ForceSpecialAgeChoicePrompt(player, target_age, context)
+	if player == nil or player.id == nil or player.isEliminated then
+		return false
+	end
+
+	local player_civ = Player_GetRaceName(player.id)
+	local civ_cfg = _AUTOAGE_SPECIAL_UPGRADES[player_civ]
+	if civ_cfg == nil then return false end
+
+	local tier_name = CBA_AutoAge_GetSpecialTierByTargetAge(target_age)
+	if tier_name == nil then return false end
+
+	local tier_upgrades = civ_cfg[tier_name]
+	if tier_upgrades == nil or #tier_upgrades == 0 then return false end
+
+	-- Already completed this tier: nothing to choose.
+	if CBA_AutoAge_PlayerHasAnyUpgrade(player.id, tier_upgrades) then
+		return true
+	end
+
+	-- AI players: deterministic autopick runs identically on every peer (no UI,
+	-- no broadcast needed). Uses cached player.isHuman field (sim-deterministic).
+	if player.isHuman ~= true then
+		return CBA_AutoAge_TryAutoSelectSpecialUpgrade(player, target_age)
+	end
+
+	-- Human, non-local peer: do nothing. The owning peer will broadcast the
+	-- choice via Network_CallEvent; this peer will mutate inside the handler.
+	if not player.isLocal then
+		return false
+	end
+
+	-- Re-entry guard: don't open duplicate prompts.
+	if player._special_choice_pending then
+		_AutoAge_LogInfo(string.format("[AUTOAGE] special choice already pending, skipping duplicate prompt civ=%s player=%s tier=%s",
+			tostring(player_civ), tostring(player.id), tostring(tier_name)))
+		return false
+	end
+	player._special_choice_pending = true
+
+	-- Fetch filtered choices for the local UI panel only. The handler re-derives
+	-- the choice list deterministically on each peer; we don't trust this snapshot.
+	local choices, title, subtitle = nil, nil, nil
+	if type(BoonSelection_GetChoicesForCiv) == "function" then
+		choices, title, subtitle = BoonSelection_GetChoicesForCiv(player_civ, tier_name, player.id)
+	else
+		print(string.format("[AUTOAGE][WARN] missing BoonSelection_GetChoicesForCiv; broadcasting default choice civ=%s player=%s tier=%s",
+			tostring(player_civ), tostring(player.id), tostring(tier_name)))
+	end
+	if choices == nil or #choices == 0 then
+		-- No filtered choices available locally: broadcast the default index so
+		-- every peer (including this one) applies the deterministic fallback in
+		-- the handler. Do NOT mutate locally.
+		player._special_choice_pending = false
+		CBA_AutoAge_RequestApplySpecialChoice(player.id, target_age, 1)
+		return false
+	end
+
+	-- Choice callback: record intent + broadcast. NO sim mutation here.
+	local function _OnSpecialChoice(choice_index)
+		player._special_choice_pending = false
+
+		if player.isEliminated then
+			_AutoAge_LogInfo(string.format("[AUTOAGE] special choice callback civ=%s player=%s eliminated, ignoring",
+				tostring(player_civ), tostring(player.id)))
+			return
+		end
+
+		local idx = choice_index or 1
+		if idx < 1 or idx > #choices then idx = 1 end
+
+		CBA_AutoAge_RequestApplySpecialChoice(player.id, target_age, idx)
+	end
+
+	if type(BoonSelection_Show) ~= "function" then
+		print(string.format("[AUTOAGE][WARN] missing BoonSelection_Show; broadcasting default choice civ=%s player=%s tier=%s",
+			tostring(player_civ), tostring(player.id), tostring(tier_name)))
+		player._special_choice_pending = false
+		CBA_AutoAge_RequestApplySpecialChoice(player.id, target_age, 1)
+		return false
+	end
+
+	BoonSelection_Show({
+		title = title,
+		subtitle = subtitle,
+		choices = choices,
+		on_select = _OnSpecialChoice,
+		timeout = _AUTOAGE_TEMPLAR_CHOICE_TIMEOUT,
+		default_choice = 1,
+	})
+
+	_AutoAge_LogInfo(string.format("[AUTOAGE] special age choice prompt shown civ=%s context=%s player=%s target_age=%s tier=%s",
+		tostring(player_civ), tostring(context), tostring(player.id), tostring(target_age), tostring(tier_name)))
+	return false
+end
+
+-- =============================================================================
+-- Synchronized special-age choice handler (UI → Network → mutation boundary)
+-- =============================================================================
+--
+-- CBA_AutoAge_RequestApplySpecialChoice is the LOCAL-ONLY broadcaster. It must
+-- not mutate sim state. The owning peer (the human's local machine, OR — for
+-- the choices==nil/BoonSelection-missing fallback paths above — any peer that
+-- finds itself in that branch for a player it locally owns) calls this with a
+-- (player_id, target_age, choice_index) tuple.
+--
+-- CBA_AutoAge_ApplySpecialChoiceNtw is the synchronized handler invoked by
+-- Network_Callback on EVERY peer with the same arguments. It re-derives the
+-- choice list deterministically and applies the upgrade + force-age + revalidate.
+--
+-- See docs/game_systems/systems/mp-deterministic-mutation-pattern.md §4.
+
+function CBA_AutoAge_RequestApplySpecialChoice(player_id, target_age, choice_index)
+	if player_id == nil or target_age == nil or choice_index == nil then
+		print("[AUTOAGE][WARN] RequestApplySpecialChoice called with nil arg(s)")
+		return
+	end
+	Network_CallEvent(
+		"CBA_AutoAge_ApplySpecialChoiceNtw",
+		string.format("%d,%d",
+			tonumber(target_age) or 0,
+			tonumber(choice_index) or 1))
+end
+
+-- Top-level global. Network_Callback resolves this via _G[name] on every peer.
+function CBA_AutoAge_ApplySpecialChoiceNtw(sendingPlayer, data)
+	if data == nil then return end
+	local parts = string.split(data)
+	if parts == nil or #parts < 2 then
+		print(string.format("[AUTOAGE][WARN] ApplySpecialChoiceNtw malformed payload: %s", tostring(data)))
+		return
+	end
+
+	local target_age = tonumber(parts[1])
+	local choice_index = tonumber(parts[2]) or 1
+
+	local player = Core_GetPlayersTableEntry(sendingPlayer)
+	if player == nil or player.isEliminated then
+		_AutoAge_LogInfo(string.format("[AUTOAGE] ApplySpecialChoiceNtw skipped (no player or eliminated) player_id=%s",
+			tostring(sendingPlayer)))
+		return
+	end
+
+	local player_civ = Player_GetRaceName(player.id)
+	local civ_cfg = _AUTOAGE_SPECIAL_UPGRADES[player_civ]
+	if civ_cfg == nil then return end
+
+	local tier_name = CBA_AutoAge_GetSpecialTierByTargetAge(target_age)
+	if tier_name == nil then return end
+
+	local tier_upgrades = civ_cfg[tier_name]
+	if tier_upgrades == nil or #tier_upgrades == 0 then return end
+
+	-- Idempotency: if the upgrade is already applied (e.g. duplicate broadcast or
+	-- handler arrived after a separate mutation path), no-op.
+	if CBA_AutoAge_PlayerHasAnyUpgrade(player.id, tier_upgrades) then
+		return
+	end
+
+	-- Re-derive the same filtered choice list every peer used to display the UI.
+	-- BoonSelection_GetChoicesForCiv reads only deterministic sim state (player
+	-- race + Player_HasUpgrade), so the result matches across peers.
+	local choices = nil
+	if type(BoonSelection_GetChoicesForCiv) == "function" then
+		choices = BoonSelection_GetChoicesForCiv(player_civ, tier_name, player.id)
+	end
+
+	local upg_name
+	if choices ~= nil and #choices > 0 then
+		local idx = choice_index
+		if idx < 1 or idx > #choices then idx = 1 end
+		upg_name = choices[idx].upgrade
+	else
+		-- Filter empty: fall back to the deterministic raw-list autopicker.
+		local _name = CBA_AutoAge_GetAutopickUpgradeName(player_civ, tier_name, tier_upgrades)
+		upg_name = _name
+	end
+
+	if upg_name == nil then
+		print(string.format("[AUTOAGE][WARN] ApplySpecialChoiceNtw no upgrade resolved civ=%s player=%s tier=%s choice=%s",
+			tostring(player_civ), tostring(player.id), tostring(tier_name), tostring(choice_index)))
+		return
+	end
+
+	local ok_bp, upg_bp = pcall(BP_GetUpgradeBlueprint, upg_name)
+	if not ok_bp or upg_bp == nil then
+		print(string.format("[AUTOAGE][WARN] ApplySpecialChoiceNtw missing blueprint civ=%s player=%s tier=%s upgrade=%s",
+			tostring(player_civ), tostring(player.id), tostring(tier_name), tostring(upg_name)))
+		return
+	end
+
+	local ok_complete = pcall(Player_CompleteUpgrade, player.id, upg_bp)
+	if ok_complete then
+		_AutoAge_LogInfo(string.format("[AUTOAGE] special choice applied (ntw) civ=%s player=%s tier=%s choice=%d upgrade=%s sender=%s",
+			tostring(player_civ), tostring(player.id), tostring(tier_name), choice_index,
+			tostring(upg_name), tostring(sendingPlayer)))
+	else
+		print(string.format("[AUTOAGE][WARN] ApplySpecialChoiceNtw Player_CompleteUpgrade failed civ=%s player=%s tier=%s upgrade=%s",
+			tostring(player_civ), tostring(player.id), tostring(tier_name), tostring(upg_name)))
+	end
+
+	-- Wing civs need explicit age advancement (wings don't trigger age-up natively).
+	if _AUTOAGE_SPECIAL_NEEDS_FORCE_AGE[player_civ] then
+		pcall(Player_SetCurrentAge, player.id, target_age)
+		CBA_Options_RevalidateAll(player)
+		_AutoAge_LogInfo(string.format("[AUTOAGE] force-age applied (ntw) civ=%s player=%s target_age=%d",
+			tostring(player_civ), tostring(player.id), target_age))
+	end
+
+	CBA_AutoAge_ReconcileSpecialProgress(player)
+	CBA_AutoAge_SyncSpecialUpgradeAvailability(player)
+end
+
+function CBA_AutoAge_HandleSpecialAgeTrigger(player, target_age, context)
+	if player == nil or player.id == nil or player.isEliminated then
+		return false
+	end
+
+	local player_civ = Player_GetRaceName(player.id)
+	local civ_cfg = _AUTOAGE_SPECIAL_UPGRADES[player_civ]
+	if civ_cfg == nil then
+		_AutoAge_LogTrace(string.format("[AUTOAGE][TRACE] HandleSpecialAgeTrigger NOT_SPECIAL civ=%s player=%s target_age=%d context=%s (uses landmarks)",
+			tostring(player_civ), tostring(player.id), target_age, tostring(context)))
+		return false
+	end
+
+	_AutoAge_LogTrace(string.format("[AUTOAGE][TRACE] HandleSpecialAgeTrigger IS_SPECIAL civ=%s player=%s target_age=%d context=%s",
+		tostring(player_civ), tostring(player.id), target_age, tostring(context)))
+	-- All special civs: sync availability then present choice (local) or auto-pick (non-local/AI).
+	CBA_AutoAge_SyncSpecialUpgradeAvailability(player)
+	return CBA_AutoAge_ForceSpecialAgeChoicePrompt(player, target_age, context)
+end
+
+function CBA_AutoAge_SetBuildCount(player, new_count)
+	if player == nil or new_count == nil then
+		return
+	end
+
+	if player.obj_build_count == nil then
+		player.obj_build_count = AGS_GLOBAL_SETTINGS.StartingAge
+	end
+
+	if new_count <= player.obj_build_count then
+		-- Throttled: only log once per unique state
+		local snap_key = tostring(player.id) .. "_sbc"
+		local snap = string.format("%d_%s", new_count, tostring(player.obj_build_count))
+		if _autoage_noop_snap == nil then _autoage_noop_snap = {} end
+		if _autoage_noop_snap[snap_key] ~= snap then
+			_autoage_noop_snap[snap_key] = snap
+			local civ = "<unknown>"
+			local ok, cn = pcall(Player_GetRaceName, player.id)
+			if ok and cn ~= nil then civ = tostring(cn) end
+			_AutoAge_LogTrace(string.format("[AUTOAGE][TRACE] SetBuildCount SKIP player=%s civ=%s new=%d current=%s reason=not_higher",
+				tostring(player.id), civ, new_count, tostring(player.obj_build_count)))
+		end
+		return
+	end
+
+	local old_count = player.obj_build_count
+	player.obj_build_count = new_count
+
+	local civ = "<unknown>"
+	local ok, cn = pcall(Player_GetRaceName, player.id)
+	if ok and cn ~= nil then civ = tostring(cn) end
+	_AutoAge_LogTrace(string.format("[AUTOAGE][TRACE] SetBuildCount UPDATED player=%s civ=%s build_count=%d->%d",
+		tostring(player.id), civ, old_count, new_count))
+
+	if player.isLocal then
+		Obj_SetCounterCount(_autoage.objective_secondary, player.obj_build_count)
+		Obj_SetProgress(_autoage.objective_secondary, player.obj_build_count / _autoage.objective_secondary_requirement)
+	end
+end
+
+function CBA_AutoAge_ReconcileSpecialProgress(player)
+	if player == nil or player.id == nil or player.isEliminated then
+		return
+	end
+
+	local player_civ = Player_GetRaceName(player.id)
+	local civ_cfg = _AUTOAGE_SPECIAL_UPGRADES[player_civ]
+	if civ_cfg == nil then
+		return
+	end
+
+	if CBA_AutoAge_PlayerHasAnyUpgrade(player.id, civ_cfg.imperial) then
+		CBA_AutoAge_SetBuildCount(player, 4)
+	elseif CBA_AutoAge_PlayerHasAnyUpgrade(player.id, civ_cfg.castle) then
+		CBA_AutoAge_SetBuildCount(player, 3)
+	elseif CBA_AutoAge_PlayerHasAnyUpgrade(player.id, civ_cfg.feudal) then
+		CBA_AutoAge_SetBuildCount(player, 2)
+	end
+end
+
+function CBA_AutoAge_UpgradeComplete(context)
+	local player = Core_GetPlayersTableEntry(context.player)
+	if player == nil or player.isEliminated then
+		return
+	end
+
+	local player_civ = Player_GetRaceName(player.id)
+	local upgrade_debug_name = "<unknown>"
+	if context ~= nil and context.upgrade ~= nil then
+		local ok_n, n = pcall(BP_GetName, context.upgrade)
+		if ok_n and n ~= nil then upgrade_debug_name = tostring(n) end
+	end
+	_AutoAge_LogTrace(string.format("[AUTOAGE][TRACE] UpgradeComplete player=%s civ=%s upgrade=%s age=%d obj_build_count=%s max_age=%s",
+		tostring(player.id), tostring(player_civ), upgrade_debug_name,
+		Player_GetCurrentAge(player.id), tostring(player.obj_build_count),
+		tostring(Player_GetStateModelInt(player.id, "player_max_age"))))
+
+	local civ_cfg = _AUTOAGE_SPECIAL_UPGRADES[player_civ]
+	if civ_cfg ~= nil and context ~= nil and context.upgrade ~= nil then
+		local ok_age_type, is_age_up = pcall(BP_IsUpgradeOfType, context.upgrade, "age_up_upgrade")
+		if ok_age_type and is_age_up then
+			local upgrade_name = "<unknown>"
+			local ok_name, name_or_err = pcall(BP_GetName, context.upgrade)
+			if ok_name and name_or_err ~= nil then
+				upgrade_name = tostring(name_or_err)
+			end
+			_AutoAge_LogInfo(string.format("[AUTOAGE] special age-up upgrade complete civ=%s player=%s upgrade=%s path=GE_UpgradeComplete(age_up_upgrade)",
+				tostring(player_civ), tostring(player.id), tostring(upgrade_name)))
+		end
+	end
+
+	CBA_AutoAge_ReconcileSpecialProgress(player)
+	CBA_AutoAge_SyncSpecialUpgradeAvailability(player)
+
+	-- Re-assert menu locks: engine may re-enable menus after processing upgrade events.
+	-- This catches async menu mutations that occur after age upgrade completion.
+	CBA_AutoAge_ReassertPlayerLocks(player)
+
+	-- Advance age if upgrade completion updated obj_build_count past current age.
+	CBA_AutoAge_TryAdvanceAge(player)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Functions:
+---------------------------------------------------------------------------------------------------
+
+-- This function creates the objective UI that appears in the top-left corner of each player's screen
+function CBA_AutoAge_SetupObjective()
+	
+	-- Main Objective
+	-- Sets up the Automatic Age up timer
+	if _autoage.objective_main == nil then 
+
+		-- Create and store objective in the global table created at the start of this script
+		_autoage.objective_main = Obj_Create(localPlayer.id, _autoage.objective_main_title, Loc_Empty(), _autoage.icons.objective, "WonderObjectiveTemplate", localPlayer.raceName, OT_Primary, 0, "wonderObj")		
+		
+		-- Sets the objective's state to complete (for UI popup)
+		Obj_SetState(_autoage.objective_main, OS_Complete)
+		-- Sets the objective to visible so players can see it
+		Obj_SetVisible(_autoage.objective_main, true)
+		-- Sets the progress element of the objective to visible so players can see it
+		Obj_SetProgressVisible(_autoage.objective_main, false)
+		-- Sets the objective progress type to a counter
+		Obj_SetCounterType(_autoage.objective_main, COUNTER_TimerDecreasing)
+		-- Set the starting objective timer
+		Obj_SetCounterTimerSeconds(_autoage.objective_main, AGS_GLOBAL_SETTINGS.AutoAge)
+		-- Set the objective progress bar percentage value
+		Obj_SetProgress(_autoage.objective_main, 0)
+		-- Start the timer
+		Timer_Start(_autoage.objective_main, AGS_GLOBAL_SETTINGS.AutoAge)
+	end
+
+	-- Secondary Objective
+	-- Checks for a build landmark and increases objective counter, this counter will be used at the end of each cycle to check if forced age up is required
+	if _autoage.objective_secondary == nil then 
+		
+		-- Create and store objective in the global table created at the start of this script
+		_autoage.objective_secondary = Obj_Create(localPlayer.id, _autoage.objective_secondary_title, Loc_Empty(), _autoage.icons.objective, "HolySiteSecondaryObjectiveDataTemplate", localPlayer.raceName, OT_Secondary, _autoage.objective_main, "holySiteObj")
+		
+		for i, player in ipairs(PLAYERS) do				
+			player.obj_build_count = AGS_GLOBAL_SETTINGS.StartingAge
+				CBA_AutoAge_SyncSpecialUpgradeAvailability(player)
+		end
+		
+		local obj_build_count = AGS_GLOBAL_SETTINGS.StartingAge
+		for _, player in ipairs(PLAYERS) do
+			if player.id == localPlayer.id then
+				obj_build_count = player.obj_build_count
+			end
+		end
+		
+		-- Sets the objective's state to incomplete
+		Obj_SetState(_autoage.objective_secondary, OS_Incomplete)
+		-- Sets the objective to visible so players can see it
+		Obj_SetVisible(_autoage.objective_secondary, true)
+		-- Sets the progress element of the objective to visible so players can see it
+		Obj_SetProgressVisible(_autoage.objective_secondary, true)
+		-- Sets the objective progress type to a counter
+		Obj_SetCounterType(_autoage.objective_secondary, COUNTER_CountUpTo)
+		-- Set the starting objective progress to Starting Age value
+		Obj_SetCounterCount(_autoage.objective_secondary, AGS_GLOBAL_SETTINGS.StartingAge)
+		
+		-- Set the maximum objective progress
+		Obj_SetCounterMax(_autoage.objective_secondary,  _autoage.objective_secondary_requirement)
+		-- Set the objective progress bar percentage value
+		--Obj_SetProgress(_autoage.objective_secondary, AGS_GLOBAL_SETTINGS.StartingAge / _autoage.objective_secondary_requirement)
+		Obj_SetProgress(_autoage.objective_secondary, obj_build_count / _autoage.objective_secondary_requirement)
+	end
+end
+
+function CBA_AutoAge_UpdateTimer()
+	for _, player in ipairs(PLAYERS) do
+		CBA_AutoAge_ReconcileSpecialProgress(player)
+		CBA_AutoAge_SyncSpecialUpgradeAvailability(player)
+		-- Failsafe: catch up any player whose age lags behind their progress.
+		-- Cost: 3 integer reads + compare per player; no-op when age is current.
+		CBA_AutoAge_TryAdvanceAge(player)
+	end
+
+	-- Get the player's current objective progress
+		local obj_progress_current = Obj_GetCounterCount(_autoage.objective_secondary)
+	
+	-- Update the timer
+	Obj_SetCounterTimerSeconds(_autoage.objective_main, Timer_GetRemaining(_autoage.objective_main))
+	-- Revive the timer
+	if Timer_GetRemaining(_autoage.objective_main) == 0 and obj_progress_current <= 3 then
+		Timer_Start(_autoage.objective_main, AGS_GLOBAL_SETTINGS.AutoAge)
+	end
+end
+
+-- Check landmark for age up
+function CBA_AutoAge_ConstructionComplete(context)
+
+	-- Store the player who constructed the building
+	local builder = Core_GetPlayersTableEntry(context.player)
+	
+	-- Check to see if there was a builder (just in case the building was constructed via script or some other means) and that the builder has not been eliminated yet
+	if builder ~= nil and not builder.isEliminated then
+		
+		-- Debug: log every construction event with type classification
+		local civ = "<unknown>"
+		local ok_civ, cn = pcall(Player_GetRaceName, builder.id)
+		if ok_civ and cn ~= nil then civ = tostring(cn) end
+		local ebp_name = "<unknown>"
+		local ok_name, en = pcall(BP_GetName, context.pbg)
+		if ok_name and en ~= nil then ebp_name = tostring(en) end
+		local is_dark = Entity_IsEBPOfType(context.pbg, "wonder_dark_age")
+		local is_feudal = Entity_IsEBPOfType(context.pbg, "wonder_feudal_age")
+		local is_castle = Entity_IsEBPOfType(context.pbg, "wonder_castle_age")
+		local is_wonder = Entity_IsEBPOfType(context.pbg, "wonder")
+		local is_landmark = is_dark or is_feudal or is_castle
+		_AutoAge_LogTrace(string.format("[AUTOAGE][TRACE] ConstructionComplete player=%s civ=%s ebp=%s wonder_dark=%s wonder_feudal=%s wonder_castle=%s wonder=%s is_landmark=%s obj_build_count=%s age=%d max_age=%s",
+			tostring(builder.id), civ, ebp_name,
+			tostring(is_dark), tostring(is_feudal), tostring(is_castle), tostring(is_wonder), tostring(is_landmark),
+			tostring(builder.obj_build_count), Player_GetCurrentAge(builder.id),
+			tostring(Player_GetStateModelInt(builder.id, "player_max_age"))))
+		
+		-- Landmark built / Feudal 
+		if Entity_IsEBPOfType(context.pbg, "wonder_dark_age") then
+
+			-- Objective setup
+			if builder.obj_build_count == 1 then
+				
+				-- Since the player constructed a landmark, calculate their new progress
+				builder.obj_build_count = builder.obj_build_count + 1
+				
+				-- Check if the builder is the local player, we only want to run the below code for the local player as only their objective UI needs to be updated
+				if builder.isLocal then
+					
+					-- Update their objective progress UI
+					Obj_SetCounterCount(_autoage.objective_secondary, builder.obj_build_count)
+					Obj_SetProgress(_autoage.objective_secondary, builder.obj_build_count / _autoage.objective_secondary_requirement)
+				end
+			end
+			
+			--[[ Check maximum/current age & Force age up if conditions are met
+				if Player_GetMaximumAge(builder) >= 2  and Player_GetCurrentAge(builder) == 1 then
+					Player_SetCurrentAge(builder, AGE_FEUDAL)
+				end	
+				]]
+			
+			-- Landmark built / Castle
+		elseif Entity_IsEBPOfType(context.pbg, "wonder_feudal_age") then
+
+			-- Objective setup
+			if builder.obj_build_count == 2 then
+				
+				-- Since the player constructed a landmark, calculate their new progress
+				builder.obj_build_count = builder.obj_build_count + 1
+				
+				-- Check if the builder is the local player, we only want to run the below code for the local player as only their objective UI needs to be updated
+				if builder.isLocal then
+					
+					-- Update their objective progress UI
+					Obj_SetCounterCount(_autoage.objective_secondary, builder.obj_build_count)
+					Obj_SetProgress(_autoage.objective_secondary, builder.obj_build_count / _autoage.objective_secondary_requirement)
+				end
+			end
+
+			
+			-- Landmark built / Imperial
+		elseif Entity_IsEBPOfType(context.pbg, "wonder_castle_age") then
+			
+			-- Objective setup
+			if builder.obj_build_count == 3 then
+				
+				-- Since the player constructed a landmark, calculate their new progress
+				builder.obj_build_count = builder.obj_build_count + 1
+				
+				-- Check if the builder is the local player, we only want to run the below code for the local player as only their objective UI needs to be updated
+				if builder.isLocal then
+					
+					-- Update their objective progress UI
+					Obj_SetCounterCount(_autoage.objective_secondary, builder.obj_build_count)
+					Obj_SetProgress(_autoage.objective_secondary, builder.obj_build_count / _autoage.objective_secondary_requirement)
+				end
+			end
+
+		end
+
+		-- Log post-landmark state before attempting advance
+		if is_landmark then
+			_AutoAge_LogTrace(string.format("[AUTOAGE][TRACE] ConstructionComplete POST-LANDMARK player=%s civ=%s obj_build_count=%s age=%d max_age=%s",
+				tostring(builder.id), civ, tostring(builder.obj_build_count),
+				Player_GetCurrentAge(builder.id),
+				tostring(Player_GetStateModelInt(builder.id, "player_max_age"))))
+		end
+
+		-- Advance age immediately if the timer has already unlocked it.
+		CBA_AutoAge_TryAdvanceAge(builder)
+
+	end
+end
+
+-- Check starting age / Setup restrictions
+function CBA_AutoAge_SetMaxAge()
+	for i, player in ipairs(PLAYERS) do
+		local player_civ, _ = CBA_AutoAge_ResolveRaceName(player.id)
+		
+		-- Unified age-lock for all civs via CBA_AutoAge_SetMaximumAge
+		if AGS_GLOBAL_SETTINGS.StartingAge == AGS_GS_AGE_DARK then 
+			CBA_AutoAge_SetMaximumAge(player.id, AGE_DARK)
+		elseif AGS_GLOBAL_SETTINGS.StartingAge == AGS_GS_AGE_FEUDAL then 
+			CBA_AutoAge_SetMaximumAge(player.id, AGE_FEUDAL)
+		elseif AGS_GLOBAL_SETTINGS.StartingAge == AGS_GS_AGE_CASTLE then 
+			CBA_AutoAge_SetMaximumAge(player.id, AGE_CASTLE)
+		end
+		
+		if player_civ == "templar" or player_civ == "mongol_ha_gol"
+			or player_civ == "abbasid" or player_civ == "abbasid_ha_01" then
+			-- Non-landmark age-up civs: upgrade-based progression via BoonSelection.
+			-- HoW/Golden Tent buildings are unrestricted; upgrades are kept locked.
+			-- Objective progression is reconciled via CBA_AutoAge_ReconcileSpecialProgress.
+		end
+
+		CBA_AutoAge_SyncSpecialUpgradeAvailability(player)
+		
+	end
+end
+
+function CBA_AutoAge_ReapplyStartingRestrictions()
+	-- Increment diagnostic pass and reset warn-once keys so retries produce fresh diagnostics.
+	_AUTOAGE_DIAG_PASS = (_AUTOAGE_DIAG_PASS or 0) + 1
+	_AUTOAGE_WARN_ONCE = {}
+
+	-- Re-assert starting-age restrictions after startup mutations that may touch menu availability.
+	CBA_AutoAge_SetMaxAge()
+
+	-- Disable automatic diagnostics after the +5s reapply (pass 3) to avoid log spam.
+	if _AUTOAGE_DIAG_PASS >= 3 then
+		_AUTOAGE_DIAG_ENABLED = false
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Public debug/tooling entry points
+-- Preserved for comprehensive stress suite and external tooling compatibility.
+---------------------------------------------------------------------------------------------------
+
+-- Dispatches a single age-up check for the given player based on their current age.
+-- Safe to call at any time; no-ops if the player is already at max age or eliminated.
+function CBA_Auto_Age_AgeUp(player)
+	if player == nil or player.id == nil or player.isEliminated then return end
+	local civ = "<unknown>"
+	local ok_c, cn = pcall(Player_GetRaceName, player.id)
+	if ok_c and cn ~= nil then civ = tostring(cn) end
+	local age = Player_GetCurrentAge(player.id)
+	_AutoAge_LogTrace(string.format("[AUTOAGE][TRACE] AgeUp CALLED player=%s civ=%s age=%d obj_build_count=%s max_age=%s",
+		tostring(player.id), civ, age, tostring(player.obj_build_count),
+		tostring(Player_GetStateModelInt(player.id, "player_max_age"))))
+	if age < 2 then
+		CBA_AutoAge_SetMaximumAge(player.id, AGE_FEUDAL)
+		CBA_AutoAge_HandleSpecialAgeTrigger(player, 2, "CBA_Auto_Age_AgeUp")
+		CBA_AutoAge_TryAdvanceAge(player)
+		CBA_AutoAge_SyncSpecialUpgradeAvailability(player)
+	elseif age < 3 then
+		CBA_AutoAge_SetMaximumAge(player.id, AGE_CASTLE)
+		CBA_AutoAge_HandleSpecialAgeTrigger(player, 3, "CBA_Auto_Age_AgeUp")
+		CBA_AutoAge_TryAdvanceAge(player)
+		CBA_AutoAge_SyncSpecialUpgradeAvailability(player)
+	elseif age < 4 then
+		CBA_AutoAge_SetMaximumAge(player.id, AGE_IMPERIAL)
+		CBA_AutoAge_HandleSpecialAgeTrigger(player, 4, "CBA_Auto_Age_AgeUp")
+		CBA_AutoAge_TryAdvanceAge(player)
+		CBA_AutoAge_SyncSpecialUpgradeAvailability(player)
+	end
+	local new_age = Player_GetCurrentAge(player.id)
+	_AutoAge_LogTrace(string.format("[AUTOAGE][TRACE] AgeUp RESULT player=%s civ=%s age=%d->%d obj_build_count=%s max_age=%s",
+		tostring(player.id), civ, age, new_age, tostring(player.obj_build_count),
+		tostring(Player_GetStateModelInt(player.id, "player_max_age"))))
+end
+
+-- Runs per-player age reconciliation and upgrade sync across all players.
+-- Safe to call at any time from debug suites.
+function CBA_AutoAge_CheckAllPlayers()
+	if PLAYERS == nil then return end
+	for _, player in ipairs(PLAYERS) do
+		if not player.isEliminated then
+			CBA_AutoAge_ReconcileSpecialProgress(player)
+			CBA_AutoAge_SyncSpecialUpgradeAvailability(player)
+		end
+	end
+end
+
+-- Select stage
+function CBA_Auto_Age()
+	if AGS_GLOBAL_SETTINGS.StartingAge == AGS_GS_AGE_DARK then
+		Rule_AddOneShot(CBA_Auto_Age_1, AGS_GLOBAL_SETTINGS.AutoAge)
+	elseif AGS_GLOBAL_SETTINGS.StartingAge == AGS_GS_AGE_FEUDAL then
+		Rule_AddOneShot(CBA_Auto_Age_2, AGS_GLOBAL_SETTINGS.AutoAge)
+	elseif AGS_GLOBAL_SETTINGS.StartingAge == AGS_GS_AGE_CASTLE then
+		Rule_AddOneShot(CBA_Auto_Age_3, AGS_GLOBAL_SETTINGS.AutoAge)		
+	end
+end
+
+-- Age up stages
+function CBA_Auto_Age_1()
+	_AutoAge_LogTrace("[AUTOAGE][TRACE] >>> CBA_Auto_Age_1 FIRED (timer unlocking FEUDAL)")
+	for _, player in ipairs(PLAYERS) do
+		local age = Player_GetCurrentAge(player.id)
+		local player_civ = Player_GetRaceName(player.id)
+		_AutoAge_LogTrace(string.format("[AUTOAGE][TRACE] Auto_Age_1 player=%s civ=%s age=%d obj_build_count=%s max_age=%s",
+			tostring(player.id), tostring(player_civ), age, tostring(player.obj_build_count),
+			tostring(Player_GetStateModelInt(player.id, "player_max_age"))))
+		
+		-- Setup age
+		if age < 2 then
+			CBA_AutoAge_SetMaximumAge(player.id, AGE_FEUDAL)
+			CBA_AutoAge_HandleSpecialAgeTrigger(player, 2, "CBA_Auto_Age_1")
+			CBA_AutoAge_TryAdvanceAge(player)
+			CBA_AutoAge_SyncSpecialUpgradeAvailability(player)
+		end
+	end
+	
+	-- Enable Archery/Stable @ Dark Age
+	-- CBA_Options_DarkAge_Unlocks()
+
+	-- Setup next function
+	Rule_AddOneShot(CBA_Auto_Age_2, AGS_GLOBAL_SETTINGS.AutoAge)
+end
+
+function CBA_Auto_Age_2()
+	_AutoAge_LogTrace("[AUTOAGE][TRACE] >>> CBA_Auto_Age_2 FIRED (timer unlocking CASTLE)")
+	for _, player in ipairs(PLAYERS) do
+		local age = Player_GetCurrentAge(player.id)
+		local player_civ = Player_GetRaceName(player.id)
+		_AutoAge_LogTrace(string.format("[AUTOAGE][TRACE] Auto_Age_2 player=%s civ=%s age=%d obj_build_count=%s max_age=%s",
+			tostring(player.id), tostring(player_civ), age, tostring(player.obj_build_count),
+			tostring(Player_GetStateModelInt(player.id, "player_max_age"))))
+		
+		-- Setup age
+		if age < 3 then
+			CBA_AutoAge_SetMaximumAge(player.id, AGE_CASTLE)
+			CBA_AutoAge_HandleSpecialAgeTrigger(player, 3, "CBA_Auto_Age_2")
+			CBA_AutoAge_TryAdvanceAge(player)
+			CBA_AutoAge_SyncSpecialUpgradeAvailability(player)
+		end
+	end
+	
+	-- Setup next function
+	Rule_AddOneShot(CBA_Auto_Age_3, AGS_GLOBAL_SETTINGS.AutoAge)
+end
+
+function CBA_Auto_Age_3()	
+	_AutoAge_LogTrace("[AUTOAGE][TRACE] >>> CBA_Auto_Age_3 FIRED (timer unlocking IMPERIAL)")
+	for _, player in ipairs(PLAYERS) do
+		local age = Player_GetCurrentAge(player.id)
+		local player_civ = Player_GetRaceName(player.id)
+		_AutoAge_LogTrace(string.format("[AUTOAGE][TRACE] Auto_Age_3 player=%s civ=%s age=%d obj_build_count=%s max_age=%s",
+			tostring(player.id), tostring(player_civ), age, tostring(player.obj_build_count),
+			tostring(Player_GetStateModelInt(player.id, "player_max_age"))))
+		
+		-- Setup age
+		if age < 4 then
+			CBA_AutoAge_SetMaximumAge(player.id, AGE_IMPERIAL)
+			CBA_AutoAge_HandleSpecialAgeTrigger(player, 4, "CBA_Auto_Age_3")
+			CBA_AutoAge_TryAdvanceAge(player)
+			CBA_AutoAge_SyncSpecialUpgradeAvailability(player)
+		end
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Cross-civ menu lock validation (debug / console-callable)
+-- Iterates all players and all expected menu names, reports success/failure per civ.
+-- Usage: CBA_AutoAge_ValidateAllMenuLocks()
+---------------------------------------------------------------------------------------------------
+
+function CBA_AutoAge_ValidateAllMenuLocks()
+	if PLAYERS == nil then
+		print("[AUTOAGE][VALIDATE] PLAYERS table is nil")
+		return
+	end
+
+	print("[AUTOAGE][VALIDATE] === Menu Lock Validation Start ===")
+
+	local total_ok = 0
+	local total_fail = 0
+	local total_skip = 0
+
+	for _, player in ipairs(PLAYERS) do
+		if player.isEliminated then
+			total_skip = total_skip + 1
+		else
+			local resolvedRace, rawRace = CBA_AutoAge_ResolveRaceName(player.id)
+			local maxAge = Player_GetStateModelInt(player.id, "player_max_age")
+			local curAge = Player_GetCurrentAge(player.id)
+			local civMenus = _AUTOAGE_CIV_MENUS[resolvedRace]
+
+			print(string.format("[AUTOAGE][VALIDATE] player=%s raw=%s resolved=%s curAge=%d maxAge=%s",
+				tostring(player.id), tostring(rawRace), tostring(resolvedRace),
+				curAge, tostring(maxAge)))
+
+			if civMenus == nil then
+				print(string.format("[AUTOAGE][VALIDATE]   WARN: no _AUTOAGE_CIV_MENUS entry for %s", tostring(resolvedRace)))
+				total_fail = total_fail + 1
+			else
+				-- Test age menus: probe each candidate with ITEM_DEFAULT then re-lock if needed
+				for age = 2, 4 do
+					local candidates = civMenus.age_menus and civMenus.age_menus[age]
+					if candidates ~= nil then
+						for _, menuName in ipairs(candidates) do
+							local ok = CBA_AutoAge_SetConstructionMenuAvailabilitySafe(
+								player.id, menuName, ITEM_DEFAULT, "validate/age" .. age, true)
+							local status = ok and "OK" or "FAIL"
+							print(string.format("[AUTOAGE][VALIDATE]   age%d menu=%s %s", age, menuName, status))
+							if ok then total_ok = total_ok + 1 else total_fail = total_fail + 1 end
+							-- Re-lock if this age should be locked
+							if ok and maxAge ~= nil and maxAge > 0 and maxAge < age then
+								CBA_AutoAge_SetConstructionMenuAvailabilitySafe(
+									player.id, menuName, ITEM_REMOVED, "validate/relock", true)
+							end
+						end
+					end
+				end
+
+				-- Test wonder menus (non-wing civs only)
+				local wingCfg = _AUTOAGE_WING_UPGRADES[resolvedRace]
+				if wingCfg == nil and civMenus.wonder_menus ~= nil then
+					for wonderAge = 1, 3 do
+						local candidates = civMenus.wonder_menus[wonderAge]
+						if candidates ~= nil then
+							for _, menuName in ipairs(candidates) do
+								local ok = CBA_AutoAge_SetConstructionMenuAvailabilitySafe(
+									player.id, menuName, ITEM_DEFAULT, "validate/wonder" .. wonderAge, true)
+								local status = ok and "OK" or "FAIL"
+								print(string.format("[AUTOAGE][VALIDATE]   wonder%d menu=%s %s", wonderAge, menuName, status))
+								if ok then total_ok = total_ok + 1 else total_fail = total_fail + 1 end
+								-- Re-lock if this wonder age should be locked
+								if ok and maxAge ~= nil and maxAge > 0 and maxAge < (wonderAge + 1) then
+									CBA_AutoAge_SetConstructionMenuAvailabilitySafe(
+										player.id, menuName, ITEM_REMOVED, "validate/relock", true)
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+
+	print(string.format("[AUTOAGE][VALIDATE] === Summary: ok=%d fail=%d skip=%d ===",
+		total_ok, total_fail, total_skip))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Enhanced debug commands (console-callable)
+---------------------------------------------------------------------------------------------------
+
+-- Dumps full auto-age state for all players. Usage: CBA_AutoAge_Dump()
+function CBA_AutoAge_Dump()
+	if PLAYERS == nil then
+		print("[AUTOAGE][DUMP] PLAYERS table is nil")
+		return
+	end
+	print("[AUTOAGE][DUMP] ============================================================")
+	print(string.format("[AUTOAGE][DUMP] StartingAge=%s AutoAge=%s DiagEnabled=%s DiagPass=%s",
+		tostring(AGS_GLOBAL_SETTINGS.StartingAge), tostring(AGS_GLOBAL_SETTINGS.AutoAge),
+		tostring(_AUTOAGE_DIAG_ENABLED), tostring(_AUTOAGE_DIAG_PASS)))
+	for i, player in ipairs(PLAYERS) do
+		if player ~= nil and player.id ~= nil then
+			local civ = "<unknown>"
+			local ok_c, cn = pcall(Player_GetRaceName, player.id)
+			if ok_c and cn ~= nil then civ = tostring(cn) end
+			local resolved, raw = CBA_AutoAge_ResolveRaceName(player.id)
+			local age = Player_GetCurrentAge(player.id)
+			local max_age = Player_GetStateModelInt(player.id, "player_max_age")
+			local is_special = _AUTOAGE_SPECIAL_UPGRADES[civ] ~= nil
+			local needs_force = _AUTOAGE_SPECIAL_NEEDS_FORCE_AGE[civ] == true
+			local has_menus = _AUTOAGE_CIV_MENUS[tostring(resolved)] ~= nil
+			local prefix = AGS_CIV_PREFIXES[tostring(resolved)]
+			print(string.format("[AUTOAGE][DUMP] PLAYERS[%d] id=%s civ=%s resolved=%s raw=%s prefix=%s age=%d max_age=%s build_count=%s isLocal=%s isElim=%s isSpecial=%s needsForce=%s hasMenus=%s",
+				i, tostring(player.id), civ, tostring(resolved), tostring(raw),
+				tostring(prefix), age, tostring(max_age), tostring(player.obj_build_count),
+				tostring(player.isLocal), tostring(player.isEliminated),
+				tostring(is_special), tostring(needs_force), tostring(has_menus)))
+
+			-- Report special upgrade progress if applicable
+			if is_special then
+				local civ_cfg = _AUTOAGE_SPECIAL_UPGRADES[civ]
+				for _, tier in ipairs({"feudal", "castle", "imperial"}) do
+					local has = civ_cfg[tier] ~= nil and CBA_AutoAge_PlayerHasAnyUpgrade(player.id, civ_cfg[tier])
+					print(string.format("[AUTOAGE][DUMP]   special_tier=%s has_upgrade=%s", tier, tostring(has)))
+				end
+			end
+		end
+	end
+	print("[AUTOAGE][DUMP] ============================================================")
+end
+
+-- Force age-up for the local human player. Auto-selects the local player.
+-- Usage: CBA_AutoAge_ForceAge()         -- advance one age tier
+-- Usage: CBA_AutoAge_ForceAge(4)        -- force to Age IV directly
+-- Usage: CBA_AutoAge_ForceAge(nil, 2)   -- target specific PLAYERS[n]
+function CBA_AutoAge_ForceAge(target_age, player_index)
+	local player = nil
+	if player_index ~= nil then
+		player = PLAYERS[player_index]
+	else
+		-- Auto-select the local human player
+		for _, p in ipairs(PLAYERS) do
+			if p.isLocal and not p.isEliminated then
+				player = p
+				break
+			end
+		end
+	end
+	if player == nil or player.id == nil then
+		print("[AUTOAGE][FORCE] ERROR: no valid player found")
+		return
+	end
+
+	local civ = "<unknown>"
+	local ok_c, cn = pcall(Player_GetRaceName, player.id)
+	if ok_c and cn ~= nil then civ = tostring(cn) end
+	local age_before = Player_GetCurrentAge(player.id)
+
+	if target_age ~= nil and target_age >= 1 and target_age <= 4 then
+		-- Direct force to specific age: set build_count AND max_age, then advance
+		print(string.format("[AUTOAGE][FORCE] forcing player=%s civ=%s from age %d to %d",
+			tostring(player.id), civ, age_before, target_age))
+		player.obj_build_count = target_age
+		Player_SetStateModelInt(player.id, "player_max_age", target_age)
+		CBA_AutoAge_SetMaximumAge(player.id, target_age)
+		if target_age > age_before then
+			Player_SetCurrentAge(player.id, target_age)
+			CBA_Options_RevalidateAll(player)
+			CBA_AutoAge_ReassertPlayerLocks(player)
+		end
+		-- Handle special civ upgrades for each tier up to target
+		local is_special = _AUTOAGE_SPECIAL_UPGRADES[civ] ~= nil
+		if is_special then
+			for t = age_before + 1, target_age do
+				CBA_AutoAge_HandleSpecialAgeTrigger(player, t, "CBA_AutoAge_ForceAge")
+			end
+		end
+		CBA_AutoAge_ReconcileSpecialProgress(player)
+		CBA_AutoAge_SyncSpecialUpgradeAvailability(player)
+
+		-- Clamp final age back to target. For civs whose upgrades natively advance the age
+		-- (Horde, Templar), the HandleSpecialAgeTrigger → Player_CompleteUpgrade chain may
+		-- have added an extra +1 per tier on top of the pre-emptive Player_SetCurrentAge
+		-- above, causing overshoot. Re-asserting the target is idempotent for civs whose
+		-- upgrades don't natively advance.
+		local final_age = Player_GetCurrentAge(player.id)
+		if final_age ~= target_age then
+			print(string.format("[AUTOAGE][FORCE] clamping player=%s civ=%s age=%d back to target=%d",
+				tostring(player.id), civ, final_age, target_age))
+			Player_SetCurrentAge(player.id, target_age)
+			CBA_Options_RevalidateAll(player)
+			CBA_AutoAge_ReassertPlayerLocks(player)
+		end
+	else
+		-- One-step: advance by one tier (same as AgeUp but auto-selecting local player)
+		print(string.format("[AUTOAGE][FORCE] stepping player=%s civ=%s from age %d",
+			tostring(player.id), civ, age_before))
+		-- Set build_count to next age to ensure TryAdvanceAge can advance
+		local next_age = age_before + 1
+		if next_age <= 4 then
+			if player.obj_build_count == nil or player.obj_build_count < next_age then
+				player.obj_build_count = next_age
+			end
+			CBA_Auto_Age_AgeUp(player)
+		end
+	end
+
+	local age_after = Player_GetCurrentAge(player.id)
+	print(string.format("[AUTOAGE][FORCE] DONE player=%s civ=%s age=%d->%d build_count=%s max_age=%s",
+		tostring(player.id), civ, age_before, age_after,
+		tostring(player.obj_build_count),
+		tostring(Player_GetStateModelInt(player.id, "player_max_age"))))
+end
+
+-- Unlocks the next age tier for the local human player WITHOUT forcing age-up.
+-- The player must still construct a landmark (or pick a special upgrade) to actually advance.
+-- Simulates what the auto-age timer does when it fires.
+-- Usage: CBA_AutoAge_Unlock()          -- unlock one tier
+-- Usage: CBA_AutoAge_Unlock(4)         -- unlock up to Age IV
+-- Usage: CBA_AutoAge_Unlock(nil, 2)    -- target specific PLAYERS[n]
+function CBA_AutoAge_Unlock(target_max_age, player_index)
+	local player = nil
+	if player_index ~= nil then
+		player = PLAYERS[player_index]
+	else
+		for _, p in ipairs(PLAYERS) do
+			if p.isLocal and not p.isEliminated then
+				player = p
+				break
+			end
+		end
+	end
+	if player == nil or player.id == nil then
+		print("[AUTOAGE][UNLOCK] ERROR: no valid player found")
+		return
+	end
+
+	local civ = "<unknown>"
+	local ok_c, cn = pcall(Player_GetRaceName, player.id)
+	if ok_c and cn ~= nil then civ = tostring(cn) end
+	local age = Player_GetCurrentAge(player.id)
+	local current_max = Player_GetStateModelInt(player.id, "player_max_age")
+	if current_max == nil or current_max <= 0 then current_max = age end
+
+	-- Determine unlock target
+	local unlock_to = nil
+	if target_max_age ~= nil and target_max_age >= 1 and target_max_age <= 4 then
+		unlock_to = target_max_age
+	else
+		-- One step: unlock next tier above current max_age
+		unlock_to = math.min(current_max + 1, 4)
+	end
+
+	if unlock_to <= current_max then
+		print(string.format("[AUTOAGE][UNLOCK] NO-OP player=%s civ=%s age=%d max_age already=%d unlock_to=%d",
+			tostring(player.id), civ, age, current_max, unlock_to))
+		return
+	end
+
+	print(string.format("[AUTOAGE][UNLOCK] unlocking player=%s civ=%s age=%d max_age=%d->%d (player must build landmark to advance)",
+		tostring(player.id), civ, age, current_max, unlock_to))
+
+	-- Unlock each tier sequentially, same as Auto_Age_1/2/3 timers do
+	for tier = current_max + 1, unlock_to do
+		local age_const = ({AGE_DARK, AGE_FEUDAL, AGE_CASTLE, AGE_IMPERIAL})[tier]
+		if age_const ~= nil then
+			CBA_AutoAge_SetMaximumAge(player.id, age_const)
+			CBA_AutoAge_HandleSpecialAgeTrigger(player, tier, "CBA_AutoAge_Unlock")
+			CBA_AutoAge_SyncSpecialUpgradeAvailability(player)
+		end
+	end
+
+	-- TryAdvanceAge will only advance if obj_build_count already justifies it
+	CBA_AutoAge_TryAdvanceAge(player)
+
+	local new_max = Player_GetStateModelInt(player.id, "player_max_age")
+	print(string.format("[AUTOAGE][UNLOCK] DONE player=%s civ=%s age=%d max_age=%s build_count=%s",
+		tostring(player.id), civ, Player_GetCurrentAge(player.id),
+		tostring(new_max), tostring(player.obj_build_count)))
+end
+

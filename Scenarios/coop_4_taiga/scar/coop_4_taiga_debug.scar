@@ -1,0 +1,1189 @@
+-- ============================================================
+-- Debug & Test Functions (console-callable)
+-- ============================================================
+-- Consolidated from main .scar and data.scar for cleaner separation.
+-- All functions here are safe to call from the AoE4 Content Editor console.
+-- ============================================================
+
+-- Dump all player slot states: human/AI, personality, original type, transfer status, disconnect status
+function Debug_PlayerSlots()
+	for i = 1, 6 do
+		local pid = ALL_PLAYER_SLOTS[i]
+		local is_human = Player_IsHuman(pid)
+		local personality = is_human and "N/A (human)" or AI_GetPersonality(pid)
+		local original = g_original_player_types[i] and "HUMAN_SEAT" or "AI_SEAT"
+		local disconnected = g_disconnected_slots[i] and "DISCONNECTED" or "active"
+		local transferred = g_transferred_slots[i] and "TRANSFERRED" or "no"
+		print(string.format("player%d | IsHuman: %s | seat: %s | dc: %s | transferred: %s | personality: %s",
+			i, is_human and "YES" or "NO", original, disconnected, transferred, personality))
+	end
+end
+
+-- Dump resources for all human co-op players (1–4)
+function Debug_Resources()
+	for i = 1, 4 do
+		local pid = ALL_PLAYER_SLOTS[i]
+		local food = Player_GetResource(pid, RT_Food)
+		local wood = Player_GetResource(pid, RT_Wood)
+		local gold = Player_GetResource(pid, RT_Gold)
+		local stone = Player_GetResource(pid, RT_Stone)
+		print(string.format("player%d | Food: %d | Wood: %d | Gold: %d | Stone: %d",
+			i, food, wood, gold, stone))
+	end
+end
+
+-- Dump squad count for all player slots
+function Debug_SquadCounts()
+	for i = 1, 6 do
+		local pid = ALL_PLAYER_SLOTS[i]
+		Player_GetAll(pid)
+		local count = SGroup_CountSpawned(sg_allsquads)
+		print(string.format("player%d | squads: %d", i, count))
+	end
+end
+
+-- Full disconnect system diagnostic: slots, assets, events, state
+function Debug_DisconnectSystem()
+	print("=== DISCONNECT SYSTEM DIAGNOSTIC ===")
+	print(string.format("g_gameOver: %s", tostring(g_gameOver)))
+	print(string.format("World_IsMultiplayerGame: %s", tostring(World_IsMultiplayerGame())))
+	print("")
+	print("--- Slot Status ---")
+	for i = 1, 6 do
+		local pid = ALL_PLAYER_SLOTS[i]
+		if pid == nil then
+			print(string.format("player%d | SLOT NIL", i))
+		else
+			local is_human = Player_IsHuman(pid)
+			local personality = "N/A"
+			if not is_human then
+				local ok, p = pcall(AI_GetPersonality, pid)
+				personality = ok and p or "ERROR"
+			end
+			local seat = g_original_player_types[i] and "HUMAN_SEAT" or "AI_SEAT"
+			local dc = g_disconnected_slots[i] and "YES" or "no"
+			local xfer = g_transferred_slots[i] and "YES" or "no"
+			local xfer_count = g_transfer_counts[i] or 0
+			local civ = Player_GetRaceName(pid)
+			local pop = Player_GetCurrentPopulation(pid, CT_Personnel)
+			Player_GetAll(pid)
+			local squads = SGroup_CountSpawned(sg_allsquads)
+			local buildings = EGroup_CountSpawned(eg_allentities)
+			print(string.format("player%d | IsHuman=%s | seat=%s | dc=%s | xfer=%s | rcv=%d | %s | pop=%d | sq=%d | bldg=%d | ai=%s",
+				i, is_human and "Y" or "N", seat, dc, xfer, xfer_count, civ, pop, squads, buildings, personality))
+		end
+	end
+	print("")
+	print("--- Expected Behavior ---")
+	print("In MP: Player_IsHuman=N for remote humans is NORMAL (engine limitation)")
+	print("Disconnect detection: Core callback (primary) + GE_AITakeOver + GE_AIPlayer_Migrated")
+	print("=== END DIAGNOSTIC ===")
+end
+
+-- Simulate a player disconnect for testing (Content Editor only)
+-- Usage: Debug_SimulateDisconnect(2) to simulate player2 disconnecting
+function Debug_SimulateDisconnect(slot)
+	if slot == nil or slot < 1 or slot > 4 then
+		print("[DC][DEBUG] Usage: Debug_SimulateDisconnect(1-4)")
+		return
+	end
+	if g_disconnected_slots[slot] then
+		print(string.format("[DC][DEBUG] player%d already marked as disconnected", slot))
+		return
+	end
+	if g_transferred_slots[slot] then
+		print(string.format("[DC][DEBUG] player%d already transferred", slot))
+		return
+	end
+	print(string.format("[DC][DEBUG] Simulating disconnect for player%d...", slot))
+	g_disconnected_slots[slot] = true
+	print(string.format("[DC][DEBUG] player%d marked as disconnected — CheckPlayerDisconnects will process on next tick", slot))
+	-- Trigger immediate processing
+	CheckPlayerDisconnects()
+end
+
+-- Reset disconnect state for a slot (Content Editor only — for re-testing)
+-- Usage: Debug_ResetDisconnect(2)
+function Debug_ResetDisconnect(slot)
+	if slot == nil or slot < 1 or slot > 4 then
+		print("[DC][DEBUG] Usage: Debug_ResetDisconnect(1-4)")
+		return
+	end
+	g_disconnected_slots[slot] = nil
+	g_transferred_slots[slot] = nil
+	print(string.format("[DC][DEBUG] player%d disconnect state reset (dc=nil, transferred=nil)", slot))
+end
+
+-- ============================================================
+-- DLC Resolver Debug Helpers
+-- ============================================================
+
+---DebugPrint_Resolver: Conditional print — only outputs when DLC_DEBUG is true.
+function DebugPrint_Resolver(msg)
+	if DLC_DEBUG then
+		print("[DLC-DBG] " .. msg)
+	end
+end
+
+---Validator_PlayerCivDump: Log each human player's raw civ, resolved civ,
+-- and composition map entries. Call in Mission_SetupVariables for diagnostics.
+function Validator_PlayerCivDump()
+	for _, player in ipairs(PLAYERS) do
+		local raw = string.lower(Player_GetRaceName(player.id))
+		local resolved = GetPlayerCiv(player.id)
+		local melee_key = ResolveCivMapKey(CIV_MELEE_MAP, raw, "start_player_melee")
+		local ranged_key = ResolveCivMapKey(CIV_RANGED_MAP, raw, "start_player_ranged")
+		local reinf_melee = ResolveCivMapKey(REINFORCE_MELEE_MAP, raw, "units_player_melee_reinforce")
+		local reinf_ranged = ResolveCivMapKey(REINFORCE_RANGED_MAP, raw, "units_player_ranged_reinforce")
+		
+		print("[DLC-DUMP] Player " .. tostring(player.id)
+			.. " | raw: " .. raw
+			.. " | resolved: " .. resolved
+			.. " | melee: " .. melee_key
+			.. " | ranged: " .. ranged_key
+			.. " | reinf_melee: " .. reinf_melee
+			.. " | reinf_ranged: " .. reinf_ranged)
+	end
+end
+
+-- ============================================================
+-- DLC Composition Test Functions
+-- ============================================================
+
+-- Debug: Validate and dump DLC civ composition mappings
+-- Does NOT spawn units (generic scar_ types always resolve to spawning player's faction)
+-- Instead, dumps the full mapping chain so you can verify correctness
+-- civ_name: Civilization identifier (base or DLC, e.g., "mongol", "english", "lancaster")
+function Test_SpawnDLCGroup(civ_name)
+	local resolved = ResolveCivKey(civ_name)
+	if resolved == nil then
+		print("[TEST] FAIL: Civ '" .. civ_name .. "' unresolvable")
+		return
+	end
+	
+	-- Melee mapping
+	local melee_key = CIV_MELEE_MAP[civ_name] or CIV_MELEE_MAP[resolved] or "start_player_melee"
+	local melee_valid = Unit_Types[melee_key] ~= nil
+	
+	-- Ranged mapping
+	local ranged_key = CIV_RANGED_MAP[civ_name] or CIV_RANGED_MAP[resolved] or "start_player_ranged"
+	local ranged_valid = Unit_Types[ranged_key] ~= nil
+	
+	-- Reinforce melee
+	local reinf_melee = REINFORCE_MELEE_MAP[civ_name] or REINFORCE_MELEE_MAP[resolved] or "units_player_melee_reinforce"
+	local reinf_melee_valid = Unit_Types[reinf_melee] ~= nil
+	
+	-- Reinforce ranged
+	local reinf_ranged = REINFORCE_RANGED_MAP[civ_name] or REINFORCE_RANGED_MAP[resolved] or "units_player_ranged_reinforce"
+	local reinf_ranged_valid = Unit_Types[reinf_ranged] ~= nil
+	
+	-- Print header
+	print("[TEST] === DLC Composition Dump: " .. civ_name .. " ===")
+	print("[TEST] Resolved parent: " .. resolved)
+	
+	-- Print mappings with pass/fail
+	print("[TEST] melee: " .. melee_key .. (melee_valid and " [OK]" or " [MISSING]"))
+	if melee_valid then
+		for _, u in ipairs(Unit_Types[melee_key]) do
+			print("[TEST]   " .. (u.type or "sbp") .. " x" .. u.numSquads)
+		end
+	end
+	
+	print("[TEST] ranged: " .. ranged_key .. (ranged_valid and " [OK]" or " [MISSING]"))
+	if ranged_valid then
+		for _, u in ipairs(Unit_Types[ranged_key]) do
+			print("[TEST]   " .. (u.type or "sbp") .. " x" .. u.numSquads)
+		end
+	end
+	
+	print("[TEST] reinf_melee: " .. reinf_melee .. (reinf_melee_valid and " [OK]" or " [MISSING]"))
+	print("[TEST] reinf_ranged: " .. reinf_ranged .. (reinf_ranged_valid and " [OK]" or " [MISSING]"))
+	
+	-- Overall result
+	local all_ok = melee_valid and ranged_valid and reinf_melee_valid and reinf_ranged_valid
+	print("[TEST] Result: " .. civ_name .. " -> " .. (all_ok and "PASS" or "FAIL"))
+end
+
+-- Debug: Run composition validation for all DLC civs at once
+function Test_AllDLCCivs()
+	print("[TEST] ======== DLC Composition Validation ========")
+	for civ, parent in pairs(DLC_CIV_PARENT_MAP) do
+		Test_SpawnDLCGroup(civ)
+		print("")
+	end
+	print("[TEST] ======== End DLC Validation ========")
+end
+
+function Test_ListDLCCivs()
+	print("[DLC REGISTRY]")
+	for civ, parent in pairs(DLC_CIV_PARENT_MAP) do
+		print("  " .. civ .. " -> parent: " .. parent)
+	end
+end
+
+-- ============================================================
+-- Phase2 Village South Review Helpers
+-- ============================================================
+
+-- Quick status dump for Capture Village (South) objective verification.
+-- Usage (console): Debug_Phase2VillageSouthReview()
+function Debug_Phase2VillageSouthReview()
+	local function _Owner(entity)
+		if entity == nil then
+			return "nil"
+		end
+		if Entity_GetPlayerOwner(entity) == nil then
+			return "none"
+		end
+		return tostring(Entity_GetPlayerOwner(entity))
+	end
+
+	print("[P2-SOUTH] ===== Capture Village (South) Review =====")
+	print("[P2-SOUTH] AI_Difficulty=" .. tostring(AI_Difficulty)
+		.. " | expected_outpost_south_allied_wave=" .. ((AI_Difficulty >= 2) and "wave_city_10m" or "wave_city_5m"))
+
+	if OBJ_Phase2_VillageCapture_Main ~= nil then
+		print("[P2-SOUTH] main started=" .. tostring(Objective_IsStarted(OBJ_Phase2_VillageCapture_Main))
+			.. " | complete=" .. tostring(Objective_IsComplete(OBJ_Phase2_VillageCapture_Main)))
+	end
+
+	if OBJ_Phase2_VillageCapture_side ~= nil then
+		local counter_set = Objective_IsCounterSet(OBJ_Phase2_VillageCapture_side)
+		print("[P2-SOUTH] side started=" .. tostring(Objective_IsStarted(OBJ_Phase2_VillageCapture_side))
+			.. " | complete=" .. tostring(Objective_IsComplete(OBJ_Phase2_VillageCapture_side))
+			.. " | counter_set=" .. tostring(counter_set))
+		if counter_set then
+			print("[P2-SOUTH] side counter="
+				.. tostring(Obj_GetCounterCount(OBJ_Phase2_VillageCapture_side.ID))
+				.. "/"
+				.. tostring(Obj_GetCounterMax(OBJ_Phase2_VillageCapture_side.ID)))
+		end
+	end
+
+	print("[P2-SOUTH] reserves side1_sent=" .. tostring(village_south_reserves_sent_1)
+		.. " | side2_sent=" .. tostring(bridge_group_eliminated_2)
+		.. " | side4_sent=" .. tostring(village_south_reserves_sent_4))
+
+	print("[P2-SOUTH] defenders g1=" .. tostring(SGroup_Count(sg_village_south_defender_1))
+		.. " g2=" .. tostring(SGroup_Count(sg_village_south_defender_2))
+		.. " g4=" .. tostring(SGroup_Count(sg_village_south_defender_4))
+		.. " g6=" .. tostring(SGroup_Count(sg_village_south_defender_6))
+		.. " all=" .. tostring(SGroup_Count(sg_village_south_defender_all)))
+
+	print("[P2-SOUTH] allied g1=" .. tostring(SGroup_Count(sg_village_south_allied_1))
+		.. " g2=" .. tostring(SGroup_Count(sg_village_south_allied_2))
+		.. " g3=" .. tostring(SGroup_Count(sg_village_south_allied_3)))
+
+	print("[P2-SOUTH] owner kremlin=" .. _Owner(entity_kremlin)
+		.. " | bridge_outpost=" .. _Owner(entity_outpost_bridge)
+		.. " | south_outpost=" .. _Owner(entity_outpost_south))
+	print("[P2-SOUTH] =================================================")
+end
+
+-- Village North rally concentration snapshot.
+-- Usage (console): Debug_VillageNorthRallyReport()
+function Debug_VillageNorthRallyReport()
+	local function _ObjState(name, obj)
+		if obj == nil then
+			print("[RALLY-DBG] " .. name .. " state: nil (not initialized)")
+			return
+		end
+
+		print("[RALLY-DBG] " .. name
+			.. " started=" .. tostring(Objective_IsStarted(obj))
+			.. " complete=" .. tostring(Objective_IsComplete(obj))
+			.. " failed=" .. tostring(Objective_IsFailed(obj)))
+	end
+
+	local reinforce_count = 0
+	if sg_village_north_attacker_reinforce ~= nil then
+		reinforce_count = SGroup_Count(sg_village_north_attacker_reinforce)
+	end
+
+	local attacker3_count = SGroup_Count(sg_village_north_attacker_3)
+	local camp1_count = SGroup_Count(sg_camp_guards_1)
+	local camp2_count = SGroup_Count(sg_camp_guards_2)
+	local attacker4_count = SGroup_Count(sg_village_north_attacker_4)
+	local total = attacker3_count + reinforce_count + camp1_count + camp2_count + attacker4_count
+
+	_ObjState("OBJ_Phase1_VillageNorth_Main", OBJ_Phase1_VillageNorth_Main)
+	_ObjState("OBJ_Phase1_VillageDefence_Main", OBJ_Phase1_VillageDefence_Main)
+
+	print("[RALLY-DBG] sg_village_north_attacker_3=" .. tostring(attacker3_count))
+	print("[RALLY-DBG] sg_village_north_attacker_reinforce=" .. tostring(reinforce_count)
+		.. ((sg_village_north_attacker_reinforce == nil) and " (nil)" or ""))
+	print("[RALLY-DBG] sg_camp_guards_1=" .. tostring(camp1_count))
+	print("[RALLY-DBG] sg_camp_guards_2=" .. tostring(camp2_count))
+	print("[RALLY-DBG] sg_village_north_attacker_4=" .. tostring(attacker4_count))
+	print("[RALLY-DBG] total_tracked_groups=" .. tostring(total))
+	print("[RALLY-DBG] note: visual clump at mkr_village_rally_1 may include multiple groups")
+end
+
+-- Hard-cap stress helper for north attacker 3 callback.
+-- Usage (console): Debug_StressNorthAttacker3HardCap() or Debug_StressNorthAttacker3HardCap(20, true)
+function Debug_StressNorthAttacker3HardCap(iterations, wipe_each_iter)
+	if iterations == nil or iterations < 1 then
+		iterations = 10
+	end
+
+	local do_wipe = (wipe_each_iter == true)
+	if north_attacker_initial_count_3 == nil then
+		north_attacker_initial_count_3 = 0
+	end
+
+	if north_attacker_initial_count_3 <= 0 then
+		north_attacker_initial_count_3 = SGroup_Count(sg_village_north_attacker_3)
+		print("[RALLY-DBG] seeded north_attacker_initial_count_3=" .. tostring(north_attacker_initial_count_3) .. " from current group count")
+	end
+
+	if north_attacker_initial_count_3 <= 0 then
+		north_attacker_initial_count_3 = 50
+		print("[RALLY-DBG] fallback north_attacker_initial_count_3=50")
+	end
+
+	for i = 1, iterations do
+		if do_wipe then
+			SGroup_Clear(sg_village_north_attacker_3)
+		end
+
+		Phase1_VillageNorth_AttackerRespawn_Callback_3()
+
+		local current_count = SGroup_Count(sg_village_north_attacker_3)
+		print("[RALLY-DBG] iter=" .. tostring(i)
+			.. "/" .. tostring(iterations)
+			.. " current=" .. tostring(current_count)
+			.. " cap=" .. tostring(north_attacker_initial_count_3))
+
+		if current_count > north_attacker_initial_count_3 then
+			print("[RALLY-DBG] FAIL: current count exceeded cap on iter=" .. tostring(i))
+			return false
+		end
+	end
+
+	print("[RALLY-DBG] PASS: hard cap respected for " .. tostring(iterations) .. " iterations")
+	return true
+end
+
+-- ============================================================
+-- Allied Siege Quick Debug Helpers
+-- ============================================================
+
+local function _Debug_AlliedSiegeGateMarker(side)
+	if side == 1 or side == 2 then
+		return mkr_dest_gate_1
+	end
+	if side == 3 or side == 4 then
+		return mkr_dest_gate_2
+	end
+	return nil
+end
+
+-- Probe gate detection using the same strategy as Allied Siege runtime.
+-- Usage (console): Debug_AlliedSiegeGateProbe(1)  |  Debug_AlliedSiegeGateProbe()
+function Debug_AlliedSiegeGateProbe(side)
+	local first_side = side or 1
+	local last_side = side or 4
+
+	if side == 0 then
+		first_side = 1
+		last_side = 4
+	end
+
+	if first_side < 1 or last_side > 4 then
+		print("[ALLIED_SIEGE][DBG] Usage: Debug_AlliedSiegeGateProbe(1-4) or Debug_AlliedSiegeGateProbe(0) or Debug_AlliedSiegeGateProbe()")
+		return false
+	end
+
+	for s = first_side, last_side do
+		local gate_mkr = _Debug_AlliedSiegeGateMarker(s)
+		local radius = ALLIED_SIEGE_GATE_SEARCH_RADIUS or 25
+		local source = "none"
+
+		local eg_stone = Player_GetEntitiesFromTypeInArea(player6, "stone_gate", gate_mkr, radius)
+		local stone_count = (eg_stone ~= nil) and EGroup_Count(eg_stone) or 0
+
+		local eg_gate = Player_GetEntitiesFromTypeInArea(player6, "gate", gate_mkr, radius)
+		local gate_count = (eg_gate ~= nil) and EGroup_Count(eg_gate) or 0
+
+		local fallback_count = 0
+		if eg_mon_walls ~= nil and EGroup_Count(eg_mon_walls) > 0 then
+			local eg_fallback = EGroup_CreateIfNotFound("eg_dbg_allied_siege_fallback")
+			EGroup_Clear(eg_fallback)
+			EGroup_AddEGroup(eg_fallback, eg_mon_walls)
+			EGroup_Filter(eg_fallback, { "stone_gate", "gate" }, FILTER_KEEP)
+			fallback_count = EGroup_Count(eg_fallback)
+		end
+
+		local chosen_count = 0
+		if stone_count > 0 then
+			chosen_count = stone_count
+			source = "stone_gate"
+		elseif gate_count > 0 then
+			chosen_count = gate_count
+			source = "gate"
+		elseif fallback_count > 0 then
+			chosen_count = fallback_count
+			source = "eg_mon_walls"
+		end
+
+		print(string.format("[ALLIED_SIEGE][DBG] side=%d marker=%s radius=%d | stone_gate=%d gate=%d mon_walls_gate=%d | chosen=%s(%d)",
+			s,
+			tostring(gate_mkr),
+			radius,
+			stone_count,
+			gate_count,
+			fallback_count,
+			source,
+			chosen_count))
+	end
+
+	return true
+end
+
+-- Dump runtime state of all Allied Siege armies.
+-- Usage (console): Debug_AlliedSiegeStatus()
+function Debug_AlliedSiegeStatus()
+	for side = 1, 4 do
+		local army_name = "allied_siege_" .. tostring(side)
+		local army = RovingArmy_Find(army_name)
+		local sgroup = _G["sg_allied_siege_" .. tostring(side)]
+		local sg_count = (sgroup ~= nil) and SGroup_Count(sgroup) or -1
+
+		if army ~= nil then
+			local state = RovingArmy_GetState(army)
+			local target_index = RovingArmy_GetTargetIndex(army)
+			local unit_ratio = RovingArmy_GetUnitRatio(army)
+			print(string.format("[ALLIED_SIEGE][DBG] side=%d army=%s state=%s target_index=%s units=%d ratio=%.2f",
+				side,
+				army_name,
+				tostring(state),
+				tostring(target_index),
+				sg_count,
+				unit_ratio))
+		else
+			print(string.format("[ALLIED_SIEGE][DBG] side=%d army=%s state=nil units=%d", side, army_name, sg_count))
+		end
+	end
+
+	Debug_AlliedSiegeGateProbe()
+	return true
+end
+
+-- One-command quick verifier: init + deploy + delayed status dump.
+-- Usage (console): Debug_AlliedSiegeQuickVerify(1) or Debug_AlliedSiegeQuickVerify(0)
+-- side=0 deploys all sides.
+function Debug_AlliedSiegeQuickVerify(side)
+	local deploy_side = side or 1
+	AlliedSiege_Init()
+
+	if deploy_side == 0 then
+		for s = 1, 4 do
+			AlliedSiege_Deploy(s)
+		end
+		print("[ALLIED_SIEGE][DBG] deployed sides 1-4")
+	else
+		if deploy_side < 1 or deploy_side > 4 then
+			print("[ALLIED_SIEGE][DBG] Usage: Debug_AlliedSiegeQuickVerify(1-4) or Debug_AlliedSiegeQuickVerify(0)")
+			return false
+		end
+		AlliedSiege_Deploy(deploy_side)
+		print(string.format("[ALLIED_SIEGE][DBG] deployed side %d", deploy_side))
+	end
+
+	Rule_AddOneShot(Debug_AlliedSiegeStatus, 50)
+	print("[ALLIED_SIEGE][DBG] scheduled Debug_AlliedSiegeStatus in 50s")
+	return true
+end
+
+-- Print quick command guide for Allied Siege verification.
+-- Usage (console): Debug_AlliedSiegeHelp()
+function Debug_AlliedSiegeHelp()
+	print("[ALLIED_SIEGE][DBG] Commands:")
+	print("[ALLIED_SIEGE][DBG]   Debug_AlliedSiegeGateProbe()")
+	print("[ALLIED_SIEGE][DBG]   Debug_AlliedSiegeGateProbe(1)")
+	print("[ALLIED_SIEGE][DBG]   Debug_AlliedSiegeQuickVerify(1)")
+	print("[ALLIED_SIEGE][DBG]   Debug_AlliedSiegeQuickVerify(0) -- all sides")
+	print("[ALLIED_SIEGE][DBG]   Debug_AlliedSiegeStatus()")
+	print("[ALLIED_SIEGE][DBG]   AlliedSiege_Init()")
+	print("[ALLIED_SIEGE][DBG]   AlliedSiege_Deploy(1)")
+end
+
+-- ============================================================
+-- Refactor Smoke Tests (quick console checks)
+-- ============================================================
+
+-- Verifies that key refactored functions are loaded and callable.
+-- Usage (console): Debug_QuickRefactorSmoke()
+function Debug_QuickRefactorSmoke()
+	local checks = {
+		"GetAIDifficulty", "Difficulty_Init",
+		"AGS_GetCivilizationEntity", "TryGetCivilizationEntity", "AGS_GetSiegeEntity", "AGS_GetSiegeSquad",
+		"DynastyUI_unlocked", "SGroup_Tracker",
+		"Reset_AI", "Reset_AI_OnTakeOver", "CheckPlayerDisconnects",
+		"FindRecipientPlayer", "TransferResources", "ConvertBuildings", "ConvertSquads",
+		"_ConvertBuildingEntity", "_TransferOrConvertSquad",
+		"Debug_PlayerSlots", "Debug_Resources", "Debug_SquadCounts",
+		"Debug_VillageNorthRallyReport", "Debug_StressNorthAttacker3HardCap",
+		"Debug_Phase2VillageSouthReview",
+		"Debug_AlliedSiegeGateProbe", "Debug_AlliedSiegeStatus", "Debug_AlliedSiegeQuickVerify", "Debug_AlliedSiegeHelp",
+		"Debug_AutoClearScenario", "Debug_AutoClearScenarioStatus", "Debug_AutoClearScenarioStop",
+		"Debug_ValidateAllBlueprints", "Debug_ValidateBlueprintsFail", "Debug_ValidateBlueprintsVerbose",
+		"Patrol_Cycle", "Units_Deploy", "Garrison_Building",
+		"Tribute_Init", "Tribute_Cleanup",
+	}
+	
+	local missing = 0
+	for _, name in ipairs(checks) do
+		local fn = _G[name]
+		if type(fn) ~= "function" then
+			print("[SMOKE] MISSING: " .. name)
+			missing = missing + 1
+		end
+	end
+	
+	if missing > 0 then
+		print(string.format("[SMOKE] FAIL: %d missing function(s)", missing))
+		return false
+	end
+	
+	print(string.format("[SMOKE] PASS: %d/%d functions present", #checks, #checks))
+	return true
+end
+
+-- One-command quick status dump after the smoke check.
+-- Usage (console): Debug_QuickRefactorStatus()
+function Debug_QuickRefactorStatus()
+	local ok = Debug_QuickRefactorSmoke()
+	if not ok then
+		return false
+	end
+	
+	print("[SMOKE] Slot/resource/squad snapshot:")
+	Debug_PlayerSlots()
+	Debug_Resources()
+	Debug_SquadCounts()
+	return true
+end
+
+-- ============================================================
+-- Automated Scenario Run-Through (full objective auto-clear)
+-- ============================================================
+-- Timer bypass: Long gameplay timers (PrepareDefences 360s, etc) are bypassed
+-- by immediately calling their completion functions, reducing runtime to ~30-60s.
+--
+-- KNOWN LIMITATIONS (by design):
+--   1. Does NOT remove enemy units — SGroup counts remain non-zero.
+--      Monitoring rules (e.g., Phase1_Checkpoint_count) that check SGroup_Count
+--      self-remove via their "Objective_IsComplete == true" guard.
+--   2. Does NOT clear UI objective markers — some map markers linger.
+--   3. Does NOT transfer bombards to players — Phase3_SiegeCapture's
+--      Squad_SetPlayerOwner loop runs inside the count-conditions rule, not
+--      OnComplete. Siege production unlocks still fire via OnComplete.
+--   4. Entity ownership transfers (outposts, kremlin) only happen in the
+--      count-conditions rules when SGroup_Count == 0. Force-completing
+--      bypasses these, leaving entities owned by player6.
+--
+-- SAFETY NETS:
+--   - Stage timeout: each stage aborts after AUTOCLEAR_MAX_STAGE_TICKS to
+--     prevent infinite polling if an objective's Init was never called.
+--   - PrepareDefences OneShot cancellation: the 360s scheduled call is
+--     removed before the bypass to prevent a duplicate fire.
+
+local AUTOCLEAR_WAIT_CHECKPOINT_REINFORCE = 20
+local AUTOCLEAR_WAIT_FINAL_VICTORY = 12
+local AUTOCLEAR_WAIT_TIMER_SETTLE = 3  -- Wait for bypassed timers to settle
+local AUTOCLEAR_MAX_STAGE_TICKS = 120  -- Safety: abort stage after 120s
+
+g_debug_autoclear_active = false
+g_debug_autoclear_stage = 0
+g_debug_autoclear_wait = 0
+g_debug_autoclear_stage_ticks = 0
+
+local function _AutoClear_Log(msg)
+	print("[AUTOCLEAR] " .. msg)
+end
+
+local function _AutoClear_ObjectiveName(obj)
+	if obj == OBJ_Phase1_Checkpoint_main then return "OBJ_Phase1_Checkpoint_main" end
+	if obj == OBJ_Phase1_Outposts_Main then return "OBJ_Phase1_Outposts_Main" end
+	if obj == OBJ_Phase1_VillageNorth_Main then return "OBJ_Phase1_VillageNorth_Main" end
+	if obj == OBJ_Phase1_VillageDefence_Main then return "OBJ_Phase1_VillageDefence_Main" end
+	if obj == OBJ_Phase1_VillageDefence_north then return "OBJ_Phase1_VillageDefence_north" end
+	if obj == OBJ_Phase1_VillageDefence_south then return "OBJ_Phase1_VillageDefence_south" end
+	if obj == OBJ_PrepareDefences then return "OBJ_PrepareDefences" end
+	if obj == OBJ_Phase2_VillageCapture_Main then return "OBJ_Phase2_VillageCapture_Main" end
+	if obj == OBJ_Phase3_SiegeCapture_Main then return "OBJ_Phase3_SiegeCapture_Main" end
+	if obj == OBJ_Phase3_CityAssault_Main then return "OBJ_Phase3_CityAssault_Main" end
+	if obj == OBJ_Phase3_FinalKeep_Main then return "OBJ_Phase3_FinalKeep_Main" end
+	return "<unknown objective>"
+end
+
+local function _AutoClear_DumpObjectiveState(obj)
+	if obj == nil then
+		_AutoClear_Log("Objective is nil (not initialized)")
+		return
+	end
+
+	_AutoClear_Log(_AutoClear_ObjectiveName(obj)
+		.. " | started=" .. tostring(Objective_IsStarted(obj))
+		.. " | complete=" .. tostring(Objective_IsComplete(obj))
+		.. " | failed=" .. tostring(Objective_IsFailed(obj)))
+end
+
+local function _AutoClear_ForceStart(obj, required)
+	if obj == nil then
+		_AutoClear_Log("Cannot start objective: nil")
+		return false
+	end
+	if Objective_IsStarted(obj) == false then
+		Objective_Start(obj, required, false)
+		_AutoClear_Log("Objective_Start(" .. _AutoClear_ObjectiveName(obj) .. ")")
+	end
+	return true
+end
+
+local function _AutoClear_ForceComplete(obj)
+	if obj == nil then
+		_AutoClear_Log("Cannot complete objective: nil")
+		return false
+	end
+	if Objective_IsComplete(obj) == false then
+		Objective_Complete(obj, true, true)
+		_AutoClear_Log("Objective_Complete(" .. _AutoClear_ObjectiveName(obj) .. ")")
+	else
+		_AutoClear_Log(_AutoClear_ObjectiveName(obj) .. " already complete")
+	end
+	return true
+end
+
+local function _AutoClear_Advance(stage, reason)
+	g_debug_autoclear_stage = stage
+	g_debug_autoclear_stage_ticks = 0
+	_AutoClear_Log("Advance -> stage " .. tostring(stage) .. " | " .. reason)
+end
+
+local function _AutoClear_SetWait(seconds, reason)
+	g_debug_autoclear_wait = seconds
+	_AutoClear_Log("Wait " .. tostring(seconds) .. "s | " .. reason)
+end
+
+function Debug_AutoClearScenarioStop()
+	if g_debug_autoclear_active == false then
+		_AutoClear_Log("Stop requested but runner is not active")
+		return false
+	end
+
+	g_debug_autoclear_active = false
+	if Rule_Exists(Debug_AutoClearScenarioTick) then
+		Rule_Remove(Debug_AutoClearScenarioTick)
+	end
+	_AutoClear_Log("Runner stopped")
+	return true
+end
+
+function Debug_AutoClearScenarioStatus()
+	_AutoClear_Log("active=" .. tostring(g_debug_autoclear_active)
+		.. " | stage=" .. tostring(g_debug_autoclear_stage)
+		.. " | wait=" .. tostring(g_debug_autoclear_wait)
+		.. " | stage_ticks=" .. tostring(g_debug_autoclear_stage_ticks)
+		.. " | game_over=" .. tostring(g_gameOver))
+
+	_AutoClear_DumpObjectiveState(OBJ_Phase1_Checkpoint_main)
+	_AutoClear_DumpObjectiveState(OBJ_Phase1_Outposts_Main)
+	_AutoClear_DumpObjectiveState(OBJ_Phase1_VillageNorth_Main)
+	_AutoClear_DumpObjectiveState(OBJ_Phase1_VillageDefence_Main)
+	_AutoClear_DumpObjectiveState(OBJ_Phase1_VillageDefence_north)
+	_AutoClear_DumpObjectiveState(OBJ_Phase1_VillageDefence_south)
+	_AutoClear_DumpObjectiveState(OBJ_PrepareDefences)
+	_AutoClear_DumpObjectiveState(OBJ_Phase2_VillageCapture_Main)
+	_AutoClear_DumpObjectiveState(OBJ_Phase3_SiegeCapture_Main)
+	_AutoClear_DumpObjectiveState(OBJ_Phase3_CityAssault_Main)
+	_AutoClear_DumpObjectiveState(OBJ_Phase3_FinalKeep_Main)
+end
+
+function Debug_AutoClearScenarioTick()
+	if g_debug_autoclear_active == false then
+		Rule_RemoveMe()
+		return
+	end
+
+	g_debug_autoclear_stage_ticks = g_debug_autoclear_stage_ticks + 1
+
+	-- Safety net: abort if a stage is stuck for too long
+	if g_debug_autoclear_stage_ticks > AUTOCLEAR_MAX_STAGE_TICKS then
+		_AutoClear_Log("TIMEOUT: stage " .. tostring(g_debug_autoclear_stage) .. " exceeded " .. tostring(AUTOCLEAR_MAX_STAGE_TICKS) .. "s — aborting")
+		Debug_AutoClearScenarioStatus()
+		Debug_AutoClearScenarioStop()
+		return
+	end
+
+	if g_debug_autoclear_wait > 0 then
+		g_debug_autoclear_wait = g_debug_autoclear_wait - 1
+		if g_debug_autoclear_wait % 10 == 0 or g_debug_autoclear_wait <= 3 then
+			_AutoClear_Log("wait remaining=" .. tostring(g_debug_autoclear_wait) .. "s")
+		end
+		return
+	end
+
+	if g_debug_autoclear_stage == 1 then
+		_AutoClear_Log("Stage 1: baseline validation and state snapshot")
+		Debug_QuickRefactorSmoke()
+		Debug_PlayerSlots()
+		Debug_Resources()
+		Debug_SquadCounts()
+		Debug_AutoClearScenarioStatus()
+		_AutoClear_Advance(2, "start objective chain")
+		return
+	end
+
+	if g_debug_autoclear_stage == 2 then
+		_AutoClear_Log("Stage 2: Phase1 checkpoint objective")
+		_AutoClear_ForceStart(OBJ_Phase1_Checkpoint_main, true)
+		_AutoClear_ForceComplete(OBJ_Phase1_Checkpoint_main)
+		_AutoClear_DumpObjectiveState(OBJ_Phase1_Checkpoint_main)
+		_AutoClear_SetWait(AUTOCLEAR_WAIT_CHECKPOINT_REINFORCE, "allow delayed checkpoint reinforcements (6/12/18s)")
+		_AutoClear_Advance(3, "checkpoint resolved")
+		return
+	end
+
+	if g_debug_autoclear_stage == 3 then
+		_AutoClear_Log("Stage 3: Phase1 outposts objective")
+		_AutoClear_ForceStart(OBJ_Phase1_Outposts_Main, true)
+		_AutoClear_ForceComplete(OBJ_Phase1_Outposts_Main)
+		_AutoClear_DumpObjectiveState(OBJ_Phase1_Outposts_Main)
+		_AutoClear_SetWait(2, "allow outpost completion callbacks")
+		_AutoClear_Advance(4, "outposts resolved")
+		return
+	end
+
+	if g_debug_autoclear_stage == 4 then
+		_AutoClear_Log("Stage 4: Phase1 village north objective")
+		_AutoClear_ForceStart(OBJ_Phase1_VillageNorth_Main, true)
+		_AutoClear_ForceComplete(OBJ_Phase1_VillageNorth_Main)
+		_AutoClear_DumpObjectiveState(OBJ_Phase1_VillageNorth_Main)
+		_AutoClear_SetWait(3, "allow village north OnComplete to start Defend Village")
+		_AutoClear_Advance(5, "village north resolved")
+		return
+	end
+
+	if g_debug_autoclear_stage == 5 then
+		_AutoClear_Log("Stage 5: bypass PrepareDefences timer (normally 360s)")
+		if Objective_IsStarted(OBJ_PrepareDefences) == false then
+			_AutoClear_Log("PrepareDefences not started yet; waiting for VillageDefence flow")
+			_AutoClear_SetWait(1, "retry objective start check")
+			return
+		end
+
+		if Objective_IsComplete(OBJ_PrepareDefences) == false then
+			-- Cancel the scheduled 360s OneShot BEFORE calling End directly.
+			-- Without this, PrepareDefences_End fires again 360s later, re-starting
+			-- OBJ_Phase2_VillageCapture_Main on an already-completed objective.
+			if Rule_Exists(PrepareDefences_End) then
+				Rule_Remove(PrepareDefences_End)
+				_AutoClear_Log("Cancelled scheduled PrepareDefences_End OneShot (360s)")
+			end
+			_AutoClear_Log("PrepareDefences started; immediately triggering PrepareDefences_End()")
+			PrepareDefences_End()
+			_AutoClear_SetWait(AUTOCLEAR_WAIT_TIMER_SETTLE, "allow objective state to settle")
+			_AutoClear_Advance(6, "timer bypassed, phase 2 should activate")
+			return
+		end
+
+		_AutoClear_Log("PrepareDefences already complete")
+		_AutoClear_Advance(6, "phase 2 capture objective should now be active")
+		return
+	end
+
+	if g_debug_autoclear_stage == 6 then
+		_AutoClear_Log("Stage 6: Phase2 village capture objective")
+		_AutoClear_ForceStart(OBJ_Phase2_VillageCapture_Main, true)
+		_AutoClear_ForceComplete(OBJ_Phase2_VillageCapture_Main)
+		_AutoClear_DumpObjectiveState(OBJ_Phase2_VillageCapture_Main)
+		_AutoClear_SetWait(3, "allow Phase2 OnComplete to start Phase3 objectives")
+		_AutoClear_Advance(7, "village capture resolved")
+		return
+	end
+
+	if g_debug_autoclear_stage == 7 then
+		_AutoClear_Log("Stage 7: Phase3 siege capture objective")
+		_AutoClear_ForceStart(OBJ_Phase3_SiegeCapture_Main, true)
+		_AutoClear_ForceComplete(OBJ_Phase3_SiegeCapture_Main)
+		_AutoClear_DumpObjectiveState(OBJ_Phase3_SiegeCapture_Main)
+		_AutoClear_SetWait(1, "allow siege completion callbacks")
+		_AutoClear_Advance(8, "siege capture resolved")
+		return
+	end
+
+	if g_debug_autoclear_stage == 8 then
+		_AutoClear_Log("Stage 8: Phase3 city assault objective")
+		_AutoClear_ForceStart(OBJ_Phase3_CityAssault_Main, true)
+		_AutoClear_ForceComplete(OBJ_Phase3_CityAssault_Main)
+		_AutoClear_DumpObjectiveState(OBJ_Phase3_CityAssault_Main)
+		_AutoClear_SetWait(1, "allow city assault completion callbacks")
+		_AutoClear_Advance(9, "city assault resolved")
+		return
+	end
+
+	if g_debug_autoclear_stage == 9 then
+		_AutoClear_Log("Stage 9: Phase3 final keep objective")
+		_AutoClear_ForceStart(OBJ_Phase3_FinalKeep_Main, true)
+		_AutoClear_ForceComplete(OBJ_Phase3_FinalKeep_Main)
+		_AutoClear_DumpObjectiveState(OBJ_Phase3_FinalKeep_Main)
+		_AutoClear_SetWait(AUTOCLEAR_WAIT_FINAL_VICTORY, "allow delayed Victory_Function (10s)")
+		_AutoClear_Advance(10, "final keep resolved")
+		return
+	end
+
+	if g_debug_autoclear_stage == 10 then
+		_AutoClear_Log("Stage 10: awaiting mission end state")
+		if g_gameOver then
+			_AutoClear_Log("Mission end state reached (g_gameOver=true)")
+			Debug_AutoClearScenarioStatus()
+			g_debug_autoclear_active = false
+			Rule_RemoveMe()
+			_AutoClear_Log("Auto-clear run complete")
+			return
+		end
+		_AutoClear_SetWait(1, "poll mission end state")
+		return
+	end
+
+	_AutoClear_Log("Unknown stage " .. tostring(g_debug_autoclear_stage) .. "; stopping")
+	Debug_AutoClearScenarioStop()
+end
+
+-- ============================================================
+-- DLC Blueprint Validation (comprehensive scan)
+-- ============================================================
+-- Scans AGS_ENTITY_TABLE, CBA_SIEGE_TABLE, DLC_CIV_OVERRIDES,
+-- and composition maps for every registered civ.
+-- Reports missing/unresolvable blueprints and composition gaps.
+-- Usage (console): Debug_ValidateAllBlueprints()
+--   Optional: Debug_ValidateAllBlueprints(true) for verbose output (all OK entries too)
+
+function Debug_ValidateAllBlueprints(verbose)
+	local total_checked = 0
+	local total_missing = 0
+	local total_civs = 0
+	local results = {} -- { civ = { {key, attrib, status, table_name} } }
+	
+	-- Helper: test a single blueprint via pcall
+	local function _TestBP(civ, key, attrib, bp_func, table_name)
+		total_checked = total_checked + 1
+		if attrib == nil or attrib == false then
+			if verbose then
+				table.insert(results[civ], {key = key, attrib = tostring(attrib), status = "SKIP", table_name = table_name})
+			end
+			return true
+		end
+		local ok, bp = pcall(bp_func, attrib)
+		if ok and bp ~= nil then
+			if verbose then
+				table.insert(results[civ], {key = key, attrib = attrib, status = "OK", table_name = table_name})
+			end
+			return true
+		else
+			total_missing = total_missing + 1
+			table.insert(results[civ], {key = key, attrib = attrib, status = "MISSING", table_name = table_name})
+			return false
+		end
+	end
+	
+	-- Determine correct BP function by key name heuristic
+	local function _GuessBPFunc(key, attrib)
+		if type(attrib) ~= "string" then return nil end
+		if string.find(attrib, "^building_") or string.find(attrib, "^unit_ram_tower") then
+			return BP_GetEntityBlueprint
+		else
+			return BP_GetSquadBlueprint
+		end
+	end
+	
+	print("[BP-VALIDATE] ======== Blueprint Validation Start ========")
+	
+	-- 1. Scan AGS_ENTITY_TABLE (entity blueprints)
+	for civ, entries in pairs(AGS_ENTITY_TABLE) do
+		total_civs = total_civs + 1
+		results[civ] = results[civ] or {}
+		for key, attrib in pairs(entries) do
+			if type(attrib) == "string" then
+				_TestBP(civ, key, attrib, BP_GetEntityBlueprint, "AGS_ENTITY_TABLE")
+			end
+		end
+	end
+	
+	-- 2. Scan CBA_SIEGE_TABLE (squad blueprints, with entity exceptions)
+	for civ, entries in pairs(CBA_SIEGE_TABLE) do
+		results[civ] = results[civ] or {}
+		for key, attrib in pairs(entries) do
+			if type(attrib) == "string" then
+				local bp_func = _GuessBPFunc(key, attrib)
+				if bp_func then
+					_TestBP(civ, key, attrib, bp_func, "CBA_SIEGE_TABLE")
+				end
+			end
+		end
+	end
+	
+	-- 3. Scan DLC_CIV_OVERRIDES (mixed entity/squad)
+	for civ, overrides in pairs(DLC_CIV_OVERRIDES) do
+		results[civ] = results[civ] or {}
+		for key, attrib in pairs(overrides) do
+			if type(attrib) == "string" then
+				local bp_func = _GuessBPFunc(key, attrib)
+				if bp_func then
+					_TestBP(civ, key, attrib, bp_func, "DLC_CIV_OVERRIDES")
+				end
+			end
+		end
+	end
+	
+	-- 4. Validate DLC parent resolution chain
+	for civ, parent in pairs(DLC_CIV_PARENT_MAP) do
+		results[civ] = results[civ] or {}
+		local resolved = ResolveCivKey(civ)
+		if resolved == nil then
+			total_missing = total_missing + 1
+			table.insert(results[civ], {key = "_parent_chain", attrib = parent, status = "UNRESOLVABLE", table_name = "DLC_CIV_PARENT_MAP"})
+		elseif AGS_ENTITY_TABLE[resolved] == nil then
+			total_missing = total_missing + 1
+			table.insert(results[civ], {key = "_parent_resolved", attrib = resolved, status = "NO_AGS_ENTRY", table_name = "DLC_CIV_PARENT_MAP"})
+		elseif verbose then
+			table.insert(results[civ], {key = "_parent_chain", attrib = civ .. " -> " .. resolved, status = "OK", table_name = "DLC_CIV_PARENT_MAP"})
+		end
+	end
+	
+	-- 5. Validate composition maps resolve for all civs (base + DLC)
+	local comp_maps = {
+		{name = "CIV_MELEE_MAP", map = CIV_MELEE_MAP},
+		{name = "CIV_RANGED_MAP", map = CIV_RANGED_MAP},
+		{name = "REINFORCE_MELEE_MAP", map = REINFORCE_MELEE_MAP},
+		{name = "REINFORCE_RANGED_MAP", map = REINFORCE_RANGED_MAP},
+	}
+	local all_civs = {}
+	for civ in pairs(AGS_ENTITY_TABLE) do all_civs[civ] = true end
+	for civ in pairs(DLC_CIV_PARENT_MAP) do all_civs[civ] = true end
+	for civ in pairs(all_civs) do
+		results[civ] = results[civ] or {}
+		for _, cm in ipairs(comp_maps) do
+			local resolved_key = ResolveCivMapKey(cm.map, civ, nil)
+			if resolved_key ~= nil then
+				if Unit_Types[resolved_key] == nil then
+					total_missing = total_missing + 1
+					table.insert(results[civ], {key = cm.name, attrib = resolved_key, status = "MISSING_UNIT_TYPE", table_name = "CompositionMap"})
+				elseif verbose then
+					table.insert(results[civ], {key = cm.name, attrib = resolved_key, status = "OK", table_name = "CompositionMap"})
+				end
+			elseif verbose then
+				table.insert(results[civ], {key = cm.name, attrib = "(default)", status = "DEFAULT", table_name = "CompositionMap"})
+			end
+		end
+	end
+	
+	-- Print results
+	local sorted_civs = {}
+	for civ in pairs(results) do table.insert(sorted_civs, civ) end
+	table.sort(sorted_civs)
+	
+	for _, civ in ipairs(sorted_civs) do
+		local entries = results[civ]
+		if #entries > 0 then
+			local has_issues = false
+			for _, e in ipairs(entries) do
+				if e.status ~= "OK" and e.status ~= "SKIP" and e.status ~= "DEFAULT" then
+					has_issues = true
+					break
+				end
+			end
+			
+			if has_issues or verbose then
+				local dlc_tag = DLC_CIV_PARENT_MAP[civ] and " [DLC->" .. DLC_CIV_PARENT_MAP[civ] .. "]" or ""
+				print("[BP-VALIDATE] --- " .. civ .. dlc_tag .. " ---")
+				for _, e in ipairs(entries) do
+					local flag = ""
+					if e.status == "MISSING" or e.status == "UNRESOLVABLE" or e.status == "NO_AGS_ENTRY" or e.status == "MISSING_UNIT_TYPE" then
+						flag = " <<<"
+					end
+					print(string.format("[BP-VALIDATE]   [%s] %s.%s = %s%s", e.status, e.table_name, e.key, e.attrib, flag))
+				end
+			end
+		end
+	end
+	
+	-- Summary
+	local result = total_missing == 0 and "PASS" or "FAIL"
+	print(string.format("[BP-VALIDATE] ======== Result: %s | %d checked, %d missing, %d civs ========", result, total_checked, total_missing, total_civs))
+	return total_missing == 0
+end
+
+-- Quick variant: only show failures
+-- Usage (console): Debug_ValidateBlueprintsFail()
+function Debug_ValidateBlueprintsFail()
+	return Debug_ValidateAllBlueprints(false)
+end
+
+-- Verbose variant: show all entries including OK
+-- Usage (console): Debug_ValidateBlueprintsVerbose()
+function Debug_ValidateBlueprintsVerbose()
+	return Debug_ValidateAllBlueprints(true)
+end
+
+-- One-command scenario auto-clear runner.
+-- Usage (console): Debug_AutoClearScenario()
+function Debug_AutoClearScenario()
+	if g_debug_autoclear_active then
+		_AutoClear_Log("Runner already active; use Debug_AutoClearScenarioStatus() or Debug_AutoClearScenarioStop()")
+		return false
+	end
+
+	g_debug_autoclear_active = true
+	g_debug_autoclear_stage = 1
+	g_debug_autoclear_wait = 0
+	g_debug_autoclear_stage_ticks = 0
+
+	if Rule_Exists(Debug_AutoClearScenarioTick) then
+		Rule_Remove(Debug_AutoClearScenarioTick)
+	end
+	Rule_AddInterval(Debug_AutoClearScenarioTick, 1)
+
+	_AutoClear_Log("Started full scenario auto-clear runner")
+	_AutoClear_Log("Console helpers: Debug_AutoClearScenarioStatus(), Debug_AutoClearScenarioStop()")
+	return true
+end
+
+-- ============================================================
+-- Engine Blueprint Probe (Registry Verification)
+-- ============================================================
+-- Probes the RUNNING ENGINE directly to verify attribNames from
+-- the workspace blueprint-registry.json resolve to real objects.
+-- Does NOT read any scenario table — queries engine APIs only.
+-- Call from Content Editor console:
+--   Debug_ProbeRegistryBlueprints()
+-- ============================================================
+
+function Debug_ProbeRegistryBlueprints()
+	-- Curated sample: 3 categories x all 22 civs + tricky DLC cases
+	-- Each entry: {attribName, category}
+	-- category: "unit"=SBP, "building"=EBP, "technology"=UPG
+	local probes = {
+		-- === TC capitals (all 22 civs — the most critical check) ===
+		{"building_town_center_capital_abb", "building"},      -- Abbasid
+		{"building_town_center_capital_abb_ha_01", "building"}, -- Ayyubids
+		{"building_town_center_capital_byz", "building"},      -- Byzantine
+		{"building_town_center_capital_chi", "building"},      -- Chinese
+		{"building_town_center_capital_chi_ha_01", "building"}, -- Zhu Xi
+		{"building_town_center_capital_eng", "building"},      -- English
+		{"building_town_center_capital_fre", "building"},      -- French
+		{"building_town_center_capital_fre_ha_01", "building"}, -- Jeanne
+		{"building_town_center_capital_hre", "building"},      -- HRE
+		{"building_town_center_capital_hre_ha_01", "building"}, -- Dragon
+		{"building_town_center_capital_jpn", "building"},      -- Japanese
+		{"building_town_center_capital_jpn_ha_sen", "building"}, -- Sengoku
+		{"building_town_center_capital_lan", "building"},      -- Lancaster
+		{"building_town_center_capital_mal", "building"},      -- Malians
+		{"building_town_center_capital_mon", "building"},      -- Mongols
+		{"building_town_center_capital_mon_ha_gol", "building"}, -- Golden Horde
+		{"building_town_center_capital_ott", "building"},      -- Ottomans
+		{"building_town_center_capital_rus", "building"},      -- Rus
+		{"building_town_center_capital_sul", "building"},      -- Delhi
+		{"building_town_center_capital_sul_ha_tug", "building"}, -- Tughlaq
+		{"building_town_center_capital_tem", "building"},      -- Templar
+		{"building_town_center_capital_byz_ha_mac", "building"}, -- Macedonian
+		-- === Units: DLC-specific monks (known tricky) ===
+		{"unit_monk_3_abb", "unit"},                    -- Abbasid
+		{"unit_monk_3_cambulance_abb_ha_01", "unit"},   -- Ayyubids ambulance
+		{"unit_monk_2_byz", "unit"},                    -- Byzantine (age 2)
+		{"unit_monk_3_lan", "unit"},                    -- Lancaster unique
+		{"unit_monk_buddhist_3_jpn", "unit"},           -- Japanese buddhist
+		{"unit_monk_3_chi_ha_01", "unit"},              -- Zhu Xi
+		{"unit_monk_1_hre_ha_01", "unit"},              -- Dragon (age 1)
+		-- === Units: core military across base civs ===
+		{"unit_archer_2_eng", "unit"},    -- English Longbow
+		{"unit_spearman_1_abb", "unit"},  -- Abbasid spear
+		{"unit_villager_1_chi", "unit"},  -- Chinese villager
+		{"unit_knight_3_fre", "unit"},    -- French knight
+		{"unit_horseman_2_mon", "unit"},  -- Mongol horseman
+		{"unit_handcannon_4_rus", "unit"},  -- Rus streltsy
+		{"unit_monk_2_sul", "unit"},        -- Delhi scholar
+		{"unit_landsknecht_3_hre", "unit"}, -- HRE landsknecht
+		{"unit_handcannon_3_ott", "unit"}, -- Ottoman janissary
+		{"unit_gbeto_2_mal", "unit"},      -- Malian musofadi
+		-- === Units: DLC military ===
+		{"unit_archer_2_tem", "unit"},           -- Templar
+		{"unit_archer_2_byz_ha_mac", "unit"},    -- Macedonian
+		{"unit_archer_2_mon_ha_gol", "unit"},    -- Golden Horde
+		{"unit_archer_2_jpn_ha_sen", "unit"},    -- Sengoku
+		{"unit_archer_2_sul_ha_tug", "unit"},    -- Tughlaq
+		{"unit_archer_2_hre_ha_01", "unit"},     -- Dragon
+		{"unit_archer_2_abb_ha_01", "unit"},     -- Ayyubids
+		-- === Technologies (upgrades) ===
+		{"upgrade_siege_adjustable_crossbar", "technology"}, -- universal upgrade
+		{"upgrade_unit_town_center_wheelbarrow_1", "technology"}, -- common
+		{"upgrade_econ_villager_hunting_gear_1", "technology"},   -- common
+		{"upgrade_ranged_archer_silkstring", "technology"},       -- generic ranged tech
+		-- === Negative controls (should FAIL — verifies the test catches bad names) ===
+		{"unit_fake_invented_name_xyz", "unit"},
+		{"building_fake_nonexistent_abc", "building"},
+	}
+
+	local bp_funcs = {
+		unit = BP_GetSquadBlueprint,
+		building = BP_GetEntityBlueprint,
+		technology = BP_GetUpgradeBlueprint,
+	}
+
+	local passed = 0
+	local failed = 0
+	local errors = {}
+
+	print("[BP-PROBE] ======== Engine Blueprint Probe Start ========")
+	print("[BP-PROBE] Testing " .. #probes .. " attribNames against live engine")
+	print("")
+
+	for _, probe in ipairs(probes) do
+		local attrib = probe[1]
+		local category = probe[2]
+		local bp_func = bp_funcs[category]
+
+		if bp_func == nil then
+			print("[BP-PROBE] SKIP  " .. attrib .. " (unknown category: " .. category .. ")")
+		else
+			local ok, result = pcall(bp_func, attrib)
+			if ok and result ~= nil then
+				passed = passed + 1
+				print("[BP-PROBE] OK    " .. attrib)
+			else
+				failed = failed + 1
+				local err_msg = ok and "returned nil" or tostring(result)
+				table.insert(errors, {attrib = attrib, category = category, err = err_msg})
+				print("[BP-PROBE] FAIL  " .. attrib .. " | " .. err_msg)
+			end
+		end
+	end
+
+	print("")
+	print("[BP-PROBE] ======== Summary ========")
+	print("[BP-PROBE] Passed: " .. passed .. " | Failed: " .. failed .. " | Total: " .. #probes)
+
+	if #errors > 0 then
+		print("[BP-PROBE] --- Failures ---")
+		for _, e in ipairs(errors) do
+			print("[BP-PROBE]   " .. e.category .. " | " .. e.attrib .. " | " .. e.err)
+		end
+	end
+
+	-- Expected: 2 negative controls should fail
+	local expected_fails = 2
+	local real_fails = failed - expected_fails
+	if real_fails > 0 then
+		print("[BP-PROBE] !! " .. real_fails .. " UNEXPECTED failures (registry may be wrong)")
+	elseif real_fails == 0 and failed == expected_fails then
+		print("[BP-PROBE] All real blueprints resolved. Negative controls failed as expected.")
+		print("[BP-PROBE] RESULT: REGISTRY VERIFIED")
+	else
+		print("[BP-PROBE] WARNING: Negative controls did not fail as expected — check engine behavior")
+	end
+
+	print("[BP-PROBE] ======== Engine Blueprint Probe End ========")
+end
+

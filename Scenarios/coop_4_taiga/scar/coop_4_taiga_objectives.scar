@@ -1,0 +1,3779 @@
+-------------------------------------------
+-- Objective: Capture Checkpoint 
+-------------------------------------------
+
+local GARRISON_FILL_OUTPOST = 8
+local GARRISON_FILL_KREMLIN = 8
+local PHASE1_VILLAGE_NORTH_FALLBACK_ACTIVE = false
+local PHASE1_VILLAGE_NORTH_RESPAWN_THRESHOLD = 0.3
+local PHASE1_VILLAGE_NORTH_RESPAWN_ACTIVE = false
+
+local north_attacker_initial_count_1 = 0
+local north_attacker_initial_count_2 = 0
+local north_attacker_initial_count_3 = 0
+local north_attacker_initial_count_4 = 0
+
+local north_attacker_respawn_pending_1 = false
+local north_attacker_respawn_pending_2 = false
+local north_attacker_respawn_pending_3 = false
+local north_attacker_respawn_pending_4 = false
+
+local north_attacker_respawn_timer_1 = 0
+local north_attacker_respawn_timer_2 = 0
+local north_attacker_respawn_timer_3 = 0
+local north_attacker_respawn_timer_4 = 0
+
+local PHASE1_PATROL_MODE_OUTPOST = 1
+local PHASE1_PATROL_MODE_FLANK = 2
+local PHASE1_PATROL_ASSIST_DURATION = 30
+local PHASE1_PATROL_ASSIST_COOLDOWN = 20
+local PHASE1_PATROL_OUTPOST_LEASH = 95
+local PHASE1_PATROL_FLANK_LEASH = 180
+local PHASE1_PATROL_PLAYER_SUPPORT_RANGE = 80
+local PHASE1_PATROL_FORCE_RATIO = 1.5
+local PHASE2_OUTPOST_GUARD_LEASH = 75
+
+local phase1_patrol_mode = PHASE1_PATROL_MODE_OUTPOST
+local phase1_patrol_side1_captures = 0
+local phase1_patrol_side2_captures = 0
+local phase1_patrol_side1_started = false
+local phase1_patrol_side2_started = false
+local phase1_patrol_side1_primary_outpost = 1
+local phase1_patrol_side2_primary_outpost = 3
+local phase1_patrol_side1_spawn_outpost = 1
+local phase1_patrol_side2_spawn_outpost = 3
+local phase1_patrol_side1_anchor_outpost = 1
+local phase1_patrol_side2_anchor_outpost = 3
+local phase1_patrol_side1_respawn_due = 0
+local phase1_patrol_side2_respawn_due = 0
+local phase1_patrol_tower_counted_1 = false
+local phase1_patrol_tower_counted_2 = false
+local phase1_patrol_tower_counted_3 = false
+local phase1_patrol_tower_counted_4 = false
+local phase1_patrol_side1_assisting = false
+local phase1_patrol_side2_assisting = false
+local phase1_patrol_side1_assist_until = 0
+local phase1_patrol_side2_assist_until = 0
+local phase1_patrol_side1_last_redirect = 0
+local phase1_patrol_side2_last_redirect = 0
+local phase1_patrol_monitor_active = false
+local phase2_outpost_guard_monitor_active = false
+local phase2_outpost_guard_started = { false, false, false, false }
+local phase2_outpost_guard_respawn_due = { 0, 0, 0, 0 }
+
+local function GarrisonCapturedEntity(entity, amount)
+	if entity == nil then
+		return
+	end
+
+	local eg_target = EGroup_CreateIfNotFound("eg_objective_garrison_target")
+	EGroup_Clear(eg_target)
+	EGroup_Add(eg_target, entity)
+	Garrison_Building(None, { egroup = eg_target, amount = amount, player = player5 })
+end
+
+local function Phase1_VillageNorth_AttackerRespawn_GetThresholdCount(initial_count)
+	if initial_count <= 0 then
+		return 0
+	end
+
+	return math.max(1, math.ceil(initial_count * PHASE1_VILLAGE_NORTH_RESPAWN_THRESHOLD))
+end
+
+local function Phase1_VillageNorth_AttackerRespawn_UpdateInitialCounts()
+	if raid_started_1 == true and north_attacker_initial_count_1 == 0 and SGroup_Count(sg_village_north_attacker_1) > 0 then
+		north_attacker_initial_count_1 = SGroup_Count(sg_village_north_attacker_1)
+	end
+
+	if raid_started_2 == true and north_attacker_initial_count_2 == 0 and SGroup_Count(sg_village_north_attacker_2) > 0 then
+		north_attacker_initial_count_2 = SGroup_Count(sg_village_north_attacker_2)
+	end
+
+	if raid_started_3 == true and north_attacker_initial_count_3 == 0 and SGroup_Count(sg_village_north_attacker_3) > 0 then
+		north_attacker_initial_count_3 = SGroup_Count(sg_village_north_attacker_3)
+	end
+
+	if raid_started_4 == true and north_attacker_initial_count_4 == 0 and SGroup_Count(sg_village_north_attacker_4) > 0 then
+		north_attacker_initial_count_4 = SGroup_Count(sg_village_north_attacker_4)
+	end
+end
+
+-- Canonical hold markers per group:
+-- group 1 → mkr_spawn_village_1, group 2 → mkr_village_rally_2
+-- group 3 → mkr_village_rally_1, group 4 → mkr_spawn_village_4
+local _respawn_hold_markers = {}
+_respawn_hold_markers[1] = "mkr_spawn_village_1"
+_respawn_hold_markers[2] = "mkr_village_rally_2"
+_respawn_hold_markers[3] = "mkr_village_rally_1"
+_respawn_hold_markers[4] = "mkr_spawn_village_4"
+
+local function Phase1_VillageNorth_AttackerRespawn_IssueOrders(sgroup, group_index)
+	local hold = Marker_FromName(_respawn_hold_markers[group_index], "")
+
+	if Objective_IsStarted(OBJ_Phase1_VillageDefence_Main) == true and Objective_IsFailed(OBJ_Phase1_VillageDefence_Main) == false then
+		Cmd_FormationAttackMove(sgroup, hold, false)
+		return
+	end
+
+	if group_index <= 2 then
+		Cmd_FormationAttackMove(sgroup, mkr_spawn_village_1, false)
+		Cmd_FormationAttackMove(sgroup, mkr_spawn_village_2, true)
+		Cmd_FormationAttackMove(sgroup, mkr_spawn_village_3, true)
+		Cmd_FormationAttackMove(sgroup, mkr_spawn_village_4, true)
+		Cmd_FormationAttackMove(sgroup, hold, true)
+	else
+		Cmd_FormationAttackMove(sgroup, mkr_spawn_village_4, false)
+		Cmd_FormationAttackMove(sgroup, mkr_spawn_village_3, true)
+		Cmd_FormationAttackMove(sgroup, mkr_spawn_village_2, true)
+		Cmd_FormationAttackMove(sgroup, mkr_spawn_village_1, true)
+		Cmd_FormationAttackMove(sgroup, hold, true)
+	end
+end
+
+function Phase1_VillageNorth_AttackerRespawn_Register()
+	if PHASE1_VILLAGE_NORTH_RESPAWN_ACTIVE == false then
+		PHASE1_VILLAGE_NORTH_RESPAWN_ACTIVE = true
+		north_attacker_respawn_pending_1 = false
+		north_attacker_respawn_pending_2 = false
+		north_attacker_respawn_pending_3 = false
+		north_attacker_respawn_pending_4 = false
+		north_attacker_respawn_timer_1 = 0
+		north_attacker_respawn_timer_2 = 0
+		north_attacker_respawn_timer_3 = 0
+		north_attacker_respawn_timer_4 = 0
+	end
+
+	if Rule_Exists(Phase1_VillageNorth_AttackerRespawn_Monitor) == false then
+		Rule_AddInterval(Phase1_VillageNorth_AttackerRespawn_Monitor, 1)
+	end
+end
+
+function Phase1_VillageNorth_AttackerRespawn_Monitor()
+	local respawn_delay = DC.north_attacker_respawn_timer or 180
+
+	if PHASE1_VILLAGE_NORTH_RESPAWN_ACTIVE == false then
+		Rule_RemoveMe()
+		return
+	end
+
+	if Objective_IsFailed(OBJ_Phase1_VillageDefence_Main) == true then
+		PHASE1_VILLAGE_NORTH_RESPAWN_ACTIVE = false
+		Rule_RemoveMe()
+		return
+	end
+
+	Phase1_VillageNorth_AttackerRespawn_UpdateInitialCounts()
+
+	if north_attacker_initial_count_1 > 0 and north_attacker_respawn_pending_1 == false and SGroup_Count(sg_village_north_attacker_1) <= Phase1_VillageNorth_AttackerRespawn_GetThresholdCount(north_attacker_initial_count_1) then
+		north_attacker_respawn_pending_1 = true
+		north_attacker_respawn_timer_1 = respawn_delay
+	end
+	if north_attacker_initial_count_2 > 0 and north_attacker_respawn_pending_2 == false and SGroup_Count(sg_village_north_attacker_2) <= Phase1_VillageNorth_AttackerRespawn_GetThresholdCount(north_attacker_initial_count_2) then
+		north_attacker_respawn_pending_2 = true
+		north_attacker_respawn_timer_2 = respawn_delay
+	end
+	if north_attacker_initial_count_3 > 0 and north_attacker_respawn_pending_3 == false and SGroup_Count(sg_village_north_attacker_3) <= Phase1_VillageNorth_AttackerRespawn_GetThresholdCount(north_attacker_initial_count_3) then
+		north_attacker_respawn_pending_3 = true
+		north_attacker_respawn_timer_3 = respawn_delay
+	end
+	if north_attacker_initial_count_4 > 0 and north_attacker_respawn_pending_4 == false and SGroup_Count(sg_village_north_attacker_4) <= Phase1_VillageNorth_AttackerRespawn_GetThresholdCount(north_attacker_initial_count_4) then
+		north_attacker_respawn_pending_4 = true
+		north_attacker_respawn_timer_4 = respawn_delay
+	end
+
+	if north_attacker_respawn_pending_1 == true then
+		north_attacker_respawn_timer_1 = north_attacker_respawn_timer_1 - 1
+		if north_attacker_respawn_timer_1 <= 0 then
+			Phase1_VillageNorth_AttackerRespawn_Callback_1()
+		end
+	end
+	if north_attacker_respawn_pending_2 == true then
+		north_attacker_respawn_timer_2 = north_attacker_respawn_timer_2 - 1
+		if north_attacker_respawn_timer_2 <= 0 then
+			Phase1_VillageNorth_AttackerRespawn_Callback_2()
+		end
+	end
+	if north_attacker_respawn_pending_3 == true then
+		north_attacker_respawn_timer_3 = north_attacker_respawn_timer_3 - 1
+		if north_attacker_respawn_timer_3 <= 0 then
+			Phase1_VillageNorth_AttackerRespawn_Callback_3()
+		end
+	end
+	if north_attacker_respawn_pending_4 == true then
+		north_attacker_respawn_timer_4 = north_attacker_respawn_timer_4 - 1
+		if north_attacker_respawn_timer_4 <= 0 then
+			Phase1_VillageNorth_AttackerRespawn_Callback_4()
+		end
+	end
+end
+
+function Phase1_VillageNorth_AttackerRespawn_Callback_1()
+	north_attacker_respawn_pending_1 = false
+	north_attacker_respawn_timer_1 = 0
+
+	if PHASE1_VILLAGE_NORTH_RESPAWN_ACTIVE == false or Objective_IsFailed(OBJ_Phase1_VillageDefence_Main) == true then
+		return
+	end
+
+	if north_attacker_initial_count_1 <= 0 then
+		return
+	end
+
+	if SGroup_Count(sg_village_north_attacker_1) > Phase1_VillageNorth_AttackerRespawn_GetThresholdCount(north_attacker_initial_count_1) then
+		return
+	end
+
+	-- Hard cap: never exceed initial composition size
+	if SGroup_Count(sg_village_north_attacker_1) >= north_attacker_initial_count_1 then
+		return
+	end
+
+	UnitEntry_DeploySquads(player5, sg_village_north_attacker_1, Unit_Types.wave_city_10m, mkr_spawn_1)
+	Phase1_VillageNorth_AttackerRespawn_IssueOrders(sg_village_north_attacker_1, 1)
+end
+
+function Phase1_VillageNorth_AttackerRespawn_Callback_2()
+	north_attacker_respawn_pending_2 = false
+	north_attacker_respawn_timer_2 = 0
+
+	if PHASE1_VILLAGE_NORTH_RESPAWN_ACTIVE == false or Objective_IsFailed(OBJ_Phase1_VillageDefence_Main) == true then
+		return
+	end
+
+	if north_attacker_initial_count_2 <= 0 then
+		return
+	end
+
+	if SGroup_Count(sg_village_north_attacker_2) > Phase1_VillageNorth_AttackerRespawn_GetThresholdCount(north_attacker_initial_count_2) then
+		return
+	end
+
+	-- Hard cap: never exceed initial composition size
+	if SGroup_Count(sg_village_north_attacker_2) >= north_attacker_initial_count_2 then
+		return
+	end
+
+	UnitEntry_DeploySquads(player5, sg_village_north_attacker_2, Unit_Types.wave_city_10m, mkr_spawn_2)
+	Phase1_VillageNorth_AttackerRespawn_IssueOrders(sg_village_north_attacker_2, 2)
+end
+
+function Phase1_VillageNorth_AttackerRespawn_Callback_3()
+	north_attacker_respawn_pending_3 = false
+	north_attacker_respawn_timer_3 = 0
+
+	if PHASE1_VILLAGE_NORTH_RESPAWN_ACTIVE == false or Objective_IsFailed(OBJ_Phase1_VillageDefence_Main) == true then
+		return
+	end
+
+	if north_attacker_initial_count_3 <= 0 then
+		return
+	end
+
+	if SGroup_Count(sg_village_north_attacker_3) > Phase1_VillageNorth_AttackerRespawn_GetThresholdCount(north_attacker_initial_count_3) then
+		return
+	end
+
+	-- Hard cap: never exceed initial composition size
+	if SGroup_Count(sg_village_north_attacker_3) >= north_attacker_initial_count_3 then
+		return
+	end
+
+	UnitEntry_DeploySquads(player5, sg_village_north_attacker_3, Unit_Types.wave_city_10m, mkr_spawn_3)
+	Phase1_VillageNorth_AttackerRespawn_IssueOrders(sg_village_north_attacker_3, 3)
+end
+
+function Phase1_VillageNorth_AttackerRespawn_Callback_4()
+	north_attacker_respawn_pending_4 = false
+	north_attacker_respawn_timer_4 = 0
+
+	if PHASE1_VILLAGE_NORTH_RESPAWN_ACTIVE == false or Objective_IsFailed(OBJ_Phase1_VillageDefence_Main) == true then
+		return
+	end
+
+	if north_attacker_initial_count_4 <= 0 then
+		return
+	end
+
+	if SGroup_Count(sg_village_north_attacker_4) > Phase1_VillageNorth_AttackerRespawn_GetThresholdCount(north_attacker_initial_count_4) then
+		return
+	end
+
+	-- Hard cap: never exceed initial composition size
+	if SGroup_Count(sg_village_north_attacker_4) >= north_attacker_initial_count_4 then
+		return
+	end
+
+	UnitEntry_DeploySquads(player5, sg_village_north_attacker_4, Unit_Types.wave_city_10m, mkr_spawn_4)
+	Phase1_VillageNorth_AttackerRespawn_IssueOrders(sg_village_north_attacker_4, 4)
+end
+
+local function Phase1_RovingPatrol_GetName(side)
+	if side == 1 then
+		return "phase1_roving_side1"
+	end
+	return "phase1_roving_side2"
+end
+
+local function Phase1_RovingPatrol_GetSGroup(side)
+	if side == 1 then
+		return sg_roving_patrol_side1
+	end
+	return sg_roving_patrol_side2
+end
+
+local function Phase1_RovingPatrol_GetOutpostEntity(outpost_id)
+	if outpost_id == 1 then
+		return cap_outpost_1
+	elseif outpost_id == 2 then
+		return cap_outpost_2
+	elseif outpost_id == 3 then
+		return cap_outpost_3
+	end
+	return cap_outpost_4
+end
+
+local function Phase1_RovingPatrol_GetOutpostMarker(outpost_id)
+	if outpost_id == 1 then
+		return mkr_spawn_outpost_1
+	elseif outpost_id == 2 then
+		return mkr_spawn_outpost_2
+	elseif outpost_id == 3 then
+		return mkr_spawn_outpost_3
+	end
+	return mkr_spawn_outpost_4
+end
+
+local function Phase1_RovingPatrol_GetOutpostRngMarker(outpost_id)
+	if outpost_id == 1 then
+		return mkr_spawn_outpost_1_rng
+	elseif outpost_id == 2 then
+		return mkr_spawn_outpost_2_rng
+	elseif outpost_id == 3 then
+		return mkr_spawn_outpost_3_rng
+	end
+	return mkr_spawn_outpost_4_rng
+end
+
+local function Phase1_RovingPatrol_GetSpawnMarker(outpost_id)
+	if outpost_id == 1 then
+		return mkr_spawn_1
+	elseif outpost_id == 2 then
+		return mkr_spawn_2
+	elseif outpost_id == 3 then
+		return mkr_spawn_3
+	end
+	return mkr_spawn_4
+end
+
+local function Phase1_RovingPatrol_GetAssistRoute(side)
+	if side == 1 then
+		return patrol_roving_side1_assist
+	end
+	return patrol_roving_side2_assist
+end
+
+local function Phase1_RovingPatrol_GetTowerPair(side)
+	if side == 1 then
+		return 1, 2
+	end
+	return 3, 4
+end
+
+local function Phase1_RovingPatrol_IsOutpostOwned(outpost_id)
+	local entity = Phase1_RovingPatrol_GetOutpostEntity(outpost_id)
+	if entity == nil then
+		return false
+	end
+	if World_OwnsEntity(entity) == true then
+		return false
+	end
+	if Entity_IsAlive(entity) ~= true then
+		return false
+	end
+	return Entity_GetPlayerOwner(entity) == player5
+end
+
+local function Phase1_RovingPatrol_GetPreferredOutpost(side)
+	local first_outpost, second_outpost = Phase1_RovingPatrol_GetTowerPair(side)
+	local preferred_outpost = phase1_patrol_side1_spawn_outpost
+	if side == 2 then
+		preferred_outpost = phase1_patrol_side2_spawn_outpost
+	end
+
+	local sibling_outpost = first_outpost
+	if preferred_outpost == first_outpost then
+		sibling_outpost = second_outpost
+	elseif preferred_outpost == second_outpost then
+		sibling_outpost = first_outpost
+	end
+
+	if preferred_outpost ~= nil and Phase1_RovingPatrol_IsOutpostOwned(preferred_outpost) == true then
+		return preferred_outpost
+	end
+	if Phase1_RovingPatrol_IsOutpostOwned(sibling_outpost) == true then
+		return sibling_outpost
+	end
+	if Phase1_RovingPatrol_IsOutpostOwned(first_outpost) == true then
+		return first_outpost
+	end
+	if Phase1_RovingPatrol_IsOutpostOwned(second_outpost) == true then
+		return second_outpost
+	end
+	return nil
+end
+
+local function Phase1_RovingPatrol_GetSpawnInfo(side)
+	local outpost_id = Phase1_RovingPatrol_GetPreferredOutpost(side)
+	if outpost_id == nil then
+		return nil, nil
+	end
+
+	if side == 1 then
+		phase1_patrol_side1_spawn_outpost = outpost_id
+		phase1_patrol_side1_anchor_outpost = outpost_id
+	else
+		phase1_patrol_side2_spawn_outpost = outpost_id
+		phase1_patrol_side2_anchor_outpost = outpost_id
+	end
+
+	return outpost_id, Phase1_RovingPatrol_GetSpawnMarker(outpost_id)
+end
+
+local function Phase1_RovingPatrol_HasFullSideControl(side)
+	local first_outpost, second_outpost = Phase1_RovingPatrol_GetTowerPair(side)
+	return Phase1_RovingPatrol_IsOutpostOwned(first_outpost) == true and Phase1_RovingPatrol_IsOutpostOwned(second_outpost) == true
+end
+
+local function Phase1_RovingPatrol_GetBaselineRoute(side)
+	if phase1_patrol_mode == PHASE1_PATROL_MODE_FLANK then
+		if side == 1 then
+			return patrol_roving_side1_flank_guard
+		end
+		return patrol_roving_side2_flank_guard
+	end
+
+	if Phase1_RovingPatrol_HasFullSideControl(side) == true then
+		if side == 1 then
+			return patrol_roving_side1_cycle
+		end
+		return patrol_roving_side2_cycle
+	end
+
+	local outpost_id = phase1_patrol_side1_anchor_outpost
+	if side == 2 then
+		outpost_id = phase1_patrol_side2_anchor_outpost
+	end
+	if outpost_id == nil or Phase1_RovingPatrol_IsOutpostOwned(outpost_id) == false then
+		outpost_id = Phase1_RovingPatrol_GetPreferredOutpost(side)
+	end
+	if outpost_id == nil then
+		local first_outpost = Phase1_RovingPatrol_GetTowerPair(side)
+		outpost_id = first_outpost
+	end
+
+	return {
+		Phase1_RovingPatrol_GetOutpostMarker(outpost_id),
+		Phase1_RovingPatrol_GetOutpostRngMarker(outpost_id),
+	}
+end
+
+local function Phase1_RovingPatrol_GetAnchorMarker(side)
+	if phase1_patrol_mode == PHASE1_PATROL_MODE_FLANK then
+		if side == 1 then
+			return mkr_wave_1_path_flank
+		end
+		return mkr_wave_2_path_flank
+	end
+
+	local outpost_id = phase1_patrol_side1_anchor_outpost
+	if side == 2 then
+		outpost_id = phase1_patrol_side2_anchor_outpost
+	end
+	if outpost_id == nil or Phase1_RovingPatrol_IsOutpostOwned(outpost_id) == false then
+		outpost_id = Phase1_RovingPatrol_GetPreferredOutpost(side)
+	end
+	if outpost_id == nil then
+		return nil
+	end
+	return Phase1_RovingPatrol_GetOutpostMarker(outpost_id)
+end
+
+local function Phase1_RovingPatrol_GetLeashRadius()
+	if phase1_patrol_mode == PHASE1_PATROL_MODE_FLANK then
+		return PHASE1_PATROL_FLANK_LEASH
+	end
+	return PHASE1_PATROL_OUTPOST_LEASH
+end
+
+local function Phase1_RovingPatrol_SetRoute(side, route)
+	if RovingArmy_Find == nil or RovingArmy_SetTargets == nil then
+		return
+	end
+
+	local army = RovingArmy_Find(Phase1_RovingPatrol_GetName(side))
+	if army ~= nil then
+		RovingArmy_SetTargets(army, route)
+	end
+end
+
+local function Phase1_RovingPatrol_ClearAssist(side)
+	if side == 1 then
+		phase1_patrol_side1_assisting = false
+		phase1_patrol_side1_assist_until = 0
+	else
+		phase1_patrol_side2_assisting = false
+		phase1_patrol_side2_assist_until = 0
+	end
+end
+
+local function Phase1_RovingPatrol_EnsureMonitor()
+	if phase1_patrol_monitor_active == false and Rule_Exists(Phase1_RovingPatrol_Monitor) == false then
+		Rule_AddInterval(Phase1_RovingPatrol_Monitor, 5)
+		phase1_patrol_monitor_active = true
+	end
+end
+
+local function Phase1_RovingPatrol_OnDeath(side)
+	local respawn_due = World_GetGameTime() + DC.north_attacker_respawn_timer
+	Phase1_RovingPatrol_ClearAssist(side)
+
+	if side == 1 then
+		phase1_patrol_side1_respawn_due = respawn_due
+	else
+		phase1_patrol_side2_respawn_due = respawn_due
+	end
+end
+
+local function Phase1_RovingPatrol_EnsureSide(side)
+	if RovingArmy_Create == nil or RovingArmy_Start == nil or RovingArmy_Find == nil then
+		print("[ROVING_PATROL] RovingArmy API not available; verify scar/roving_army.scar import")
+		return
+	end
+
+	local _, spawn_marker = Phase1_RovingPatrol_GetSpawnInfo(side)
+	if spawn_marker == nil then
+		return
+	end
+
+	local name = Phase1_RovingPatrol_GetName(side)
+	local sgroup = Phase1_RovingPatrol_GetSGroup(side)
+	local route = Phase1_RovingPatrol_GetBaselineRoute(side)
+	local army = RovingArmy_Find(name)
+
+	if SGroup_Count(sgroup) == 0 then
+		UnitEntry_DeploySquads(player5, sgroup, Unit_Types.units_allied_roving_patrol, spawn_marker)
+	end
+
+	if army == nil then
+		army = RovingArmy_Create({
+			name = name,
+			player = player5,
+			sgroup = sgroup,
+			targets = route,
+			target_order = ROVING_ORDER_PATROL,
+			poll_interval = 2,
+			arrival_distance = 20,
+			idle_time = 5,
+			on_death = function()
+				Phase1_RovingPatrol_OnDeath(side)
+			end,
+		})
+		RovingArmy_Start(army)
+	else
+		Phase1_RovingPatrol_SetRoute(side, route)
+	end
+
+	Phase1_RovingPatrol_ClearAssist(side)
+	if side == 1 then
+		phase1_patrol_side1_started = true
+		phase1_patrol_side1_respawn_due = 0
+	else
+		phase1_patrol_side2_started = true
+		phase1_patrol_side2_respawn_due = 0
+	end
+
+	Phase1_RovingPatrol_EnsureMonitor()
+end
+
+local function Phase1_RovingPatrol_MarkTowerCaptured(outpost_id)
+	if outpost_id == 1 and phase1_patrol_tower_counted_1 == false then
+		phase1_patrol_tower_counted_1 = true
+		phase1_patrol_side1_captures = phase1_patrol_side1_captures + 1
+		if phase1_patrol_side1_captures == 1 then
+			phase1_patrol_side1_primary_outpost = 1
+			phase1_patrol_side1_spawn_outpost = 1
+			phase1_patrol_side1_anchor_outpost = 1
+		end
+		Phase1_RovingPatrol_EnsureSide(1)
+		return
+	end
+
+	if outpost_id == 2 and phase1_patrol_tower_counted_2 == false then
+		phase1_patrol_tower_counted_2 = true
+		phase1_patrol_side1_captures = phase1_patrol_side1_captures + 1
+		if phase1_patrol_side1_captures == 1 then
+			phase1_patrol_side1_primary_outpost = 2
+			phase1_patrol_side1_spawn_outpost = 2
+			phase1_patrol_side1_anchor_outpost = 2
+		end
+		Phase1_RovingPatrol_EnsureSide(1)
+		return
+	end
+
+	if outpost_id == 3 and phase1_patrol_tower_counted_3 == false then
+		phase1_patrol_tower_counted_3 = true
+		phase1_patrol_side2_captures = phase1_patrol_side2_captures + 1
+		if phase1_patrol_side2_captures == 1 then
+			phase1_patrol_side2_primary_outpost = 3
+			phase1_patrol_side2_spawn_outpost = 3
+			phase1_patrol_side2_anchor_outpost = 3
+		end
+		Phase1_RovingPatrol_EnsureSide(2)
+		return
+	end
+
+	if outpost_id == 4 and phase1_patrol_tower_counted_4 == false then
+		phase1_patrol_tower_counted_4 = true
+		phase1_patrol_side2_captures = phase1_patrol_side2_captures + 1
+		if phase1_patrol_side2_captures == 1 then
+			phase1_patrol_side2_primary_outpost = 4
+			phase1_patrol_side2_spawn_outpost = 4
+			phase1_patrol_side2_anchor_outpost = 4
+		end
+		Phase1_RovingPatrol_EnsureSide(2)
+		return
+	end
+end
+
+function Phase1_RovingPatrol_Init()
+	phase1_patrol_mode = PHASE1_PATROL_MODE_OUTPOST
+	phase1_patrol_side1_captures = 0
+	phase1_patrol_side2_captures = 0
+	phase1_patrol_side1_started = false
+	phase1_patrol_side2_started = false
+	phase1_patrol_side1_primary_outpost = 1
+	phase1_patrol_side2_primary_outpost = 3
+	phase1_patrol_side1_spawn_outpost = 1
+	phase1_patrol_side2_spawn_outpost = 3
+	phase1_patrol_side1_anchor_outpost = 1
+	phase1_patrol_side2_anchor_outpost = 3
+	phase1_patrol_side1_respawn_due = 0
+	phase1_patrol_side2_respawn_due = 0
+	phase1_patrol_tower_counted_1 = false
+	phase1_patrol_tower_counted_2 = false
+	phase1_patrol_tower_counted_3 = false
+	phase1_patrol_tower_counted_4 = false
+	phase1_patrol_side1_assisting = false
+	phase1_patrol_side2_assisting = false
+	phase1_patrol_side1_assist_until = 0
+	phase1_patrol_side2_assist_until = 0
+	phase1_patrol_side1_last_redirect = 0
+	phase1_patrol_side2_last_redirect = 0
+	phase1_patrol_monitor_active = false
+end
+
+local function Phase1_RovingPatrol_HasNearbyPlayerSupport(side, marker)
+	local player_groups = {}
+	if side == 1 then
+		player_groups = {
+			sg_player1_start,
+			sg_player1_unique,
+			sg_player1_reinforcements,
+			sg_player2_start,
+			sg_player2_unique,
+			sg_player2_reinforcements,
+		}
+	else
+		player_groups = {
+			sg_player3_start,
+			sg_player3_unique,
+			sg_player3_reinforcements,
+			sg_player4_start,
+			sg_player4_unique,
+			sg_player4_reinforcements,
+		}
+	end
+
+	for _, sgroup in pairs(player_groups) do
+		if sgroup ~= nil and SGroup_Count(sgroup) > 0 then
+			local distance_ok, distance = pcall(Util_GetDistance, sgroup, marker)
+			if distance_ok and distance <= PHASE1_PATROL_PLAYER_SUPPORT_RANGE then
+				return true
+			end
+		end
+	end
+
+	return false
+end
+
+local function Phase1_RovingPatrol_GetThreatCount(side)
+	if side == 1 then
+		return SGroup_Count(sg_waves_main_1_01b) + SGroup_Count(sg_waves_main_1_01d) + SGroup_Count(sg_waves_main_1_07) + SGroup_Count(sg_waves_main_1_08) + SGroup_Count(sg_waves_main_1_09) + SGroup_Count(sg_waves_main_1_10) + SGroup_Count(sg_waves_main_1_11)
+	end
+	return SGroup_Count(sg_waves_main_2_01b) + SGroup_Count(sg_waves_main_2_01d) + SGroup_Count(sg_waves_main_2_07) + SGroup_Count(sg_waves_main_2_08) + SGroup_Count(sg_waves_main_2_09) + SGroup_Count(sg_waves_main_2_10) + SGroup_Count(sg_waves_main_2_11)
+end
+
+local function Phase1_RovingPatrol_SideNeedsAssist(side)
+	local threat_count = Phase1_RovingPatrol_GetThreatCount(side)
+	if threat_count <= 0 then
+		return false
+	end
+
+	local patrol_count = SGroup_Count(Phase1_RovingPatrol_GetSGroup(side))
+	if patrol_count <= 0 then
+		return false
+	end
+
+	local assist_route = Phase1_RovingPatrol_GetAssistRoute(side)
+	local assist_marker = assist_route[1]
+	local has_player_support = Phase1_RovingPatrol_HasNearbyPlayerSupport(side, assist_marker)
+	local enemy_force_is_small = threat_count <= math.max(6, math.floor(patrol_count * PHASE1_PATROL_FORCE_RATIO))
+
+	return has_player_support == true or enemy_force_is_small == true
+end
+
+local function Phase1_RovingPatrol_TryRespawn(side, now)
+	local started = phase1_patrol_side1_started
+	local respawn_due = phase1_patrol_side1_respawn_due
+	if side == 2 then
+		started = phase1_patrol_side2_started
+		respawn_due = phase1_patrol_side2_respawn_due
+	end
+
+	if started == false or DC.patrol_respawn ~= true then
+		return
+	end
+	if SGroup_Count(Phase1_RovingPatrol_GetSGroup(side)) > 0 then
+		return
+	end
+	if respawn_due == 0 or now < respawn_due then
+		return
+	end
+	if Phase1_RovingPatrol_GetSpawnInfo(side) == nil then
+		return
+	end
+
+	Phase1_RovingPatrol_EnsureSide(side)
+end
+
+local function Phase1_RovingPatrol_EnforceLeash(side)
+	local sgroup = Phase1_RovingPatrol_GetSGroup(side)
+	if SGroup_Count(sgroup) == 0 then
+		return
+	end
+
+	local anchor_marker = Phase1_RovingPatrol_GetAnchorMarker(side)
+	if anchor_marker == nil then
+		return
+	end
+
+	local distance_ok, distance = pcall(Util_GetDistance, sgroup, anchor_marker)
+	if distance_ok and distance > Phase1_RovingPatrol_GetLeashRadius() then
+		Phase1_RovingPatrol_ClearAssist(side)
+		Phase1_RovingPatrol_SetRoute(side, Phase1_RovingPatrol_GetBaselineRoute(side))
+	end
+end
+
+local function Phase1_RovingPatrol_UpdateSideAssist(side, now)
+	local started = phase1_patrol_side1_started
+	local assisting = phase1_patrol_side1_assisting
+	local assist_until = phase1_patrol_side1_assist_until
+	local last_redirect = phase1_patrol_side1_last_redirect
+
+	if side == 2 then
+		started = phase1_patrol_side2_started
+		assisting = phase1_patrol_side2_assisting
+		assist_until = phase1_patrol_side2_assist_until
+		last_redirect = phase1_patrol_side2_last_redirect
+	end
+
+	if started == false then
+		return
+	end
+
+	if phase1_patrol_mode == PHASE1_PATROL_MODE_OUTPOST then
+		if side == 1 and Phase1_RovingPatrol_HasFullSideControl(1) == false then
+			return
+		end
+		if side == 2 and Phase1_RovingPatrol_HasFullSideControl(2) == false then
+			return
+		end
+	end
+
+	local needs_assist = Phase1_RovingPatrol_SideNeedsAssist(side)
+
+	if needs_assist == true and assisting == false and now >= (last_redirect + PHASE1_PATROL_ASSIST_COOLDOWN) then
+		Phase1_RovingPatrol_SetRoute(side, Phase1_RovingPatrol_GetAssistRoute(side))
+		assisting = true
+		assist_until = now + PHASE1_PATROL_ASSIST_DURATION
+		last_redirect = now
+	elseif assisting == true and (needs_assist == false or now >= assist_until) then
+		Phase1_RovingPatrol_SetRoute(side, Phase1_RovingPatrol_GetBaselineRoute(side))
+		assisting = false
+		assist_until = 0
+	end
+
+	if side == 1 then
+		phase1_patrol_side1_assisting = assisting
+		phase1_patrol_side1_assist_until = assist_until
+		phase1_patrol_side1_last_redirect = last_redirect
+	else
+		phase1_patrol_side2_assisting = assisting
+		phase1_patrol_side2_assist_until = assist_until
+		phase1_patrol_side2_last_redirect = last_redirect
+	end
+end
+
+function Phase1_RovingPatrol_Monitor()
+	if phase1_patrol_monitor_active == false then
+		Rule_RemoveMe()
+		return
+	end
+
+	if OBJ_Phase1_VillageDefence_Main ~= nil and Objective_IsFailed(OBJ_Phase1_VillageDefence_Main) == true then
+		phase1_patrol_monitor_active = false
+		Rule_RemoveMe()
+		return
+	end
+
+	local now = World_GetGameTime()
+	Phase1_RovingPatrol_TryRespawn(1, now)
+	Phase1_RovingPatrol_TryRespawn(2, now)
+	Phase1_RovingPatrol_EnforceLeash(1)
+	Phase1_RovingPatrol_EnforceLeash(2)
+	Phase1_RovingPatrol_UpdateSideAssist(1, now)
+	Phase1_RovingPatrol_UpdateSideAssist(2, now)
+end
+
+function Phase1_RovingPatrol_TransitionToFlankGuard()
+	phase1_patrol_mode = PHASE1_PATROL_MODE_FLANK
+	Phase1_RovingPatrol_ClearAssist(1)
+	Phase1_RovingPatrol_ClearAssist(2)
+	Phase1_RovingPatrol_EnsureSide(1)
+	Phase1_RovingPatrol_EnsureSide(2)
+	Phase1_RovingPatrol_SetRoute(1, Phase1_RovingPatrol_GetBaselineRoute(1))
+	Phase1_RovingPatrol_SetRoute(2, Phase1_RovingPatrol_GetBaselineRoute(2))
+	Phase1_RovingPatrol_EnsureMonitor()
+end
+
+local function Phase2_OutpostGuard_GetName(index)
+	return "phase2_outpost_guard_" .. tostring(index)
+end
+
+local function Phase2_OutpostGuard_GetSGroup(index)
+	if index == 1 then
+		return sg_phase2_outpost_guard_1
+	elseif index == 2 then
+		return sg_phase2_outpost_guard_2
+	elseif index == 3 then
+		return sg_phase2_outpost_guard_3
+	end
+	return sg_phase2_outpost_guard_4
+end
+
+local function Phase2_OutpostGuard_HasLiveUnits(index)
+	local sgroup = Phase2_OutpostGuard_GetSGroup(index)
+	if sgroup == nil then
+		return false
+	end
+
+	for i = 1, SGroup_Count(sgroup) do
+		local squad = SGroup_GetSquadAt(sgroup, i)
+		if squad ~= nil and Squad_IsAlive(squad) == true then
+			return true
+		end
+	end
+
+	return false
+end
+
+local function Phase2_OutpostGuard_GetSpawnMarker(index)
+	if index == 1 or index == 2 then
+		return mkr_spawn_2
+	end
+	return mkr_spawn_3
+end
+
+local function Phase2_OutpostGuard_GetRoute(index)
+	if index == 1 then
+		return patrol_phase2_outpost_guard_1
+	elseif index == 2 then
+		return patrol_phase2_outpost_guard_2
+	elseif index == 3 then
+		return patrol_phase2_outpost_guard_3
+	end
+	return patrol_phase2_outpost_guard_4
+end
+
+local function Phase2_OutpostGuard_IsAnchorValid(index)
+	local entity = nil
+	if index == 1 then
+		entity = entity_kremlin
+	elseif index == 2 then
+		entity = entity_outpost_bridge
+	elseif index == 3 then
+		entity = entity_outpost_south
+	else
+		entity = entity_outpost_4_south
+	end
+
+	if entity == nil then
+		return false
+	end
+	if World_OwnsEntity(entity) == true then
+		return false
+	end
+	if Entity_IsAlive(entity) ~= true then
+		return false
+	end
+	return Entity_GetPlayerOwner(entity) == player5
+end
+
+local function Phase2_OutpostGuard_EnsureMonitor()
+	if phase2_outpost_guard_monitor_active == false and Rule_Exists(Phase2_OutpostGuard_Monitor) == false then
+		Rule_AddInterval(Phase2_OutpostGuard_Monitor, 5)
+		phase2_outpost_guard_monitor_active = true
+	end
+end
+
+local function Phase2_OutpostGuard_AreRespawnsAllowed()
+	if village_capture_support_enabled ~= true then
+		return false
+	end
+	if OBJ_Phase1_VillageDefence_south == nil or Objective_IsStarted(OBJ_Phase1_VillageDefence_south) ~= true then
+		return true
+	end
+	if eg_tc_south == nil then
+		return true
+	end
+	return EGroup_Count(eg_tc_south) > 0
+end
+
+local function Phase2_OutpostGuard_CancelRespawns()
+	for index = 1, 4 do
+		phase2_outpost_guard_respawn_due[index] = 0
+		if Phase2_OutpostGuard_HasLiveUnits(index) ~= true and RovingArmy_Find(Phase2_OutpostGuard_GetName(index)) == nil then
+			phase2_outpost_guard_started[index] = false
+		end
+	end
+end
+
+local function Phase2_OutpostGuard_OnDeath(index)
+	if Phase2_OutpostGuard_AreRespawnsAllowed() ~= true then
+		phase2_outpost_guard_respawn_due[index] = 0
+		phase2_outpost_guard_started[index] = false
+		return
+	end
+	phase2_outpost_guard_respawn_due[index] = World_GetGameTime() + DC.north_attacker_respawn_timer
+end
+
+function Phase2_OutpostGuard_Start(index, force_start)
+	if RovingArmy_Create == nil or RovingArmy_Start == nil or RovingArmy_Find == nil then
+		return
+	end
+	if force_start ~= true and Phase2_OutpostGuard_IsAnchorValid(index) == false then
+		return
+	end
+
+	local name = Phase2_OutpostGuard_GetName(index)
+	local sgroup = Phase2_OutpostGuard_GetSGroup(index)
+	local spawn_marker = Phase2_OutpostGuard_GetSpawnMarker(index)
+	local route = Phase2_OutpostGuard_GetRoute(index)
+	local army = RovingArmy_Find(name)
+
+	if SGroup_Count(sgroup) == 0 then
+		UnitEntry_DeploySquads(player5, sgroup, Unit_Types.units_allied_outpost_guard, spawn_marker)
+	end
+
+	if army == nil then
+		army = RovingArmy_Create({
+			name = name,
+			player = player5,
+			sgroup = sgroup,
+			targets = route,
+			target_order = ROVING_ORDER_PATROL,
+			poll_interval = 2,
+			arrival_distance = 18,
+			idle_time = 5,
+			on_death = function()
+				Phase2_OutpostGuard_OnDeath(index)
+			end,
+		})
+		RovingArmy_Start(army)
+	else
+		RovingArmy_SetTargets(army, route)
+	end
+
+	phase2_outpost_guard_started[index] = true
+	phase2_outpost_guard_respawn_due[index] = 0
+	Phase2_OutpostGuard_EnsureMonitor()
+end
+
+local function Phase2_OutpostGuard_TryRespawn(index, now)
+	if phase2_outpost_guard_started[index] ~= true then
+		return
+	end
+	if Phase2_OutpostGuard_AreRespawnsAllowed() ~= true then
+		phase2_outpost_guard_respawn_due[index] = 0
+		phase2_outpost_guard_started[index] = false
+		return
+	end
+	if Phase2_OutpostGuard_HasLiveUnits(index) == true then
+		return
+	end
+	if phase2_outpost_guard_respawn_due[index] == 0 or now < phase2_outpost_guard_respawn_due[index] then
+		return
+	end
+	if Phase2_OutpostGuard_IsAnchorValid(index) == false then
+		return
+	end
+
+	Phase2_OutpostGuard_Start(index)
+end
+
+function Phase2_OutpostGuard_Monitor()
+	if phase2_outpost_guard_monitor_active == false then
+		Rule_RemoveMe()
+		return
+	end
+
+	local active_guards = 0
+	local now = World_GetGameTime()
+	for index = 1, 4 do
+		if phase2_outpost_guard_started[index] == true then
+			active_guards = active_guards + 1
+			local army = RovingArmy_Find(Phase2_OutpostGuard_GetName(index))
+			if Phase2_OutpostGuard_IsAnchorValid(index) == false then
+				if army ~= nil and RovingArmy_Disband ~= nil then
+					RovingArmy_Disband(army)
+				end
+				if Phase2_OutpostGuard_AreRespawnsAllowed() == true then
+					if phase2_outpost_guard_respawn_due[index] == 0 then
+						phase2_outpost_guard_respawn_due[index] = now + DC.north_attacker_respawn_timer
+					end
+				else
+					phase2_outpost_guard_started[index] = false
+					phase2_outpost_guard_respawn_due[index] = 0
+				end
+			elseif army ~= nil and Phase2_OutpostGuard_HasLiveUnits(index) == true then
+				local distance_ok, distance = pcall(Util_GetDistance, Phase2_OutpostGuard_GetSGroup(index), Phase2_OutpostGuard_GetSpawnMarker(index))
+				if distance_ok == true and distance > PHASE2_OUTPOST_GUARD_LEASH then
+					RovingArmy_SetTargets(army, Phase2_OutpostGuard_GetRoute(index))
+				end
+			else
+				Phase2_OutpostGuard_TryRespawn(index, now)
+			end
+		end
+	end
+
+	if active_guards == 0 and village_capture_support_enabled ~= true then
+		phase2_outpost_guard_monitor_active = false
+		Rule_RemoveMe()
+	end
+end
+
+function Phase1_Checkpoint_InitObjectives()
+	
+	OBJ_Phase1_Checkpoint_main = {
+		Title = "$ae948c95a8c5425d8de28e0c193e0be9:6" ,  -- "Capture the Checkpoint for Reinforcements"
+		Type = ObjectiveType_Battle, 
+		OnStart = Phase1_Checkpoint_Start, --when objective start call function
+		OnComplete = Phase1_Checkpoint_OnComplete, -- when objective completes, call function
+	}
+	OBJ_Phase1_Checkpoint_clear = {
+		Title = "$ae948c95a8c5425d8de28e0c193e0be9:7",  -- "Defeat all resistance inside the Checkpoint"
+		Type = ObjectiveType_Battle, 
+		Parent = OBJ_Phase1_Checkpoint_main,
+	}
+	OBJ_Phase1_Checkpoint_regroup = {
+		Title = "$ae948c95a8c5425d8de28e0c193e0be9:14",  -- "Regroup with your team, avoid losing all your units!"
+		Type = ObjectiveType_Tip, 
+		Parent = OBJ_Phase1_Checkpoint_main,
+	}
+	
+	Objective_Register(OBJ_Phase1_Checkpoint_main)
+	Objective_Register(OBJ_Phase1_Checkpoint_clear)
+	Objective_Register(OBJ_Phase1_Checkpoint_regroup)
+	
+end
+
+function Phase1_Checkpoint_Start()
+
+	Objective_AddUIElements(OBJ_Phase1_Checkpoint_main, mkr_spawn_checkpoint_1, true, "$ae948c95a8c5425d8de28e0c193e0be9:15", true) -- "Checkpoint"
+	-- Added UI marker minimap
+	Objective_AddUIElements(OBJ_Phase1_Checkpoint_clear, mkr_spawn_checkpoint_1, true, "$ae948c95a8c5425d8de28e0c193e0be9:15", true) -- "Checkpoint"
+	Objective_AddUIElements(OBJ_Phase1_Checkpoint_regroup, mkr_obj_regroup, true, "$40836", true, 4, nil, nil, "icons/objectives/capture_objective", "CaptureObjectiveTemplate") -- "Rally point"
+	
+	-- Add rules
+	Rule_AddInterval(Phase1_Checkpoint_count, 1)
+	Rule_AddInterval(Phase1_Checkpoint_reserves, 1)
+	Rule_EnterProximity(Phase1_Checkpoint_regroup, ALL, sg_players_all_start, mkr_obj_regroup, 50, false, {})
+	
+end
+
+-- Objective Main: Clear checkpoint
+function Phase1_Checkpoint_count()
+
+	if Objective_IsComplete(OBJ_Phase1_Checkpoint_main) == false then	
+		if SGroup_Count(sg_checkpoint_group_all) == 0  then
+			-- Outpost
+			EGroup_SetPlayerOwner(eg_outpost_checkpoint, player5)
+			Cmd_InstantUpgrade(eg_outpost_checkpoint, UPG.RUS.UPGRADE_WOODEN_CASTLE_SPRINGALD_RUS)
+			Garrison_Building(None, { egroup = eg_outpost_checkpoint, amount = GARRISON_FILL_OUTPOST, player = player5 })
+			-- Objective
+			Objective_RemoveUIElements(OBJ_Phase1_Checkpoint_main, 1)
+			Objective_RemoveUIElements(OBJ_Phase1_Checkpoint_clear, 1)
+			Objective_Complete(OBJ_Phase1_Checkpoint_main, true, true) 
+			
+			-- Check 'regroup' objective / Remove UI
+			if Objective_IsComplete(OBJ_Phase1_Checkpoint_regroup) == false then
+				Objective_Stop(OBJ_Phase1_Checkpoint_regroup)
+				Objective_RemoveUIElements(OBJ_Phase1_Checkpoint_regroup, 1)
+			end
+			
+			
+			Rule_RemoveMe()
+		end	
+	else
+		Rule_RemoveMe()
+	end
+	
+end
+-- Objective Side: Regroup 
+function Phase1_Checkpoint_regroup()
+	
+	if Objective_IsComplete(OBJ_Phase1_Checkpoint_regroup) == false then
+		-- Complete objective, remove UI
+		Objective_Complete(OBJ_Phase1_Checkpoint_regroup, true, true) 
+		Objective_Stop(OBJ_Phase1_Checkpoint_regroup)
+		Objective_RemoveUIElements(OBJ_Phase1_Checkpoint_regroup, 1)
+		Rule_RemoveMe()
+	else
+		Rule_RemoveMe()
+	end
+	
+	
+end
+
+function Phase1_Checkpoint_reserves()
+
+	if SGroup_Count(sg_checkpoint_group_all) < 0.8 * count_checkpoint_all then
+		if SGroup_Count(sg_checkpoint_units_4) >= 1 then
+			Cmd_Ability(sg_checkpoint_units_4, BP_GetAbilityBlueprint("core_formation_line"))
+			Cmd_FormationAttackMove(sg_checkpoint_units_4, mkr_spawn_checkpoint_1)
+			Rule_RemoveMe()
+		else
+			Rule_RemoveMe()
+		end
+	end
+	
+end
+
+-- Reinforcements
+function Phase1_Checkpoint_Player1()
+	
+	local player1_civ = Player_GetRaceName(player1)
+	
+	-- Spawn Player 1 / Select faction
+	if player1_civ == "malian" then
+		UnitEntry_DeploySquads(player1, sg_player1_reinforcements, Unit_Types.start_player_melee_mal, mkr_reinforcements_checkpoint)
+	elseif player1_civ == "abbasid" then
+		UnitEntry_DeploySquads(player1, sg_player1_reinforcements, Unit_Types.start_player_melee_abb, mkr_reinforcements_checkpoint)
+	elseif player1_civ == "rus" or player1_civ == "french" then -- Calvary
+		UnitEntry_DeploySquads(player1, sg_player1_reinforcements, Unit_Types.start_player_melee_cav, mkr_reinforcements_checkpoint)
+	elseif player1_civ == "english" or player1_civ == "hre" then -- Infantry
+		UnitEntry_DeploySquads(player1, sg_player1_reinforcements, Unit_Types.start_player_melee_inf, mkr_reinforcements_checkpoint)
+	else
+		UnitEntry_DeploySquads(player1, sg_player1_reinforcements, Unit_Types.start_player_melee, mkr_reinforcements_checkpoint) -- Default
+	end 
+	
+	-- Set Direction
+	Cmd_FormationMove(sg_player1_reinforcements, mkr_reinforcements_move_1, false, false, mkr_direction_temp)
+	
+	SendReinforceNotification(mkr_reinforcements_checkpoint, "$11176787") -- Reinforcements have arrived!
+	
+end
+
+function Phase1_Checkpoint_Player2()
+	local player2_civ = Player_GetRaceName(player2)
+	
+	-- Spawn Player 2 / Select faction
+	if player2_civ == "malian" then
+		UnitEntry_DeploySquads(player2, sg_player2_reinforcements, Unit_Types.start_player_ranged_mal, mkr_reinforcements_checkpoint)
+	elseif player2_civ == "chinese" then
+		UnitEntry_DeploySquads(player2, sg_player2_reinforcements, Unit_Types.start_player_ranged_chi, mkr_reinforcements_checkpoint)
+	elseif player2_civ == "abbasid" then
+		UnitEntry_DeploySquads(player2, sg_player2_reinforcements, Unit_Types.start_player_ranged_abb, mkr_reinforcements_checkpoint)
+	elseif player2_civ == "mongol" then
+		UnitEntry_DeploySquads(player2, sg_player2_reinforcements, Unit_Types.start_player_ranged_mon, mkr_reinforcements_checkpoint)
+	elseif player2_civ == "rus" then
+		UnitEntry_DeploySquads(player2, sg_player2_reinforcements, Unit_Types.start_player_ranged_rus, mkr_reinforcements_checkpoint)
+	else
+		UnitEntry_DeploySquads(player2, sg_player2_reinforcements, Unit_Types.start_player_ranged, mkr_reinforcements_checkpoint) -- Default
+	end
+	
+	-- Set Direction
+	Cmd_FormationMove(sg_player2_reinforcements, mkr_reinforcements_move_2, false, false, mkr_direction_temp)
+	
+end
+
+function Phase1_Checkpoint_Player3()
+	local player3_civ = Player_GetRaceName(player3)
+	
+	-- Spawn Player 3 / Select faction
+	if player3_civ == "malian" then
+		UnitEntry_DeploySquads(player3, sg_player3_reinforcements, Unit_Types.start_player_melee_mal, mkr_reinforcements_checkpoint)
+	elseif player3_civ == "abbasid" then
+		UnitEntry_DeploySquads(player3, sg_player3_reinforcements, Unit_Types.start_player_melee_abb, mkr_reinforcements_checkpoint)
+	elseif player3_civ == "rus" or player3_civ == "french" then -- Calvary
+		UnitEntry_DeploySquads(player3, sg_player3_reinforcements, Unit_Types.start_player_melee_cav, mkr_reinforcements_checkpoint)
+	elseif player3_civ == "english" or player3_civ == "hre" then -- Infantry
+		UnitEntry_DeploySquads(player3, sg_player3_reinforcements, Unit_Types.start_player_melee_inf, mkr_reinforcements_checkpoint)
+	else
+		UnitEntry_DeploySquads(player3, sg_player3_reinforcements, Unit_Types.start_player_melee, mkr_reinforcements_checkpoint) -- Default
+	end
+	
+	-- Set Direction
+	Cmd_FormationMove(sg_player3_reinforcements, mkr_reinforcements_move_3, false, false, mkr_direction_temp)
+	
+end
+
+function Phase1_Checkpoint_Player4()
+	local player4_civ = Player_GetRaceName(player4)
+
+	-- Spawn Player 4 / Select faction
+	if player4_civ == "malian" then
+		UnitEntry_DeploySquads(player4, sg_player4_reinforcements, Unit_Types.start_player_ranged_mal, mkr_reinforcements_checkpoint)
+	elseif player4_civ == "chinese" then
+		UnitEntry_DeploySquads(player4, sg_player4_reinforcements, Unit_Types.start_player_ranged_chi, mkr_reinforcements_checkpoint)
+	elseif player4_civ == "abbasid" then
+		UnitEntry_DeploySquads(player4, sg_player4_reinforcements, Unit_Types.start_player_ranged_abb, mkr_reinforcements_checkpoint)
+	elseif player4_civ == "mongol" then
+		UnitEntry_DeploySquads(player4, sg_player4_reinforcements, Unit_Types.start_player_ranged_mon, mkr_reinforcements_checkpoint)
+	elseif player4_civ == "rus" then
+		UnitEntry_DeploySquads(player4, sg_player4_reinforcements, Unit_Types.start_player_ranged_rus, mkr_reinforcements_checkpoint)
+	else
+		UnitEntry_DeploySquads(player4, sg_player4_reinforcements, Unit_Types.start_player_ranged, mkr_reinforcements_checkpoint) -- Default
+	end
+	
+	-- Set Direction
+	Cmd_FormationMove(sg_player4_reinforcements, mkr_reinforcements_move_4, false, false, mkr_direction_temp)
+
+end
+
+function Phase1_Checkpoint_OnComplete()
+	
+	-- Reinforcements interval
+	Phase1_Checkpoint_Player1()
+	Rule_AddOneShot(Phase1_Checkpoint_Player2, 6)
+	Rule_AddOneShot(Phase1_Checkpoint_Player3, 12)
+	Rule_AddOneShot(Phase1_Checkpoint_Player4, 18)
+	
+end
+
+-------------------------------------------
+-- Objective: Capture Outposts 
+-------------------------------------------
+
+function Phase1_Outposts_InitObjectives()
+	
+	OBJ_Phase1_Outposts_Main = {
+		Title = "$ae948c95a8c5425d8de28e0c193e0be9:3" ,  -- "Capture the Outposts near the Village Enterances"
+		Type = ObjectiveType_Battle, 
+		SetupUI = Phase1_Outposts_UI, -- seting up how objective is presented
+		OnStart = Phase1_Outposts_Start, --when objective start call function
+		OnComplete = Phase1_Outposts_OnComplete, -- when objective completes, call function
+	}
+	OBJ_Phase1_Outposts_side1 = {
+		Title = "$ae948c95a8c5425d8de28e0c193e0be9:5",  -- "Defeat the resistance near the Western Outposts"
+		Type = ObjectiveType_Battle, 
+		SetupUI = Phase1_Outposts_UI, -- seting up how objective is presented
+		Parent = OBJ_Phase1_Outposts_Main,
+		--OnComplete = Phase1_Outposts_side_OnComplete, -- when objective completes, call function
+	}
+	OBJ_Phase1_Outposts_side2 = {
+		Title = "$ae948c95a8c5425d8de28e0c193e0be9:4",  -- "Defeat the resistance near the Eastern Outposts"
+		Type = ObjectiveType_Battle, 
+		SetupUI = Phase1_Outposts_UI, -- seting up how objective is presented
+		Parent = OBJ_Phase1_Outposts_Main,
+		--OnComplete = Phase1_Outposts_side_OnComplete, -- when objective completes, call function
+	}
+	
+	Objective_Register(OBJ_Phase1_Outposts_Main)
+	Objective_Register(OBJ_Phase1_Outposts_side1)
+	Objective_Register(OBJ_Phase1_Outposts_side2)
+	
+end
+
+function Phase1_Outposts_UI()
+	
+	-- Main
+	Objective_SetCounter(OBJ_Phase1_Outposts_Main, 0, 2) --Set the counter in the UI
+	-- Side 1 
+	Objective_SetCounter(OBJ_Phase1_Outposts_side1, 0, 2) 
+	-- Side 2
+	Objective_SetCounter(OBJ_Phase1_Outposts_side2, 0, 2) 
+	
+end
+
+function Phase1_Outposts_Start()
+	
+	-- Outpost garrisoning is handled only by capture-time Garrison_Building calls.
+	Phase1_RovingPatrol_Init()
+
+	-- Add rules
+	Rule_Add(Phase1_Outposts_count_side1)
+	Rule_Add(Phase1_Outposts_count_side2)
+	-- Add UI
+	Objective_AddUIElements(OBJ_Phase1_Outposts_side1, mkr_spawn_outpost_1_rng, true, "$11121046", true) -- "Outpost"
+	Objective_AddUIElements(OBJ_Phase1_Outposts_side1, mkr_spawn_outpost_2_rng, true, "$11121046", true) -- "Outpost"
+	Objective_AddUIElements(OBJ_Phase1_Outposts_side2, mkr_spawn_outpost_3_rng, true, "$11121046", true) -- "Outpost"
+	Objective_AddUIElements(OBJ_Phase1_Outposts_side2, mkr_spawn_outpost_4_rng, true, "$11121046", true) -- "Outpost"
+	
+	
+	
+	
+end
+-- Outposts East 
+function Phase1_Outposts_count_side1()
+	
+	if Objective_IsComplete(OBJ_Phase1_Outposts_Main) == false then
+		
+		-- Check Group #1
+		if SGroup_Count(sg_outpost_guards_1) == 0  then
+			
+			-- Check Outpost and change owner
+			if World_OwnsEntity(cap_outpost_1) ~= true then
+				
+				-- Captured outpost
+				if Entity_GetPlayerOwner(cap_outpost_1) ~= nil then 
+					if Entity_GetPlayerOwner(cap_outpost_1) == player6 and Entity_IsAlive(cap_outpost_1) == true then
+						EGroup_SetPlayerOwner(eg_outpost_1, player5)
+						-- Add Springald upgrade
+						Cmd_InstantUpgrade(eg_outpost_1, UPG.RUS.UPGRADE_WOODEN_CASTLE_SPRINGALD_RUS)
+						Garrison_Building(None, { egroup = eg_outpost_1, amount = GARRISON_FILL_OUTPOST, player = player5 })
+						
+						-- Notification: Point captured
+						UI_CreateEventCueClickable(-1, 15, -1, 0, event_cue_text, "", "low_priority", "", "sfx_campaign_Hastings_horn_reinforcements_arrive", 255, 255, 255, 255, ECV_Queue, nothing)
+						UI_CreateMinimapBlip(mkr_spawn_outpost_1, 10, "general")
+						
+						-- Remove UI
+						Objective_RemoveUIElements(OBJ_Phase1_Outposts_side1, 1)
+						
+						-- Side Objective +1
+						if Objective_IsCounterSet(OBJ_Phase1_Outposts_side1) then
+							Objective_IncreaseCounter(OBJ_Phase1_Outposts_side1)
+
+							if Obj_GetCounterCount(OBJ_Phase1_Outposts_side1.ID) == Obj_GetCounterMax(OBJ_Phase1_Outposts_side1.ID) then 
+								Objective_Complete(OBJ_Phase1_Outposts_side1, true, true) 
+								
+							end
+						end
+						
+						-- Start allied Raid #1
+						Phase1_VillageNorth_Assault_raid1()
+					end	
+				end	
+			else
+				-- Destroyed outpost
+				if cap_outpost_1_kia == false then
+					-- Notification: Point captured
+					UI_CreateEventCueClickable(-1, 15, -1, 0, event_cue_text, "", "low_priority", "", "sfx_campaign_Hastings_horn_reinforcements_arrive", 255, 255, 255, 255, ECV_Queue, nothing)
+					UI_CreateMinimapBlip(mkr_spawn_outpost_1, 10, "general")
+					
+					-- Remove UI
+					Objective_RemoveUIElements(OBJ_Phase1_Outposts_side1, 1)
+					
+					-- Side Objective +1
+					if Objective_IsCounterSet(OBJ_Phase1_Outposts_side1) then
+						Objective_IncreaseCounter(OBJ_Phase1_Outposts_side1)
+						if Obj_GetCounterCount(OBJ_Phase1_Outposts_side1.ID) == Obj_GetCounterMax(OBJ_Phase1_Outposts_side1.ID) then 
+							Objective_Complete(OBJ_Phase1_Outposts_side1, true, true) 
+							
+						end
+					end
+					
+					-- Variable switch
+					cap_outpost_1_kia = true
+				end
+			end
+			-- Ensure raid triggers regardless of outpost entity state
+			Phase1_RovingPatrol_MarkTowerCaptured(1)
+			Phase1_VillageNorth_Assault_raid1()
+		end
+		
+		-- Check Group #2
+		if SGroup_Count(sg_outpost_guards_2) == 0 then
+			
+			-- Check Outpost and change owner
+			if World_OwnsEntity(cap_outpost_2) ~= true then
+				
+				-- Captured outpost
+				if Entity_GetPlayerOwner(cap_outpost_2) ~= nil then
+					if Entity_GetPlayerOwner(cap_outpost_2) == player6 and Entity_IsAlive(cap_outpost_2) == true then
+						EGroup_SetPlayerOwner(eg_outpost_2, player5)
+						-- Add Springald upgrade
+						Cmd_InstantUpgrade(eg_outpost_2, UPG.RUS.UPGRADE_WOODEN_CASTLE_SPRINGALD_RUS)
+						Garrison_Building(None, { egroup = eg_outpost_2, amount = GARRISON_FILL_OUTPOST, player = player5 })
+						
+						-- Notification: Point captured
+						UI_CreateEventCueClickable(-1, 15, -1, 0, event_cue_text, "", "low_priority", "", "sfx_campaign_Hastings_horn_reinforcements_arrive", 255, 255, 255, 255, ECV_Queue, nothing)
+						UI_CreateMinimapBlip(mkr_spawn_outpost_2, 10, "general")
+						
+						-- Remove UI
+						Objective_RemoveUIElements(OBJ_Phase1_Outposts_side1, 2)
+						
+						-- Side Objective +1
+						if Objective_IsCounterSet(OBJ_Phase1_Outposts_side1) then
+							Objective_IncreaseCounter(OBJ_Phase1_Outposts_side1)
+
+							if Obj_GetCounterCount(OBJ_Phase1_Outposts_side1.ID) == Obj_GetCounterMax(OBJ_Phase1_Outposts_side1.ID) then 
+								Objective_Complete(OBJ_Phase1_Outposts_side1, true, true) 
+								
+							end
+						end
+						
+						-- Start allied Raid #2
+						Phase1_VillageNorth_Assault_raid2()
+					end
+				end
+			else
+				-- Destroyed outpost
+				if cap_outpost_2_kia == false then
+					-- Notification: Point captured
+					UI_CreateEventCueClickable(-1, 15, -1, 0, event_cue_text, "", "low_priority", "", "sfx_campaign_Hastings_horn_reinforcements_arrive", 255, 255, 255, 255, ECV_Queue, nothing)
+					UI_CreateMinimapBlip(mkr_spawn_outpost_2, 10, "general")
+					
+					-- Remove UI
+					Objective_RemoveUIElements(OBJ_Phase1_Outposts_side1, 2)
+					
+					-- Side Objective +1
+					if Objective_IsCounterSet(OBJ_Phase1_Outposts_side1) then
+						Objective_IncreaseCounter(OBJ_Phase1_Outposts_side1)
+
+						if Obj_GetCounterCount(OBJ_Phase1_Outposts_side1.ID) == Obj_GetCounterMax(OBJ_Phase1_Outposts_side1.ID) then 
+							Objective_Complete(OBJ_Phase1_Outposts_side1, true, true) 
+							
+						end
+					end
+					
+					-- Variable switch
+					cap_outpost_2_kia = true
+					
+				end
+			end
+			-- Ensure raid triggers regardless of outpost entity state
+			Phase1_RovingPatrol_MarkTowerCaptured(2)
+			Phase1_VillageNorth_Assault_raid2()
+		end
+
+		-- Check both groups, complete objective
+		if SGroup_Count(sg_checkpoint_group_1) == 0 then
+			if Objective_IsComplete(OBJ_Phase1_Outposts_side1) == false then
+				Objective_Complete(OBJ_Phase1_Outposts_side1, true, true) 
+			end
+			
+			-- Main Objective +1
+			if Objective_IsCounterSet(OBJ_Phase1_Outposts_Main) then
+				
+				Objective_IncreaseCounter(OBJ_Phase1_Outposts_Main)
+
+				if Obj_GetCounterCount(OBJ_Phase1_Outposts_Main.ID) == Obj_GetCounterMax(OBJ_Phase1_Outposts_Main.ID) then 
+					Objective_Complete(OBJ_Phase1_Outposts_Main, true, true) 
+					
+				end
+			end
+			
+			
+			Rule_RemoveMe()
+		end
+		
+	else
+		Rule_RemoveMe()
+	end
+	
+end
+-- Outposts West
+function Phase1_Outposts_count_side2()
+	
+	if Objective_IsComplete(OBJ_Phase1_Outposts_Main) == false then
+		
+		-- Check Group #3
+		if SGroup_Count(sg_outpost_guards_3) == 0 then
+			
+			-- Check Outpost
+			if World_OwnsEntity(cap_outpost_3) ~= true then
+				
+				-- Captured outpost
+				if Entity_GetPlayerOwner(cap_outpost_3) ~= nil then
+					if Entity_GetPlayerOwner(cap_outpost_3) == player6 and Entity_IsAlive(cap_outpost_3) == true then
+						EGroup_SetPlayerOwner(eg_outpost_3, player5)
+						-- Add Springald upgrade
+						Cmd_InstantUpgrade(eg_outpost_3, UPG.RUS.UPGRADE_WOODEN_CASTLE_SPRINGALD_RUS)
+						Garrison_Building(None, { egroup = eg_outpost_3, amount = GARRISON_FILL_OUTPOST, player = player5 })
+						
+						-- Notification: Point captured
+						UI_CreateEventCueClickable(-1, 15, -1, 0, event_cue_text, "", "low_priority", "", "sfx_campaign_Hastings_horn_reinforcements_arrive", 255, 255, 255, 255, ECV_Queue, nothing)
+						UI_CreateMinimapBlip(mkr_spawn_outpost_3, 10, "general")
+						
+						-- Remove UI
+						Objective_RemoveUIElements(OBJ_Phase1_Outposts_side2, 1)
+						
+						-- Side Objective +1
+						if Objective_IsCounterSet(OBJ_Phase1_Outposts_side2) then
+							Objective_IncreaseCounter(OBJ_Phase1_Outposts_side2)
+							
+							if Obj_GetCounterCount(OBJ_Phase1_Outposts_side2.ID) == Obj_GetCounterMax(OBJ_Phase1_Outposts_side2.ID) then 
+								Objective_Complete(OBJ_Phase1_Outposts_side2, true, true) 
+								
+							end
+						end
+						
+						-- Start allied Raid #3
+						Phase1_VillageNorth_Assault_raid3()
+					end
+					
+					
+				end
+			else
+				-- Destroyed outpost
+				if cap_outpost_3_kia == false then
+					-- Notification: Point captured
+					UI_CreateEventCueClickable(-1, 15, -1, 0, event_cue_text, "", "low_priority", "", "sfx_campaign_Hastings_horn_reinforcements_arrive", 255, 255, 255, 255, ECV_Queue, nothing)
+					UI_CreateMinimapBlip(mkr_spawn_outpost_3, 10, "general")
+					
+					-- Remove UI
+					Objective_RemoveUIElements(OBJ_Phase1_Outposts_side2, 1)
+					
+					-- Side Objective +1
+					if Objective_IsCounterSet(OBJ_Phase1_Outposts_side2) then
+						Objective_IncreaseCounter(OBJ_Phase1_Outposts_side2)
+
+						if Obj_GetCounterCount(OBJ_Phase1_Outposts_side2.ID) == Obj_GetCounterMax(OBJ_Phase1_Outposts_side2.ID) then 
+							Objective_Complete(OBJ_Phase1_Outposts_side2, true, true) 
+							
+						end
+					end
+					
+					-- Variable switch
+					cap_outpost_3_kia = true
+				end
+			end
+			-- Ensure raid triggers regardless of outpost entity state
+			Phase1_RovingPatrol_MarkTowerCaptured(3)
+			Phase1_VillageNorth_Assault_raid3()
+		end
+		
+		-- Check Group #4
+		if SGroup_Count(sg_outpost_guards_4) == 0 then 
+			
+			-- Check Outpost and change owner
+			if World_OwnsEntity(cap_outpost_4) ~= true then
+				-- Captured outpost
+				if Entity_GetPlayerOwner(cap_outpost_4) ~= nil then
+					if Entity_GetPlayerOwner(cap_outpost_4) == player6 and Entity_IsAlive(cap_outpost_4) == true then
+						EGroup_SetPlayerOwner(eg_outpost_4, player5)
+						-- Add Springald upgrade
+						Cmd_InstantUpgrade(eg_outpost_4, UPG.RUS.UPGRADE_WOODEN_CASTLE_SPRINGALD_RUS)
+						Garrison_Building(None, { egroup = eg_outpost_4, amount = GARRISON_FILL_OUTPOST, player = player5 })
+						
+						-- Notification: Point captured
+						UI_CreateEventCueClickable(-1, 15, -1, 0, event_cue_text, "", "low_priority", "", "sfx_campaign_Hastings_horn_reinforcements_arrive", 255, 255, 255, 255, ECV_Queue, nothing)
+						UI_CreateMinimapBlip(mkr_spawn_outpost_4, 10, "general")
+						
+						-- Remove UI
+						Objective_RemoveUIElements(OBJ_Phase1_Outposts_side2, 2)
+						
+						-- Side Objective +1
+						if Objective_IsCounterSet(OBJ_Phase1_Outposts_side2) then
+							Objective_IncreaseCounter(OBJ_Phase1_Outposts_side2)
+							
+							if Obj_GetCounterCount(OBJ_Phase1_Outposts_side2.ID) == Obj_GetCounterMax(OBJ_Phase1_Outposts_side2.ID) then 
+								Objective_Complete(OBJ_Phase1_Outposts_side2, true, true) 
+								
+							end
+						end
+						
+						-- Start allied Raid #4
+						Phase1_VillageNorth_Assault_raid4()
+					end
+					
+				end
+			else
+				-- Destroyed outpost
+				if cap_outpost_4_kia == false then
+					-- Notification: Point captured
+					UI_CreateEventCueClickable(-1, 15, -1, 0, event_cue_text, "", "low_priority", "", "sfx_campaign_Hastings_horn_reinforcements_arrive", 255, 255, 255, 255, ECV_Queue, nothing)
+					UI_CreateMinimapBlip(mkr_spawn_outpost_4, 10, "general")
+					
+					-- Remove UI
+					Objective_RemoveUIElements(OBJ_Phase1_Outposts_side2, 2)
+					
+					-- Side Objective +1
+					if Objective_IsCounterSet(OBJ_Phase1_Outposts_side2) then
+						Objective_IncreaseCounter(OBJ_Phase1_Outposts_side2)
+
+						if Obj_GetCounterCount(OBJ_Phase1_Outposts_side2.ID) == Obj_GetCounterMax(OBJ_Phase1_Outposts_side2.ID) then 
+							Objective_Complete(OBJ_Phase1_Outposts_side2, true, true) 
+							
+						end
+					end
+					
+					-- Variable switch
+					cap_outpost_4_kia = true
+				end
+			end
+			-- Ensure raid triggers regardless of outpost entity state
+			Phase1_RovingPatrol_MarkTowerCaptured(4)
+			Phase1_VillageNorth_Assault_raid4()
+		end
+		
+		-- Check both groups, complete objective
+		if SGroup_Count(sg_checkpoint_group_2) == 0 then
+			if Objective_IsComplete(OBJ_Phase1_Outposts_side2) == false then
+				Objective_Complete(OBJ_Phase1_Outposts_side2, true, true) 
+			end
+			
+			-- Main Objective +1
+			if Objective_IsCounterSet(OBJ_Phase1_Outposts_Main) then
+				
+				Objective_IncreaseCounter(OBJ_Phase1_Outposts_Main)
+
+				if Obj_GetCounterCount(OBJ_Phase1_Outposts_Main.ID) == Obj_GetCounterMax(OBJ_Phase1_Outposts_Main.ID) then 
+					Objective_Complete(OBJ_Phase1_Outposts_Main, true, true) 
+					
+				end
+			end
+			Rule_RemoveMe()
+		end
+		
+	else
+		Rule_RemoveMe()
+	end
+	
+end
+
+function Phase1_Outposts_OnComplete()
+
+	-- Intentionally no legacy fort archer spawn here.
+	-- Friendly outposts are garrisoned at capture-time via Garrison_Building.
+	 
+end
+
+-------------------------------------------
+-- Objective: Capture Village (North)
+-------------------------------------------
+
+function Phase1_VillageNorth_InitObjectives()
+	
+	OBJ_Phase1_VillageNorth_Main = {
+		Title = "$ae948c95a8c5425d8de28e0c193e0be9:8" ,  -- "Prepare for the Village Assault"
+		Type = ObjectiveType_Battle, 
+		OnStart = Phase1_VillageNorth_Start, --when objective start call function
+		OnComplete = Phase1_VillageNorth_OnComplete, -- when objective completes, call function
+	}
+	OBJ_Phase1_VillageNorth_side1 = {
+		Title = "$ae948c95a8c5425d8de28e0c193e0be9:9",  -- "Escort the Allied assault to the Western Village enterance"
+		Type = ObjectiveType_Battle, 
+		Parent = OBJ_Phase1_VillageNorth_Main,
+		--OnComplete =Phase1_VillageNorth_side_OnComplete, -- when objective completes, call function
+	}
+	OBJ_Phase1_VillageNorth_side2 = {
+		Title = "$ae948c95a8c5425d8de28e0c193e0be9:10",  -- "Escort the Allied assault to the Eastern Village enterance"
+		Type = ObjectiveType_Battle, 
+		Parent = OBJ_Phase1_VillageNorth_Main,
+		--OnComplete =Phase1_VillageNorth_side_OnComplete, -- when objective completes, call function
+	}
+	OBJ_Phase1_VillageNorth_side3 = {
+		Title = "$ae948c95a8c5425d8de28e0c193e0be9:11",  -- "Defeat all resistance North of the River"
+		Type = ObjectiveType_Battle, 
+		Parent = OBJ_Phase1_VillageNorth_Main,
+	}
+
+	
+	Objective_Register(OBJ_Phase1_VillageNorth_Main)
+	Objective_Register(OBJ_Phase1_VillageNorth_side1)
+	Objective_Register(OBJ_Phase1_VillageNorth_side2)
+	Objective_Register(OBJ_Phase1_VillageNorth_side3)
+	
+end
+
+function Phase1_VillageNorth_Start()
+	
+	Objective_AddUIElements(OBJ_Phase1_VillageNorth_Main, mkr_spawn_village_2, true, "$11149016", true) -- "Village"
+	Objective_AddUIElements(OBJ_Phase1_VillageNorth_side1, mkr_ally_raid1_3, true, "$40836", true, 4, nil, nil, "icons/objectives/capture_objective", "CaptureObjectiveTemplate") -- "Rally point"
+	Objective_AddUIElements(OBJ_Phase1_VillageNorth_side2, mkr_ally_raid3_4, true, "$40836", true, 4, nil, nil, "icons/objectives/capture_objective", "CaptureObjectiveTemplate") -- "Rally point"
+	Objective_AddUIElements(OBJ_Phase1_VillageNorth_side3, mkr_spawn_village_2, true, "$11149016", true) -- "Village"
+
+	-- Merge group condition for proximity
+	Rule_AddInterval(Phase1_VillageNorth_Group_side1_rule, 1)
+	Rule_AddInterval(Phase1_VillageNorth_Group_side2_rule, 1)
+	
+	-- Escort objective condition
+	Rule_EnterProximity(Phase1_VillageNorth_Assault_proximity_side1, ALL, sg_village_north_attacker_side1, mkr_ally_raid1_3, 50, false, {})
+	Rule_EnterProximity(Phase1_VillageNorth_Assault_proximity_side2, ALL, sg_village_north_attacker_side2, mkr_ally_raid3_4, 50, false, {})
+	
+	-- Final objective condition / Outpost ownership
+	Rule_Add(Phase1_VillageNorth_Rule_Counters)
+	-- Assault start condition
+	Rule_AddInterval(Phase1_VillageNorth_Assault_Start_rule, 1)
+	-- Monitor for late-spawning escort groups
+	Rule_AddInterval(Phase1_VillageNorth_Assault_Monitor, 1)
+	
+end
+
+-- Allied escort #1 finished
+function Phase1_VillageNorth_Assault_proximity_side1()
+	if Objective_IsComplete(OBJ_Phase1_VillageNorth_Main) == true then
+		Rule_RemoveMe()
+		return
+	end
+	
+	-- Win/Fail side Objective #1 
+	if SGroup_Count(sg_village_north_attacker_1) + SGroup_Count(sg_village_north_attacker_2) >= 20 then
+		Objective_Complete(OBJ_Phase1_VillageNorth_side1, true, true) 
+		Objective_RemoveUIElements(OBJ_Phase1_VillageNorth_side1, 1)
+		Rule_RemoveMe()
+	else
+		Objective_Fail(OBJ_Phase1_VillageNorth_side1, true, true)
+		Objective_RemoveUIElements(OBJ_Phase1_VillageNorth_side1, 1)
+		Rule_RemoveMe()
+	end
+	
+	-- Check assault progress
+	if Objective_IsStarted(OBJ_Phase1_VillageNorth_side3) == true then
+		
+		-- Play horn to signal attack
+		Sound_Play2D("sfx_campaign_Hastings_horn_reinforcements_arrive")
+		
+		-- Attack Waypoints / Raid #1
+		Cmd_FormationAttackMove(sg_village_north_attacker_1, mkr_spawn_village_1, false)
+		Cmd_FormationAttackMove(sg_village_north_attacker_1, mkr_spawn_village_2, true)
+		Cmd_FormationAttackMove(sg_village_north_attacker_1, mkr_spawn_village_3, true)
+		Cmd_FormationAttackMove(sg_village_north_attacker_1, mkr_spawn_village_4, true)
+		Cmd_FormationAttackMove(sg_village_north_attacker_1, mkr_spawn_village_1, true)
+		-- Attack Waypoints / Raid #2
+		Cmd_FormationAttackMove(sg_village_north_attacker_2, mkr_spawn_village_1, false)
+		Cmd_FormationAttackMove(sg_village_north_attacker_2, mkr_spawn_village_2, true)
+		Cmd_FormationAttackMove(sg_village_north_attacker_2, mkr_spawn_village_3, true)
+		Cmd_FormationAttackMove(sg_village_north_attacker_2, mkr_spawn_village_4, true)
+		Cmd_FormationAttackMove(sg_village_north_attacker_2, mkr_village_rally_2, true)
+	end
+
+end
+-- Allied escort #2 finished
+function Phase1_VillageNorth_Assault_proximity_side2()
+	if Objective_IsComplete(OBJ_Phase1_VillageNorth_Main) == true then
+		Rule_RemoveMe()
+		return
+	end
+	
+	-- Win/Fail side Objective #1 
+	if SGroup_Count(sg_village_north_attacker_3) + SGroup_Count(sg_village_north_attacker_4) >= 20 then
+		Objective_Complete(OBJ_Phase1_VillageNorth_side2, true, true) 
+		Objective_RemoveUIElements(OBJ_Phase1_VillageNorth_side2, 1)
+		Rule_RemoveMe()
+	else
+		Objective_Fail(OBJ_Phase1_VillageNorth_side2, true, true)
+		Objective_RemoveUIElements(OBJ_Phase1_VillageNorth_side2, 1)
+		Rule_RemoveMe()
+	end
+	
+	-- Check assault progress
+	if Objective_IsStarted(OBJ_Phase1_VillageNorth_side3) == true then
+		
+		-- Play horn to signal attack
+		Sound_Play2D("sfx_campaign_Hastings_horn_reinforcements_arrive")
+		
+		-- Attack Waypoints / Raid #3
+		Cmd_FormationAttackMove(sg_village_north_attacker_3, mkr_spawn_village_4, false)
+		Cmd_FormationAttackMove(sg_village_north_attacker_3, mkr_spawn_village_3, true)
+		Cmd_FormationAttackMove(sg_village_north_attacker_3, mkr_spawn_village_2, true)
+		Cmd_FormationAttackMove(sg_village_north_attacker_3, mkr_spawn_village_1, true)
+		Cmd_FormationAttackMove(sg_village_north_attacker_3, mkr_village_rally_1, true)
+		-- Attack Waypoints / Raid #4
+		Cmd_FormationAttackMove(sg_village_north_attacker_4, mkr_spawn_village_4, false)
+		Cmd_FormationAttackMove(sg_village_north_attacker_4, mkr_spawn_village_3, true)
+		Cmd_FormationAttackMove(sg_village_north_attacker_4, mkr_spawn_village_2, true)
+		Cmd_FormationAttackMove(sg_village_north_attacker_4, mkr_spawn_village_1, true)
+		Cmd_FormationAttackMove(sg_village_north_attacker_4, mkr_spawn_village_4, true)
+		
+		
+	end
+	
+	
+
+end 
+
+-- Rule: SGroup merge #1
+function Phase1_VillageNorth_Group_side1_rule()
+	
+	if raid_started_1 == true and raid_started_2 == true then
+		-- Rules
+		Rule_AddOneShot(Phase1_VillageNorth_Group_side1_delayed, 41)
+		Rule_RemoveMe()
+	end
+		
+	
+end
+
+function Phase1_VillageNorth_Group_side1_delayed()
+	
+	-- Merge groups
+	SGroup_AddGroup(sg_village_north_attacker_side1, sg_village_north_attacker_1)
+	SGroup_AddGroup(sg_village_north_attacker_side1, sg_village_north_attacker_2)
+	-- Disable path UI 
+	MarkerPaths_ClearIcons("wave_path_1") -- Raid #1
+	MarkerPaths_ClearIcons("wave_path_2") -- Raid #1
+	
+end
+-- Rule: SGroup merge #2
+function Phase1_VillageNorth_Group_side2_rule()
+	
+	if raid_started_3 == true and raid_started_4 == true then
+		-- Rules
+		Rule_AddOneShot(Phase1_VillageNorth_Group_side2_delayed, 51)
+		Rule_RemoveMe()
+	end
+		
+	
+end
+
+function Phase1_VillageNorth_Group_side2_delayed()
+	
+	-- Merge groups
+	SGroup_AddGroup(sg_village_north_attacker_side2, sg_village_north_attacker_3)
+	SGroup_AddGroup(sg_village_north_attacker_side2, sg_village_north_attacker_4)
+	-- Disable path UI 
+	MarkerPaths_ClearIcons("wave_path_3") -- Raid #3
+	MarkerPaths_ClearIcons("wave_path_4") -- Raid #4
+	
+end
+
+-- Allied AI Assault groups position near the Village Enterance
+function Phase1_VillageNorth_Assault_raid1()
+	
+	if raid_started_1 == false then
+		
+	-- Start main objective
+	if Objective_IsStarted(OBJ_Phase1_VillageNorth_Main) == false then
+		Objective_Start(OBJ_Phase1_VillageNorth_Main,true, false)
+	end
+	-- Start side objective #1
+	if Objective_IsComplete(OBJ_Phase1_VillageNorth_Main) == false and Objective_IsStarted(OBJ_Phase1_VillageNorth_side1) == false then
+		Objective_Start(OBJ_Phase1_VillageNorth_side1,true, false)
+	end
+	
+	local event_cue_text_reinforcements = Loc_FormatText("$11179775")  -- "Reinforcements arriving soon"
+	
+	-- Enable path UI / Assault #1
+	MarkerPaths_GenerateIcons("wave_path_1", AllMarkers_FromName("mkr_path_village_1", ""), "military_route_ally")
+	-- Notification
+	UI_CreateEventCueClickable(-1, 30, -1, 0, event_cue_text_reinforcements, "", "low_priority", "", "sfx_campaign_scripted_ui_objective_counter_update", 255, 255, 255, 255, ECV_Queue, nothing)
+	UI_CreateMinimapBlip(mkr_spawn_1, 30, "general")
+	
+	-- Spawn enemey defenders
+	UnitEntry_DeploySquads(player6, sg_village_north_defender_1, Unit_Types.units_camp, mkr_spawn_temp_reinforcements1)
+	Cmd_FormationAttackMove(sg_village_north_defender_1, mkr_spawn_outpost_1)
+	
+	-- Spawn allied Assault #1
+	Rule_AddOneShot(Units_Deploy, 30, { player = player5, sgroup = sg_village_north_attacker_1, unit_type = Unit_Types.wave_city_10m, spawn_loc = mkr_spawn_1, path = ally_assault_1 })
+	SGroup_AddGroup(sg_village_north_attacker_side1, sg_village_north_attacker_1)
+	
+	raid_started_1 = true
+end
+	
+end
+
+function Phase1_VillageNorth_Assault_raid2()
+	
+	if raid_started_2 == false then
+		
+		-- Start main objective
+		if Objective_IsStarted(OBJ_Phase1_VillageNorth_Main) == false then
+			Objective_Start(OBJ_Phase1_VillageNorth_Main,true, false)
+		end
+		-- Start side objective #1
+		if Objective_IsComplete(OBJ_Phase1_VillageNorth_Main) == false and Objective_IsStarted(OBJ_Phase1_VillageNorth_side1) == false then
+			Objective_Start(OBJ_Phase1_VillageNorth_side1,true, false)
+		end
+		
+		local event_cue_text_reinforcements = Loc_FormatText("$11179775")  -- "Reinforcements arriving soon"
+		
+		-- Enable  path UI / Raid #2
+		MarkerPaths_GenerateIcons("wave_path_2", AllMarkers_FromName("mkr_path_village_2", ""), "military_route_ally")
+		-- Notification
+		UI_CreateEventCueClickable(-1, 35, -1, 0, event_cue_text_reinforcements, "", "low_priority", "", "sfx_campaign_scripted_ui_objective_counter_update", 255, 255, 255, 255, ECV_Queue, nothing)
+		UI_CreateMinimapBlip(mkr_spawn_2, 35, "general")
+		
+		-- Spawn enemey defenders
+		UnitEntry_DeploySquads(player6, sg_village_north_defender_2, Unit_Types.units_camp, mkr_spawn_temp_reinforcements1)
+		Cmd_FormationAttackMove(sg_village_north_defender_2, mkr_spawn_outpost_2)
+		-- Check reserve group at checkpoint reserves & send to attack
+		if SGroup_Count(sg_checkpoint_units_4) > 0.5 * count_checkpoint_reserves then
+			Cmd_FormationAttackMove(sg_checkpoint_units_4, mkr_ally_raid2_3, false)
+			Cmd_FormationAttackMove(sg_checkpoint_units_4, mkr_ally_raid2_2, true)
+		end
+		
+		
+		-- Spawn allied Assault #2
+		Rule_AddOneShot(Units_Deploy, 40, { player = player5, sgroup = sg_village_north_attacker_2, unit_type = Unit_Types.wave_city_10m, spawn_loc = mkr_spawn_2, path = ally_assault_2 })
+		SGroup_AddGroup(sg_village_north_attacker_side1, sg_village_north_attacker_2)
+		
+		raid_started_2 = true
+	end
+	
+end
+
+function Phase1_VillageNorth_Assault_raid3()
+	
+	if raid_started_3 == false then
+		
+		-- Start main objective
+		if Objective_IsStarted(OBJ_Phase1_VillageNorth_Main) == false then
+			Objective_Start(OBJ_Phase1_VillageNorth_Main,true, false)
+		end
+		-- Start side objective #2
+		if Objective_IsComplete(OBJ_Phase1_VillageNorth_Main) == false and Objective_IsStarted(OBJ_Phase1_VillageNorth_side2) == false then
+			Objective_Start(OBJ_Phase1_VillageNorth_side2,true, false)
+		end
+		
+		local event_cue_text_reinforcements = Loc_FormatText("$11179775")  -- "Reinforcements arriving soon"
+		
+		-- Enable  path UI / Raid #3
+		MarkerPaths_GenerateIcons("wave_path_3", AllMarkers_FromName("mkr_path_village_3", ""), "military_route_ally")
+		
+		-- Notification
+		UI_CreateEventCueClickable(-1, 35, -1, 0, event_cue_text_reinforcements, "", "low_priority", "", "sfx_campaign_scripted_ui_objective_counter_update", 255, 255, 255, 255, ECV_Queue, nothing)
+		UI_CreateMinimapBlip(mkr_spawn_3, 35, "general")
+		
+		-- Spawn enemey defenders
+		UnitEntry_DeploySquads(player6, sg_village_north_defender_3, Unit_Types.units_camp, mkr_spawn_siege_1)
+		Cmd_FormationAttackMove(sg_village_north_defender_3, mkr_spawn_outpost_3, false)
+		Cmd_FormationAttackMove(sg_village_north_defender_3, mkr_ally_raid3_4, true)
+		
+		-- Spawn allied Assault #3
+		Rule_AddOneShot(Units_Deploy, 40, { player = player5, sgroup = sg_village_north_attacker_3, unit_type = Unit_Types.wave_city_10m, spawn_loc = mkr_spawn_3, path = ally_assault_3 })
+		SGroup_AddGroup(sg_village_north_attacker_side2, sg_village_north_attacker_3)
+		
+		raid_started_3 = true
+	end
+	
+end
+
+function Phase1_VillageNorth_Assault_raid4()
+	
+	if raid_started_4 == false then
+		
+		-- Start main objective
+		if Objective_IsStarted(OBJ_Phase1_VillageNorth_Main) == false then
+			Objective_Start(OBJ_Phase1_VillageNorth_Main,true, false)
+		end
+		-- Start side objective #2
+		if Objective_IsComplete(OBJ_Phase1_VillageNorth_Main) == false and Objective_IsStarted(OBJ_Phase1_VillageNorth_side2) == false then
+			Objective_Start(OBJ_Phase1_VillageNorth_side2,true, false)
+		end
+		
+		local event_cue_text_reinforcements = Loc_FormatText("$11179775")  -- "Reinforcements arriving soon"
+		
+		-- Enable  path UI / Raid #4
+		MarkerPaths_GenerateIcons("wave_path_4", AllMarkers_FromName("mkr_path_village_4", ""), "military_route_ally")
+		
+		-- Notification
+		UI_CreateEventCueClickable(-1, 45, -1, 0, event_cue_text_reinforcements, "", "low_priority", "", "sfx_campaign_scripted_ui_objective_counter_update", 255, 255, 255, 255, ECV_Queue, nothing)
+		UI_CreateMinimapBlip(mkr_spawn_4, 45, "general")
+		
+		-- Spawn enemey defenders
+		UnitEntry_DeploySquads(player6, sg_village_north_defender_4, Unit_Types.units_camp, mkr_spawn_temp_reinforcements2)
+		Cmd_FormationAttackMove(sg_village_north_defender_4, mkr_ally_raid4_2, false)
+		Cmd_FormationAttackMove(sg_village_north_defender_4, mkr_ally_raid4_3, true)
+		Cmd_FormationAttackMove(sg_village_north_defender_4, mkr_ally_raid4_2, true)
+		
+		-- Spawn allied Assault #4
+		Rule_AddOneShot(Units_Deploy, 50, { player = player5, sgroup = sg_village_north_attacker_4, unit_type = Unit_Types.wave_city_10m, spawn_loc = mkr_spawn_4, path = ally_assault_4 })
+		SGroup_AddGroup(sg_village_north_attacker_side2, sg_village_north_attacker_4)
+		
+		raid_started_4 = true
+	end
+	
+end
+
+-- Conditions / Allied AI assault
+function Phase1_VillageNorth_Assault_Start_rule()
+	
+	if Objective_IsStarted(OBJ_Phase1_VillageNorth_side3) == false then
+		if Objective_IsComplete(OBJ_Phase1_VillageNorth_side1) == true or Objective_IsFailed(OBJ_Phase1_VillageNorth_side1) == true then
+			if Objective_IsComplete(OBJ_Phase1_VillageNorth_side2) == true or Objective_IsFailed(OBJ_Phase1_VillageNorth_side2) == true then
+				
+				
+				-- Start side Objective #3
+				if Objective_IsStarted(OBJ_Phase1_VillageNorth_side3) == false and (assault_active_1 == false or assault_active_2 == false) then
+					Objective_Start(OBJ_Phase1_VillageNorth_side3,true, false)
+					Phase1_VillageNorth_Assault_StallFallback_Register()
+					Phase1_VillageNorth_AttackerRespawn_Register()
+					-- Play horn to signal attack (3x)
+					Sound_Play2D("sfx_campaign_Hastings_horn_retreat")
+				end
+				
+				
+				
+				-- Spawn defenders
+				if assault_active_1 == false or assault_active_2 == false then
+					Spawn_Village_South_Enemey()
+				end
+				
+				-- Start assault #1
+				if assault_active_1 == false then
+					-- Issue attack commands to Raid #1 (only if spawned and present)
+					if raid_started_1 == true and attack_commands_issued_1 == false and SGroup_Count(sg_village_north_attacker_1) > 0 then
+						Cmd_FormationAttackMove(sg_village_north_attacker_1, mkr_spawn_village_1, false)
+						Cmd_FormationAttackMove(sg_village_north_attacker_1, mkr_spawn_village_2, true)
+						Cmd_FormationAttackMove(sg_village_north_attacker_1, mkr_spawn_village_3, true)
+						Cmd_FormationAttackMove(sg_village_north_attacker_1, mkr_spawn_village_4, true)
+						Cmd_FormationAttackMove(sg_village_north_attacker_1, mkr_spawn_village_1, true)
+						attack_commands_issued_1 = true
+					end
+					-- Issue attack commands to Raid #2 (only if spawned and present)
+					if raid_started_2 == true and attack_commands_issued_2 == false and SGroup_Count(sg_village_north_attacker_2) > 0 then
+						Cmd_FormationAttackMove(sg_village_north_attacker_2, mkr_spawn_village_1, false)
+						Cmd_FormationAttackMove(sg_village_north_attacker_2, mkr_spawn_village_2, true)
+						Cmd_FormationAttackMove(sg_village_north_attacker_2, mkr_spawn_village_3, true)
+						Cmd_FormationAttackMove(sg_village_north_attacker_2, mkr_spawn_village_4, true)
+						Cmd_FormationAttackMove(sg_village_north_attacker_2, mkr_village_rally_2, true)
+						attack_commands_issued_2 = true
+					end
+					-- Toggle condition
+					assault_active_1 = true
+				end
+				
+				-- Start assault #2
+				if assault_active_2 == false then
+					-- Issue attack commands to Raid #3 (only if spawned and present)
+					if raid_started_3 == true and attack_commands_issued_3 == false and SGroup_Count(sg_village_north_attacker_3) > 0 then
+						Cmd_FormationAttackMove(sg_village_north_attacker_3, mkr_spawn_village_4, false)
+						Cmd_FormationAttackMove(sg_village_north_attacker_3, mkr_spawn_village_3, true)
+						Cmd_FormationAttackMove(sg_village_north_attacker_3, mkr_spawn_village_2, true)
+						Cmd_FormationAttackMove(sg_village_north_attacker_3, mkr_spawn_village_1, true)
+						Cmd_FormationAttackMove(sg_village_north_attacker_3, mkr_village_rally_1, true)
+						attack_commands_issued_3 = true
+					end
+					-- Issue attack commands to Raid #4 (only if spawned and present)
+					if raid_started_4 == true and attack_commands_issued_4 == false and SGroup_Count(sg_village_north_attacker_4) > 0 then
+						Cmd_FormationAttackMove(sg_village_north_attacker_4, mkr_spawn_village_4, false)
+						Cmd_FormationAttackMove(sg_village_north_attacker_4, mkr_spawn_village_3, true)
+						Cmd_FormationAttackMove(sg_village_north_attacker_4, mkr_spawn_village_2, true)
+						Cmd_FormationAttackMove(sg_village_north_attacker_4, mkr_spawn_village_1, true)
+						Cmd_FormationAttackMove(sg_village_north_attacker_4, mkr_spawn_village_4, true)
+						attack_commands_issued_4 = true
+					end
+					-- Toggle condition
+					assault_active_2 = true
+				end
+				
+				-- Finished / Remove rule (once assault phases are triggered, let monitor handle late spawns)
+				if assault_active_1 == true and assault_active_2 == true then
+					Rule_RemoveMe()
+				end
+			end
+		end
+	end
+	
+end
+
+-- Monitor for late-spawning groups and issue attack commands if assault already active
+function Phase1_VillageNorth_Assault_Monitor()
+	
+	-- If assault #1 is active, check if any Assault #1 groups spawned late
+	if assault_active_1 == true then
+		if raid_started_1 == true and attack_commands_issued_1 == false and SGroup_Count(sg_village_north_attacker_1) > 0 then
+			Cmd_FormationAttackMove(sg_village_north_attacker_1, mkr_spawn_village_1, false)
+			Cmd_FormationAttackMove(sg_village_north_attacker_1, mkr_spawn_village_2, true)
+			Cmd_FormationAttackMove(sg_village_north_attacker_1, mkr_spawn_village_3, true)
+			Cmd_FormationAttackMove(sg_village_north_attacker_1, mkr_spawn_village_4, true)
+			Cmd_FormationAttackMove(sg_village_north_attacker_1, mkr_spawn_village_1, true)
+			attack_commands_issued_1 = true
+		end
+		if raid_started_2 == true and attack_commands_issued_2 == false and SGroup_Count(sg_village_north_attacker_2) > 0 then
+			Cmd_FormationAttackMove(sg_village_north_attacker_2, mkr_spawn_village_1, false)
+			Cmd_FormationAttackMove(sg_village_north_attacker_2, mkr_spawn_village_2, true)
+			Cmd_FormationAttackMove(sg_village_north_attacker_2, mkr_spawn_village_3, true)
+			Cmd_FormationAttackMove(sg_village_north_attacker_2, mkr_spawn_village_4, true)
+			Cmd_FormationAttackMove(sg_village_north_attacker_2, mkr_village_rally_2, true)
+			attack_commands_issued_2 = true
+		end
+	end
+	
+	-- If assault #2 is active, check if any Assault #2 groups spawned late
+	if assault_active_2 == true then
+		if raid_started_3 == true and attack_commands_issued_3 == false and SGroup_Count(sg_village_north_attacker_3) > 0 then
+			Cmd_FormationAttackMove(sg_village_north_attacker_3, mkr_spawn_village_4, false)
+			Cmd_FormationAttackMove(sg_village_north_attacker_3, mkr_spawn_village_3, true)
+			Cmd_FormationAttackMove(sg_village_north_attacker_3, mkr_spawn_village_2, true)
+			Cmd_FormationAttackMove(sg_village_north_attacker_3, mkr_spawn_village_1, true)
+			Cmd_FormationAttackMove(sg_village_north_attacker_3, mkr_village_rally_1, true)
+			attack_commands_issued_3 = true
+		end
+		if raid_started_4 == true and attack_commands_issued_4 == false and SGroup_Count(sg_village_north_attacker_4) > 0 then
+			Cmd_FormationAttackMove(sg_village_north_attacker_4, mkr_spawn_village_4, false)
+			Cmd_FormationAttackMove(sg_village_north_attacker_4, mkr_spawn_village_3, true)
+			Cmd_FormationAttackMove(sg_village_north_attacker_4, mkr_spawn_village_2, true)
+			Cmd_FormationAttackMove(sg_village_north_attacker_4, mkr_spawn_village_1, true)
+			Cmd_FormationAttackMove(sg_village_north_attacker_4, mkr_spawn_village_4, true)
+			attack_commands_issued_4 = true
+		end
+	end
+	
+	-- Remove this monitor once all groups have received commands
+	if attack_commands_issued_1 == true and attack_commands_issued_2 == true and attack_commands_issued_3 == true and attack_commands_issued_4 == true then
+		Rule_RemoveMe()
+	end
+	
+end
+
+function Phase1_VillageNorth_Assault_StallFallback_Register()
+	if PHASE1_VILLAGE_NORTH_FALLBACK_ACTIVE == false then
+		Rule_AddInterval(Phase1_VillageNorth_Assault_StallFallback, 1)
+		PHASE1_VILLAGE_NORTH_FALLBACK_ACTIVE = true
+	end
+end
+
+function Phase1_VillageNorth_Assault_StallFallback()
+	if Objective_IsComplete(OBJ_Phase1_VillageNorth_Main) == true then
+		PHASE1_VILLAGE_NORTH_FALLBACK_ACTIVE = false
+		Rule_RemoveMe()
+		return
+	end
+
+	if Objective_IsStarted(OBJ_Phase1_VillageNorth_side3) == false then
+		return
+	end
+
+	-- Side #3 is active, so both assault lanes should be considered active for late-spawn monitoring.
+	assault_active_1 = true
+	assault_active_2 = true
+
+	if raid_started_1 == true and attack_commands_issued_1 == false and SGroup_Count(sg_village_north_attacker_1) > 0 then
+		Cmd_FormationAttackMove(sg_village_north_attacker_1, mkr_spawn_village_1, false)
+		Cmd_FormationAttackMove(sg_village_north_attacker_1, mkr_spawn_village_2, true)
+		Cmd_FormationAttackMove(sg_village_north_attacker_1, mkr_spawn_village_3, true)
+		Cmd_FormationAttackMove(sg_village_north_attacker_1, mkr_spawn_village_4, true)
+		Cmd_FormationAttackMove(sg_village_north_attacker_1, mkr_spawn_village_1, true)
+		attack_commands_issued_1 = true
+	end
+
+	if raid_started_2 == true and attack_commands_issued_2 == false and SGroup_Count(sg_village_north_attacker_2) > 0 then
+		Cmd_FormationAttackMove(sg_village_north_attacker_2, mkr_spawn_village_1, false)
+		Cmd_FormationAttackMove(sg_village_north_attacker_2, mkr_spawn_village_2, true)
+		Cmd_FormationAttackMove(sg_village_north_attacker_2, mkr_spawn_village_3, true)
+		Cmd_FormationAttackMove(sg_village_north_attacker_2, mkr_spawn_village_4, true)
+		Cmd_FormationAttackMove(sg_village_north_attacker_2, mkr_village_rally_2, true)
+		attack_commands_issued_2 = true
+	end
+
+	if raid_started_3 == true and attack_commands_issued_3 == false and SGroup_Count(sg_village_north_attacker_3) > 0 then
+		Cmd_FormationAttackMove(sg_village_north_attacker_3, mkr_spawn_village_4, false)
+		Cmd_FormationAttackMove(sg_village_north_attacker_3, mkr_spawn_village_3, true)
+		Cmd_FormationAttackMove(sg_village_north_attacker_3, mkr_spawn_village_2, true)
+		Cmd_FormationAttackMove(sg_village_north_attacker_3, mkr_spawn_village_1, true)
+		Cmd_FormationAttackMove(sg_village_north_attacker_3, mkr_village_rally_1, true)
+		attack_commands_issued_3 = true
+	end
+
+	if raid_started_4 == true and attack_commands_issued_4 == false and SGroup_Count(sg_village_north_attacker_4) > 0 then
+		Cmd_FormationAttackMove(sg_village_north_attacker_4, mkr_spawn_village_4, false)
+		Cmd_FormationAttackMove(sg_village_north_attacker_4, mkr_spawn_village_3, true)
+		Cmd_FormationAttackMove(sg_village_north_attacker_4, mkr_spawn_village_2, true)
+		Cmd_FormationAttackMove(sg_village_north_attacker_4, mkr_spawn_village_1, true)
+		Cmd_FormationAttackMove(sg_village_north_attacker_4, mkr_spawn_village_4, true)
+		attack_commands_issued_4 = true
+	end
+
+	if attack_commands_issued_1 == true and attack_commands_issued_2 == true and attack_commands_issued_3 == true and attack_commands_issued_4 == true then
+		PHASE1_VILLAGE_NORTH_FALLBACK_ACTIVE = false
+		Rule_RemoveMe()
+	end
+end
+
+-- Conditions / SGroup counts / Outpost ownership
+function Phase1_VillageNorth_Rule_Counters()
+	
+	local event_cue_text = Loc_FormatText("$2158694") -- "Point captured"
+	
+	
+	if Objective_IsComplete(OBJ_Phase1_VillageNorth_Main) == false then
+		
+		-- Check Outpost Group #1
+		if SGroup_Count(sg_village_north_guards_1) == 0  then
+			
+			-- Check Outpost and change owner
+			if World_OwnsEntity(vil_outpost_1) ~= true then
+				if Entity_GetPlayerOwner(vil_outpost_1) ~= nil then
+					if Entity_GetPlayerOwner(vil_outpost_1) == player6 and Entity_IsAlive(vil_outpost_1) == true then
+						Entity_SetPlayerOwner(vil_outpost_1, player5)
+						
+						-- Add Springald upgrade
+						Entity_CompleteUpgrade(vil_outpost_1, UPG.RUS.UPGRADE_WOODEN_CASTLE_SPRINGALD_RUS)
+						GarrisonCapturedEntity(vil_outpost_1, GARRISON_FILL_OUTPOST)
+						
+						-- Notification: Point captured
+						UI_CreateEventCueClickable(-1, 15, -1, 0, event_cue_text, "", "low_priority", "", "sfx_ui_event_queue_campaign_objective_start", 255, 255, 255, 255, ECV_Queue, nothing)
+						UI_CreateMinimapBlip(mkr_spawn_village_1_rng, 15, "general")
+					end
+				end
+			end
+		end
+		-- Check Outpost Group #2
+		if SGroup_Count(sg_village_north_guards_3) == 0  then
+			
+			-- Check Outpost and change owner
+			if World_OwnsEntity(vil_outpost_2) ~= true then
+				if Entity_GetPlayerOwner(vil_outpost_2) ~= nil then
+					if Entity_GetPlayerOwner(vil_outpost_2) == player6 and Entity_IsAlive(vil_outpost_2) == true then
+						Entity_SetPlayerOwner(vil_outpost_2, player5)
+						
+						-- Add Springald upgrade
+						Entity_CompleteUpgrade(vil_outpost_2, UPG.RUS.UPGRADE_WOODEN_CASTLE_SPRINGALD_RUS)
+						GarrisonCapturedEntity(vil_outpost_2, GARRISON_FILL_OUTPOST)
+						
+						-- Notification: Point captured
+						UI_CreateEventCueClickable(-1, 15, -1, 0, event_cue_text, "", "low_priority", "", "sfx_ui_event_queue_campaign_objective_start", 255, 255, 255, 255, ECV_Queue, nothing)
+						UI_CreateMinimapBlip(mkr_spawn_village_3_rng, 15, "general")
+					end
+				end
+			end
+		end
+		-- Check Outpost Group #3
+		if SGroup_Count(sg_village_north_guards_4) == 0  then
+			
+			-- Check Outpost and change owner
+			if World_OwnsEntity(vil_outpost_3) ~= true then
+				if Entity_GetPlayerOwner(vil_outpost_3) ~= nil then
+					if Entity_GetPlayerOwner(vil_outpost_3) == player6 and Entity_IsAlive(vil_outpost_3) == true then
+						Entity_SetPlayerOwner(vil_outpost_3, player5)
+						
+						-- Add Springald upgrade
+						Entity_CompleteUpgrade(vil_outpost_3, UPG.RUS.UPGRADE_WOODEN_CASTLE_SPRINGALD_RUS)
+						GarrisonCapturedEntity(vil_outpost_3, GARRISON_FILL_OUTPOST)
+						
+						-- Notification: Point captured
+						UI_CreateEventCueClickable(-1, 15, -1, 0, event_cue_text, "", "low_priority", "", "sfx_ui_event_queue_campaign_objective_start", 255, 255, 255, 255, ECV_Queue, nothing)
+						UI_CreateMinimapBlip(mkr_spawn_village_4_rng, 15, "general")
+					end	
+				end
+			end
+		end
+		
+		-- Check Village Groups, complete objective
+		if SGroup_Count(sg_village_north_group_all) == 0 then
+			if Objective_IsComplete(OBJ_Phase1_VillageNorth_Main) == false then
+				Objective_Complete(OBJ_Phase1_VillageNorth_Main, true, true) 
+			end
+		end
+		
+		-- Check Foward Groups incase players assault early / Start assault, side #1
+		if SGroup_Count(sg_village_north_guards_1) <= 25 then
+			
+			-- Start main objective if players engage early
+			if Objective_IsStarted(OBJ_Phase1_VillageNorth_Main) == false then
+				Objective_Start(OBJ_Phase1_VillageNorth_Main, true, false)
+			end
+			
+			-- Enable objective
+			if Objective_IsStarted(OBJ_Phase1_VillageNorth_side3) == false then
+				Objective_Start(OBJ_Phase1_VillageNorth_side3, true, false)
+				Phase1_VillageNorth_Assault_StallFallback_Register()
+				Phase1_VillageNorth_AttackerRespawn_Register()
+				
+				-- Legacy inline routing removed: fallback monitor now handles consistent commands for all groups.
+				Spawn_Village_South_Enemey()
+			end
+		end
+		-- Check Foward Groups incase players assault early / Start assault, side #2
+		if SGroup_Count(sg_village_north_guards_4) <= 25 then
+			
+			-- Start main objective if players engage early
+			if Objective_IsStarted(OBJ_Phase1_VillageNorth_Main) == false then
+				Objective_Start(OBJ_Phase1_VillageNorth_Main, true, false)
+			end
+			
+			-- Enable objective
+			if Objective_IsStarted(OBJ_Phase1_VillageNorth_side3) == false then
+				Objective_Start(OBJ_Phase1_VillageNorth_side3, true, false)
+				Phase1_VillageNorth_Assault_StallFallback_Register()
+				Phase1_VillageNorth_AttackerRespawn_Register()
+				
+				-- Legacy inline routing removed: fallback monitor now handles consistent commands for all groups.
+				Spawn_Village_South_Enemey()
+			end
+		end
+		
+	else
+		Rule_RemoveMe()
+	end
+	
+end
+
+function Phase1_VillageNorth_OnComplete()
+	Objective_RemoveUIElements(OBJ_Phase1_VillageNorth_Main, 1)
+	Objective_RemoveUIElements(OBJ_Phase1_VillageNorth_side1, 1)
+	Objective_RemoveUIElements(OBJ_Phase1_VillageNorth_side2, 1)
+	Objective_RemoveUIElements(OBJ_Phase1_VillageNorth_side3, 1)
+	
+	-- Set ownership buildings 
+	EGroup_SetPlayerOwner(eg_village_north, player5)
+	-- Add healing ability on Religious building
+	EGroup_Filter(eg_village_north, EBP.RUS.BUILDING_UNIT_RELIGIOUS_CONTROL_RUS, FILTER_REMOVE, eg_religious_1)
+	EGroup_AddAbility(eg_religious_1, BP_GetAbilityBlueprintByPbgID(202453))
+	
+	-- Enable damage for Town Center
+	local TC_North = EGroup_GetClosestEntity(eg_village_north, mkr_tc_north)
+	Entity_SetInvulnerable(TC_North, false, -1)
+	EGroup_SetTargetingType(eg_village_north, Targeting_Automatic)
+	
+	-- Set positions Allied AI
+	if SGroup_Count(sg_village_north_attacker_1) >= 1 then
+		Cmd_FormationAttackMove(sg_village_north_attacker_1, mkr_spawn_village_1, false)
+	end
+	if SGroup_Count(sg_village_north_attacker_2) >= 1 then
+		Cmd_FormationAttackMove(sg_village_north_attacker_2, mkr_village_rally_2, false)
+	end
+	if SGroup_Count(sg_village_north_attacker_3) >= 1 then
+		Cmd_FormationAttackMove(sg_village_north_attacker_3, mkr_village_rally_1, false)
+	end
+	if SGroup_Count(sg_village_north_attacker_4) >= 1 then
+		Cmd_FormationAttackMove(sg_village_north_attacker_4, mkr_spawn_village_4, false)
+	end
+	
+	-- Start next objective
+	Objective_Start(OBJ_Phase1_VillageDefence_Main,true, false)
+	Objective_Start(OBJ_Phase1_VillageDefence_north,true, false)
+	
+	-- Add enemey upgrades
+	Difficulty_Phase1_Upgrades()
+	
+	-- Last time / Sometimes skips during debug
+	Spawn_Village_South_Enemey()
+	
+	-- Spawn Outer City defenders
+	Spawn_CityDefenders_enemey_ex()
+
+	-- Transition side patrols from outpost support to village flank defense.
+	Phase1_RovingPatrol_TransitionToFlankGuard()
+	
+end
+
+-------------------------------------------
+-- Objective: Defend Village
+-------------------------------------------
+
+function Phase1_VillageDefence_InitObjectives()
+	
+	OBJ_Phase1_VillageDefence_Main = {
+		Title = "$ae948c95a8c5425d8de28e0c193e0be9:12",  -- "Defend the Village"
+		Type = ObjectiveType_Primary, 
+		OnStart = Phase1_VillageDefence_Start, --when objective start call function
+		--OnComplete = Phase1_VillageDefence_OnComplete, -- when objective completes, call function
+	}
+	OBJ_Phase1_VillageDefence_north = {
+		Title = "$ae948c95a8c5425d8de28e0c193e0be9:13",  -- "The Northern Town Center must survive"
+		Type = ObjectiveType_Primary, 
+		Parent = OBJ_Phase1_VillageDefence_Main,
+		--OnComplete =Phase1_VillageNorth_side_OnComplete, -- when objective completes, call function
+	}
+	OBJ_Phase1_VillageDefence_south = {
+		Title = "$ae948c95a8c5425d8de28e0c193e0be9:18",  -- "The Southern Town Center must survive"
+		Type = ObjectiveType_Primary, 
+		Parent = OBJ_Phase1_VillageDefence_Main,
+		--OnComplete =Phase1_VillageNorth_side_OnComplete, -- when objective completes, call function
+	}
+	
+	Objective_Register(OBJ_Phase1_VillageDefence_Main)
+	Objective_Register(OBJ_Phase1_VillageDefence_north)
+	Objective_Register(OBJ_Phase1_VillageDefence_south)
+
+end
+
+function Phase1_VillageDefence_Start()
+	
+	-- Filter TC
+	EGroup_Filter(eg_village_north, EBP.RUS.BUILDING_TOWN_CENTER_RUS, FILTER_REMOVE, eg_tc_north)
+	local tc_pos = Util_GetPosition(mkr_tc_north)
+	
+	EGroup_AddEGroup(eg_tc_group, eg_tc_north)
+	
+	-- Apply a health modifier to Town Centers (see DC.tc_health_multiplier)
+	local modifier_tc = Modifier_Create(MAT_EntityType, "health_maximum_modifier", MUT_Multiplication, false, DC.tc_health_multiplier, EBP.RUS.BUILDING_TOWN_CENTER_RUS)
+	Modifier_ApplyToPlayer(modifier_tc, player5, 0)
+	
+	-- Added UI marker minimap
+	--Objective_AddPing(OBJ_Phase1_VillageDefence_north, tc_pos)
+	Objective_AddUIElements(OBJ_Phase1_VillageDefence_north, tc_pos, true, "$11164881", true) -- "Town Center"
+	
+	-- Enable TC Rule
+	Rule_AddInterval(Phase1_VillageDefence_TownCenter_rule, 1)
+	Rule_AddInterval(Phase1_VillageDefence_TownCenter_ping, 1)
+	
+	-- Grant starting resources from difficulty config
+	for _, player in ipairs(PLAYERS) do
+		Player_AddResource(player.id, RT_Food, DC.starting_food)
+		Player_AddResource(player.id, RT_Gold, DC.starting_gold)
+		Player_AddResource(player.id, RT_Wood, DC.starting_wood)
+		Player_AddResource(player.id, RT_Stone, DC.starting_stone)
+	end
+		
+--[[	elseif AI_Difficulty >= 3 then -- low resources
+		-- Player 1: Add Resources
+		Player_AddResource(player1, RT_Food, 500)
+		Player_AddResource(player1, RT_Gold, 350)
+		Player_AddResource(player1, RT_Wood, 200)
+		-- Player 2: Add Resources
+		Player_AddResource(player2, RT_Food, 500)
+		Player_AddResource(player2, RT_Gold, 350)
+		Player_AddResource(player2, RT_Wood, 200)
+		-- Player 3: Add Resources
+		Player_AddResource(player3, RT_Food, 500)
+		Player_AddResource(player3, RT_Gold, 350)
+		Player_AddResource(player3, RT_Wood, 200)
+		-- Player 4: Add Resources
+		Player_AddResource(player4, RT_Food, 500)
+		Player_AddResource(player4, RT_Gold, 350)
+		Player_AddResource(player4, RT_Wood, 200)
+		]]
+	-- Spawn villagers
+	Rule_AddOneShot(Spawn_Village_South_Players, 1)
+
+	-- Enable population UI and ensure full objectives remain visible
+	for _, player in ipairs(PLAYERS) do
+		UI_SetPlayerDataContext(player.id, { PopulationCapOn = true, hide_condensed_objectives_override = true })
+	end
+	
+	-- Start waves
+	Main_Waves()
+
+	-- Start moving static camp guards into the village/TC fight as soon as Defend Village is active.
+	if SGroup_Count(sg_camp_guards_1) >= 1 then
+		Cmd_FormationAttackMove(sg_camp_guards_1, mkr_spawn_camp_1, false, false)
+		Cmd_FormationAttackMove(sg_camp_guards_1, mkr_village_rally_1, true, false)
+	end
+	if SGroup_Count(sg_camp_guards_2) >= 1 then
+		Cmd_FormationAttackMove(sg_camp_guards_2, mkr_spawn_camp_2, false, false)
+		Cmd_FormationAttackMove(sg_camp_guards_2, mkr_village_rally_2, true, false)
+	end
+	
+	-- Sound the horn 3x
+	Sound_Play2D("sfx_campaign_Hastings_horn_retreat")
+	
+	-- Objective/Notification timer for counter attacks
+	Objective_Start(OBJ_PrepareDefences,true, false)
+	
+end
+
+function Phase1_VillageDefence_TownCenter_rule()
+	
+	-- Main Scenario condition
+	if EGroup_Count(eg_tc_group) == 0 then
+		if Objective_IsComplete(OBJ_Phase1_VillageDefence_Main) == false or Objective_IsFailed(OBJ_Phase1_VillageDefence_Main) == false then
+			-- Fail mission
+			Objective_Fail(OBJ_Phase1_VillageDefence_Main, true, true)
+			
+			
+			-- End mission
+			Mission_Fail()
+			Rule_AddOneShot(Defeat_Function, 10)
+			
+			--[[ Eliminate players / Disabled elimination.scar
+			Core_SetPlayerDefeated(player1, Elimination_LoserPresentation, WR_ELIMINATION)
+			Core_SetPlayerDefeated(player2, Elimination_LoserPresentation, WR_ELIMINATION)
+			Core_SetPlayerDefeated(player3, Elimination_LoserPresentation, WR_ELIMINATION)
+			Core_SetPlayerDefeated(player4, Elimination_LoserPresentation, WR_ELIMINATION)
+			Elimination_CheckVictory()]]
+			
+			-- Remove rule
+			Rule_RemoveMe()
+			
+		else 
+			Rule_RemoveMe()
+		end
+	end
+	
+	-- Objective condition / North
+	if EGroup_Count(eg_tc_north) == 0 then
+		if Objective_IsComplete(OBJ_Phase1_VillageDefence_north) == false or Objective_IsFailed(OBJ_Phase1_VillageDefence_north) == false then
+			Objective_Fail(OBJ_Phase1_VillageDefence_north)
+			Objective_RemoveUIElements(OBJ_Phase1_VillageDefence_north, 1)
+		end
+	end
+	-- Objective condition / South
+	if EGroup_Count(eg_tc_south) == 0 then
+		Phase2_OutpostGuard_CancelRespawns()
+		if Objective_IsStarted(OBJ_Phase1_VillageDefence_south) == true then
+			if Objective_IsComplete(OBJ_Phase1_VillageDefence_south) == false or Objective_IsFailed(OBJ_Phase1_VillageDefence_south) == false then
+				Objective_Fail(OBJ_Phase1_VillageDefence_south)
+				Objective_RemoveUIElements(OBJ_Phase1_VillageDefence_south, 1)
+			end
+		end
+	end
+	
+end
+
+function Phase1_VillageDefence_TownCenter_ping()
+	
+	-- Notification TC under attack
+	local event_cue_tc = Loc_FormatText("$11159058")  -- "Capital under attack!"
+	
+	-- Town Center (North)
+	if EGroup_IsUnderAttackByPlayer(eg_tc_north, player6, 30) == true then
+		if tc_north_msg == false then
+			UI_CreateEventCueClickable(-1, 30, -1, 0, event_cue_tc, "", "low_priority", "", "sfx_ui_event_queue_campaign_high_priority", 255, 255, 255, 255, ECV_Queue, nothing)
+			UI_CreateMinimapBlip(mkr_tc_north, 30, "threat_group")
+			tc_north_msg = true
+			
+			-- Attack Waypoints / Raid #1
+			if SGroup_Count(sg_village_north_attacker_1) >= 1 then
+				Cmd_FormationAttackMove(sg_village_north_attacker_1, mkr_tc_north, false)
+				Cmd_FormationAttackMove(sg_village_north_attacker_1, mkr_spawn_village_1, true)
+			end
+			-- Attack Waypoints / Raid #2
+			if SGroup_Count(sg_village_north_attacker_2) >= 1 then
+				Cmd_FormationAttackMove(sg_village_north_attacker_2, mkr_tc_north, false)
+				Cmd_FormationAttackMove(sg_village_north_attacker_2, mkr_village_rally_2, true)
+			end
+			-- Attack Waypoints / Raid #3
+			if SGroup_Count(sg_village_north_attacker_3) >= 1 then
+				Cmd_FormationAttackMove(sg_village_north_attacker_3, mkr_tc_north, false)
+				Cmd_FormationAttackMove(sg_village_north_attacker_3, mkr_village_rally_1, true)
+			end
+			-- Attack Waypoints / Raid #4
+			if SGroup_Count(sg_village_north_attacker_4) >= 1 then
+				Cmd_FormationAttackMove(sg_village_north_attacker_4, mkr_tc_north, false)
+				Cmd_FormationAttackMove(sg_village_north_attacker_4, mkr_spawn_village_4, true)
+			end
+			
+		end
+	else 
+		tc_north_msg = false
+	end
+	
+	-- Town Center (South)
+	if EGroup_IsUnderAttackByPlayer(eg_tc_south, player6, 30) == true then
+		if tc_south_msg == false then
+			UI_CreateEventCueClickable(-1, 30, -1, 0, event_cue_tc, "", "low_priority", "", "sfx_ui_event_queue_campaign_high_priority", 255, 255, 255, 255, ECV_Queue, nothing)
+			UI_CreateMinimapBlip(mkr_tc_south, 30, "threat_group")
+			tc_south_msg = true
+			
+			-- Attack Waypoints / Kremlin
+			if SGroup_Count(sg_village_south_allied_1) >= 1 then
+				Cmd_FormationAttackMove(sg_village_south_allied_1, mkr_tc_south, false)
+				Cmd_FormationAttackMove(sg_village_south_allied_1, mkr_village_ally_1, true)
+			end
+			
+			-- Attack Waypoints / Outpost, bridge
+			if SGroup_Count(sg_village_south_allied_2) >= 1 then
+				Cmd_FormationAttackMove(sg_village_south_allied_2, mkr_tc_south, false)
+				Cmd_FormationAttackMove(sg_village_south_allied_2, mkr_village_ally_2, true)
+			end
+			
+			-- Attack Waypoints / Outpost, south
+			if SGroup_Count(sg_village_south_allied_3) >= 1 then
+				Cmd_FormationAttackMove(sg_village_south_allied_3, mkr_tc_south, false)
+				Cmd_FormationAttackMove(sg_village_south_allied_3, mkr_village_ally_3, true)
+			end
+			
+		end
+	else 
+		tc_south_msg = false
+	end
+	
+end
+
+-- Notification: Prepare for counter attacks
+function PrepareDefences_InitObjectives()
+	
+	OBJ_PrepareDefences = {
+		Title = "$11226358" ,  -- "Prepare for the enemey waves"
+		Type = ObjectiveType_Information, 
+		SetupUI = PrepareDefences_UI, -- seting up how objective is presented
+		OnStart = PrepareDefences_Start, --when objective start call function
+	}
+
+	
+	Objective_Register(OBJ_PrepareDefences)
+
+	
+end
+
+function PrepareDefences_UI()
+
+	Objective_StartTimer(OBJ_PrepareDefences, COUNT_DOWN, 360, 10) 
+end
+
+function PrepareDefences_Start()
+	
+	Rule_AddOneShot(PrepareDefences_End, 360) 
+end
+
+function PrepareDefences_End()
+	
+	Objective_Complete(OBJ_PrepareDefences, true, false)
+	Objective_Start(OBJ_Phase2_VillageCapture_Main, true, false)
+	
+	-- Sound the angry horn
+	Sound_Play2D("sfx_ui_shared_attack_horn_under_attack_high")
+	
+	-- Open interactive area beyond river
+	World_SetInteractionStage(2)
+
+end
+
+-------------------------------------------
+-- Objective: Capture Village (South) 
+-------------------------------------------
+
+function Phase2_VillageCapture_InitObjectives()
+	
+	OBJ_Phase2_VillageCapture_Main = {
+		Title = "$ae948c95a8c5425d8de28e0c193e0be9:16",  -- "Capture the Southern Village section"
+		Type = ObjectiveType_Battle, 
+		OnStart = Phase2_VillageCapture_Start, --when objective start call function
+		OnComplete = Phase2_VillageCapture_OnComplete, -- when objective completes, call function
+	}
+	OBJ_Phase2_VillageCapture_side = {
+		Title = "$ae948c95a8c5425d8de28e0c193e0be9:17",  -- "Defeat all resistance in the Southern Village section"
+		Type = ObjectiveType_Primary, 
+		SetupUI = Phase2_VillageCapture_UI,
+		Parent = OBJ_Phase2_VillageCapture_Main,
+	}
+	
+	Objective_Register(OBJ_Phase2_VillageCapture_Main)
+	Objective_Register(OBJ_Phase2_VillageCapture_side)
+
+end
+
+function Phase2_VillageCapture_UI()
+	
+	-- Main
+	Objective_SetCounter(OBJ_Phase2_VillageCapture_side, 0, 4) --Set the counter in the UI
+	
+end
+
+function Phase2_VillageCapture_Start()
+	
+	-- Added UI markers (minimap)
+	Objective_AddUIElements(OBJ_Phase1_VillageDefence_south, mkr_spawn_south_1, true, "$ae948c95a8c5425d8de28e0c193e0be9:15", true) -- "Checkpoint"
+	Objective_AddUIElements(OBJ_Phase1_VillageDefence_south, mkr_spawn_south_2, true, "$ae948c95a8c5425d8de28e0c193e0be9:15", true) -- "Checkpoint"
+	Objective_AddUIElements(OBJ_Phase1_VillageDefence_south, mkr_spawn_south_5, true, "$ae948c95a8c5425d8de28e0c193e0be9:15", true) -- "Checkpoint"
+	Objective_AddUIElements(OBJ_Phase1_VillageDefence_south, mkr_spawn_south_4, true, "$ae948c95a8c5425d8de28e0c193e0be9:15", true) -- "Checkpoint"
+	
+	
+	-- Add rule
+	Rule_Add(Phase2_VillageCapture_CountConditions)
+
+	
+end
+
+function Phase2_VillageCapture_CountConditions()
+	
+	
+	
+	-- Capture Kremlin landmark
+	if SGroup_Count(sg_village_south_defender_1) == 0 then
+		
+		-- Check Kremlin and change owner / Spawn enemey attack
+		if World_OwnsEntity(entity_kremlin) ~= true then
+			if Entity_GetPlayerOwner(entity_kremlin) ~= nil then
+				if Entity_GetPlayerOwner(entity_kremlin) == player6 and Entity_IsAlive(entity_kremlin) == true then
+					Entity_SetPlayerOwner(entity_kremlin, player5)
+					
+					-- Add Springald upgrade
+					Entity_CompleteUpgrade(entity_kremlin, UPG.RUS.UPGRADE_WOODEN_CASTLE_SPRINGALD_RUS)
+					-- Create egroup
+					EGroup_Add(eg_kremlin, entity_kremlin)
+					-- Add units
+					Garrison_Building(None, { egroup = eg_kremlin, amount = GARRISON_FILL_KREMLIN, player = player5 })
+					-- Enable targeting
+					EGroup_SetTargetingType(eg_kremlin, Targeting_Automatic)
+					
+					-- Notification: Point captured
+					UI_CreateEventCueClickable(-1, 15, -1, 0, event_cue_text, "", "low_priority", "", "sfx_ui_event_queue_campaign_objective_start", 255, 255, 255, 255, ECV_Queue, nothing)
+					UI_CreateMinimapBlip(mkr_spawn_south_1_rng, 15, "general")
+					
+					-- Remove UI
+					Objective_RemoveUIElements(OBJ_Phase1_VillageDefence_south, 1)
+					
+					-- Side Objective +1
+					if Objective_IsCounterSet(OBJ_Phase2_VillageCapture_side) then
+						Objective_IncreaseCounter(OBJ_Phase2_VillageCapture_side)
+
+						if Obj_GetCounterCount(OBJ_Phase2_VillageCapture_side.ID) == Obj_GetCounterMax(OBJ_Phase2_VillageCapture_side.ID) then 
+							Objective_Complete(OBJ_Phase2_VillageCapture_side, true, true) 
+							
+						end
+					end
+					
+					-- Spawn enemey attack
+					UnitEntry_DeploySquads(player6, sg_village_south_attacker_1, Unit_Types.wave_city_15m, mkr_spawn_wave_2)
+					Cmd_FormationAttackMove(sg_village_south_attacker_1, mkr_spawn_south_1, false)
+					Cmd_FormationAttackMove(sg_village_south_attacker_1, mkr_spawn_village_3, true)	
+					
+					-- Start local outpost guard patrol
+					Phase2_OutpostGuard_Start(1)
+				end
+			end
+		end
+	end
+	-- Capture Outpost / Bridge
+	if SGroup_Count(sg_village_south_defender_2) == 0 then
+		
+		-- Check Outpost and change owner
+		if World_OwnsEntity(entity_outpost_bridge) ~= true then
+			if Entity_GetPlayerOwner(entity_outpost_bridge) ~= nil then
+				if Entity_GetPlayerOwner(entity_outpost_bridge) == player6 and Entity_IsAlive(entity_outpost_bridge) == true then
+					Entity_SetPlayerOwner(entity_outpost_bridge, player5)
+					
+					-- Add Springald upgrade
+					Entity_CompleteUpgrade(entity_outpost_bridge, UPG.RUS.UPGRADE_WOODEN_CASTLE_SPRINGALD_RUS)
+					-- Create egroup
+					EGroup_Add(eg_outpost_bridge, entity_outpost_bridge)
+					-- Add units
+					Garrison_Building(None, { egroup = eg_outpost_bridge, amount = GARRISON_FILL_OUTPOST, player = player5 })
+					-- Enable targeting
+					EGroup_SetTargetingType(eg_outpost_bridge, Targeting_Automatic)
+					
+					-- Notification: Point captured
+					UI_CreateEventCueClickable(-1, 15, -1, 0, event_cue_text, "", "low_priority", "", "sfx_ui_event_queue_campaign_objective_start", 255, 255, 255, 255, ECV_Queue, nothing)
+					UI_CreateMinimapBlip(mkr_spawn_south_2_rng, 15, "general")
+					
+					-- Remove UI
+					Objective_RemoveUIElements(OBJ_Phase1_VillageDefence_south, 2)
+					
+					-- Side Objective +1
+					if Objective_IsCounterSet(OBJ_Phase2_VillageCapture_side) then
+						Objective_IncreaseCounter(OBJ_Phase2_VillageCapture_side)
+
+						if Obj_GetCounterCount(OBJ_Phase2_VillageCapture_side.ID) == Obj_GetCounterMax(OBJ_Phase2_VillageCapture_side.ID) then 
+							Objective_Complete(OBJ_Phase2_VillageCapture_side, true, true) 
+							
+						end
+					end
+					
+					-- Spawn enemey attack
+					UnitEntry_DeploySquads(player6, sg_village_south_attacker_2, Unit_Types.wave_city_20m, mkr_spawn_wave_4)
+					Cmd_FormationAttackMove(sg_village_south_attacker_2, mkr_spawn_south_2, false)
+					Cmd_FormationAttackMove(sg_village_south_attacker_2, mkr_spawn_south_1, true)
+					Cmd_FormationAttackMove(sg_village_south_attacker_2, mkr_spawn_village_3, true)
+					
+					-- Start local outpost guard patrol
+					Phase2_OutpostGuard_Start(2)
+				end
+			end
+		end
+	end
+	-- Capture Outpost / South
+	if SGroup_Count(sg_village_south_defender_6) == 0 then
+		
+		-- Check Outpost and change owner
+		if World_OwnsEntity(entity_outpost_south) ~= true then
+			if Entity_GetPlayerOwner(entity_outpost_south) ~= nil then
+				if Entity_GetPlayerOwner(entity_outpost_south) == player6 and Entity_IsAlive(entity_outpost_south) == true then
+					Entity_SetPlayerOwner(entity_outpost_south, player5)
+					
+					-- Add Springald upgrade
+					Entity_CompleteUpgrade(entity_outpost_south, UPG.RUS.UPGRADE_WOODEN_CASTLE_SPRINGALD_RUS)
+					-- Create egroup
+					EGroup_Add(eg_outpost_south, entity_outpost_south)
+					-- Add units
+					Garrison_Building(None, { egroup = eg_outpost_south, amount = GARRISON_FILL_OUTPOST, player = player5 })
+					-- Enable targeting
+					EGroup_SetTargetingType(eg_outpost_south, Targeting_Automatic)
+					
+					-- Notification: Point captured
+					UI_CreateEventCueClickable(-1, 15, -1, 0, event_cue_text, "", "low_priority", "", "sfx_ui_event_queue_campaign_objective_start", 255, 255, 255, 255, ECV_Queue, nothing)
+					UI_CreateMinimapBlip(mkr_spawn_south_5, 15, "general")
+					
+					-- Remove UI
+					Objective_RemoveUIElements(OBJ_Phase1_VillageDefence_south, 3)
+					
+					-- Side Objective +1
+					if Objective_IsCounterSet(OBJ_Phase2_VillageCapture_side) then
+						Objective_IncreaseCounter(OBJ_Phase2_VillageCapture_side)
+
+						if Obj_GetCounterCount(OBJ_Phase2_VillageCapture_side.ID) == Obj_GetCounterMax(OBJ_Phase2_VillageCapture_side.ID) then 
+							Objective_Complete(OBJ_Phase2_VillageCapture_side, true, true) 
+							
+						end
+					end
+					
+					-- Spawn enemey attack
+					UnitEntry_DeploySquads(player6, sg_village_south_attacker_3, Unit_Types.wave_city_10m, mkr_spawn_wave_3)
+					Cmd_FormationAttackMove(sg_village_south_attacker_3, mkr_spawn_south_5, false)
+					Cmd_FormationAttackMove(sg_village_south_attacker_3, mkr_spawn_south_2, true)
+					
+					-- Start local outpost guard patrol
+					Phase2_OutpostGuard_Start(3)
+					
+				end
+			end
+		end
+	end
+	
+	-- Send reserve units / Side #1 / Group #5
+	if SGroup_Count(sg_village_south_defender_1) <= 15 and village_south_reserves_sent_1 == false then
+		Cmd_FormationAttackMove(sg_village_south_defender_6, mkr_spawn_south_5) -- Replace group #1 with #6
+		Cmd_FormationAttackMove(sg_village_south_defender_5, mkr_spawn_south_1)
+		if AI_Difficulty >= 2 then
+			Cmd_FormationAttackMove(sg_village_south_defender_5_rng, mkr_spawn_south_1_rng)
+		end
+		village_south_reserves_sent_1 = true
+	end
+	-- Send reserve units / Side #2 / Group #3
+	if SGroup_Count(sg_village_south_defender_2) <= 15 and bridge_group_eliminated_2 == false then
+		Cmd_FormationAttackMove(sg_village_south_defender_3, mkr_spawn_south_2) -- Replace group #2 with #3
+		if AI_Difficulty >= 2 then
+			Cmd_FormationAttackMove(sg_village_south_defender_3_rng, mkr_spawn_south_2_rng)
+		end
+		bridge_group_eliminated_2 = true
+	end
+	-- Send reserve units / Side #4 / Group #5
+	if SGroup_Count(sg_village_south_defender_4) <= 15 and village_south_reserves_sent_4 == false then
+		Cmd_FormationAttackMove(sg_village_south_defender_6, mkr_spawn_south_5) -- Replace group #5 with #6
+		Cmd_FormationAttackMove(sg_village_south_defender_5, mkr_spawn_south_4)
+		if AI_Difficulty >= 2 then
+			Cmd_FormationAttackMove(sg_village_south_defender_5_rng, mkr_spawn_south_4_rng)
+		end
+		village_south_reserves_sent_4 = true
+	end
+	
+-- Capture Outpost / South-4
+if SGroup_Count(sg_village_south_defender_4) == 0 then
+if entity_outpost_4_south ~= nil and Entity_IsAlive(entity_outpost_4_south) == true then
+-- Check Outpost and change owner
+if World_OwnsEntity(entity_outpost_4_south) == true or Entity_GetPlayerOwner(entity_outpost_4_south) == player6 then
+Entity_SetPlayerOwner(entity_outpost_4_south, player5)
+
+-- Add Springald upgrade
+Entity_CompleteUpgrade(entity_outpost_4_south, UPG.RUS.UPGRADE_WOODEN_CASTLE_SPRINGALD_RUS)
+-- Refresh egroup and add the current outpost entity before garrisoning
+EGroup_Clear(eg_outpost_4_south)
+EGroup_Add(eg_outpost_4_south, entity_outpost_4_south)
+-- Add units
+Garrison_Building(None, { egroup = eg_outpost_4_south, amount = GARRISON_FILL_OUTPOST, player = player5 })
+-- Enable targeting
+EGroup_SetTargetingType(eg_outpost_4_south, Targeting_Automatic)
+
+-- Notification: Point captured
+UI_CreateEventCueClickable(-1, 15, -1, 0, event_cue_text, "", "low_priority", "", "sfx_ui_event_queue_campaign_objective_start", 255, 255, 255, 255, ECV_Queue, nothing)
+UI_CreateMinimapBlip(mkr_spawn_south_4, 15, "general")
+
+-- Remove UI
+Objective_RemoveUIElements(OBJ_Phase1_VillageDefence_south, 4)
+
+-- Side Objective +1
+if Objective_IsCounterSet(OBJ_Phase2_VillageCapture_side) then
+Objective_IncreaseCounter(OBJ_Phase2_VillageCapture_side)
+
+if Obj_GetCounterCount(OBJ_Phase2_VillageCapture_side.ID) == Obj_GetCounterMax(OBJ_Phase2_VillageCapture_side.ID) then
+Objective_Complete(OBJ_Phase2_VillageCapture_side, true, true)
+
+end
+end
+
+-- Start local outpost guard patrol
+Phase2_OutpostGuard_Start(4)
+end
+end
+end
+
+-- Capture Village
+if SGroup_Count(sg_village_south_defender_all) <= 5 or Objective_IsComplete(OBJ_Phase2_VillageCapture_side) == true then
+		if Objective_IsComplete(OBJ_Phase2_VillageCapture_Main) == false then
+			
+			-- Complete objective
+			Objective_Complete(OBJ_Phase2_VillageCapture_Main, true, false)
+			Objective_Complete(OBJ_Phase1_VillageDefence_south, false, false)
+			
+			-- Set Village ownership to Allied AI
+			EGroup_SetPlayerOwner(eg_village_south, player5)
+			
+			-- Enable damage for Town Center
+			local TC_South = EGroup_GetClosestEntity(eg_village_south, mkr_tc_south)
+			Entity_SetInvulnerable(TC_South, false, -1)
+			Entity_SetTargetingType(TC_South, Targeting_Automatic)
+			
+			-- Add healing ability on Religious building
+			EGroup_Filter(eg_village_south, EBP.RUS.BUILDING_UNIT_RELIGIOUS_CONTROL_RUS, FILTER_REMOVE, eg_religious_2)
+			EGroup_AddAbility(eg_religious_2, BP_GetAbilityBlueprintByPbgID(202453))
+
+			-- Post-capture support updates for village defense flow
+			Phase2_VillageCapture_EnablePostCaptureSupport()
+			
+			Rule_RemoveMe()
+		end
+	end
+	
+end
+
+function Phase2_VillageCapture_EnablePostCaptureSupport()
+	village_capture_support_enabled = true
+
+	-- Move static camp guards between player spawns into the village fight
+	Cmd_FormationAttackMove(sg_camp_guards_1, mkr_spawn_camp_1, false, false)
+	Cmd_FormationAttackMove(sg_camp_guards_1, mkr_village_rally_1, true, false)
+	Cmd_FormationAttackMove(sg_camp_guards_2, mkr_spawn_camp_2, false, false)
+	Cmd_FormationAttackMove(sg_camp_guards_2, mkr_village_rally_2, true, false)
+
+	-- Force startup so all four guard systems enter the monitor/respawn lifecycle
+	-- even if not every outpost was individually captured before phase completion.
+	Phase2_OutpostGuard_Start(1, true)
+	Phase2_OutpostGuard_Start(2, true)
+	Phase2_OutpostGuard_Start(3, true)
+	Phase2_OutpostGuard_Start(4, true)
+
+	-- Easy + Intermediate only support systems
+	if AI_Difficulty <= 1 then
+		-- Trigger once immediately so village support starts right after capture.
+		Phase2_VillageCapture_EasyInter_Reinforcements()
+
+		if Rule_Exists(Phase2_VillageCapture_EasyInter_Reinforcements) == false then
+			Rule_AddInterval(Phase2_VillageCapture_EasyInter_Reinforcements, 60)
+		end
+	end
+end
+
+function Phase2_VillageCapture_EasyInter_Reinforcements()
+	if not village_capture_support_enabled then
+		return
+	end
+
+	-- Guard against stale sessions where this global may not be initialized yet.
+	if sg_village_north_attacker_reinforce == nil then
+		sg_village_north_attacker_reinforce = SGroup_CreateIfNotFound("sg_village_north_attacker_reinforce")
+	end
+
+	-- Persistent trigger: keep spawning this allied attacker if wiped
+	if SGroup_Count(sg_village_north_attacker_reinforce) == 0 then
+		UnitEntry_DeploySquads(player5, sg_village_north_attacker_reinforce, Unit_Types.wave_city_10m, mkr_spawn_1)
+		Cmd_FormationAttackMove(sg_village_north_attacker_reinforce, mkr_village_rally_2, false, false)
+	end
+end
+
+function Phase2_VillageCapture_EasyInter_RespawnMonitor()
+	Phase2_OutpostGuard_Monitor()
+end
+
+function Phase2_VillageCapture_EasyInter_RespawnAllied1()
+	village_allied_respawn_pending_1 = false
+	Phase2_OutpostGuard_Start(3)
+end
+
+function Phase2_VillageCapture_EasyInter_RespawnAllied2()
+	village_allied_respawn_pending_2 = false
+	Phase2_OutpostGuard_Start(2)
+end
+
+function Phase2_VillageCapture_EasyInter_RespawnAllied3()
+	village_allied_respawn_pending_3 = false
+	Phase2_OutpostGuard_Start(1)
+end
+
+function Phase2_VillageCapture_OnComplete()
+	
+	-- Filter TC
+	EGroup_Filter(eg_village_south, EBP.RUS.BUILDING_TOWN_CENTER_RUS, FILTER_REMOVE, eg_tc_south)
+	local tc_pos = Util_GetPosition(mkr_tc_south)
+	
+	-- Add TC to Defend Village objective
+	EGroup_AddEGroup(eg_tc_group, eg_tc_south)
+	Objective_Start(OBJ_Phase1_VillageDefence_south,true, false)
+	
+	-- Enable targeting
+	EGroup_SetTargetingType(eg_village_south, Targeting_Automatic)
+	
+	-- Add UI
+	Objective_AddUIElements(OBJ_Phase1_VillageDefence_south, tc_pos, true, "$11164881", true) -- "Town Center"
+	
+	-- Start final objective
+	Objective_Start(OBJ_Phase3_FinalKeep_Main,true, false)
+	
+	-- Start Objective: Capture Siege weapons
+	Objective_Start(OBJ_Phase3_SiegeCapture_Main,true, false)
+	Objective_Start(OBJ_Phase3_SiegeCapture_side,false, false)
+	Objective_Start(OBJ_Phase3_SiegeCapture_info,false, false)
+	-- Start Objective: Clear Reinforcements path
+	Objective_Start(OBJ_Phase3_CityAssault_Main,true, false)
+	
+	-- Remove any markers left
+	--__Objective_RemoveAssociatedUI(OBJ_Phase1_VillageDefence_south)
+
+
+end
+
+-------------------------------------------
+-- Objective: Capture Siege weapons
+-------------------------------------------
+
+function Phase3_SiegeCapture_InitObjectives()
+	
+	OBJ_Phase3_SiegeCapture_Main = {
+		Title = "$ae948c95a8c5425d8de28e0c193e0be9:19",  -- "Capture the Siege Weapons"
+		Type = ObjectiveType_Battle, 
+		OnStart = Phase3_SiegeCapture_Start, --when objective start call function
+		OnComplete = Phase3_SiegeCapture_OnComplete, -- when objective completes, call function
+	}
+	OBJ_Phase3_SiegeCapture_side = {
+		Title ="$ae948c95a8c5425d8de28e0c193e0be9:20" ,  -- "Defeat all resistance in the Southern Village section"
+		Type = ObjectiveType_Primary, 
+		Parent = OBJ_Phase3_SiegeCapture_Main,
+	}
+	OBJ_Phase3_SiegeCapture_info = {
+		Title = "$ae948c95a8c5425d8de28e0c193e0be9:21",  -- "Capturing the camp unlocks the Siege Engineer upgrade"
+		Type = ObjectiveType_Tip, 
+		Parent = OBJ_Phase3_SiegeCapture_Main,
+	}
+	
+	Objective_Register(OBJ_Phase3_SiegeCapture_Main)
+	Objective_Register(OBJ_Phase3_SiegeCapture_side)
+	Objective_Register(OBJ_Phase3_SiegeCapture_info)
+
+end
+
+function Phase3_SiegeCapture_Start()
+	
+	-- Spawn defenders
+	Spawn_SiegeCamp_Enemey()
+	
+	-- Add objective conditions
+	Rule_Add(Phase3_SiegeCapture_CountConditions)
+	
+	-- Add UI
+	Objective_AddUIElements(OBJ_Phase3_SiegeCapture_Main, mkr_spawn_siege_4, true, "$11164271", true) -- "Siege Forces"
+
+	
+end
+
+function Phase3_SiegeCapture_CountConditions()
+	
+	if Objective_IsComplete(OBJ_Phase3_SiegeCapture_Main) == false then
+		-- Capture Bombards // ADD: Unlock ram upgrades
+		if SGroup_Count(sg_siege_defender_all) <= 5 then
+			local bombard_count = SGroup_Count(sg_siege_capture)
+			if bombard_count < 8 then
+				print(string.format("[OBJECTIVE] Phase3_SiegeCapture partial bombard transfer: found %d/8 in sg_siege_capture", bombard_count))
+			end
+
+			-- Safe iteration: distribute bombards evenly to 4 players, with nil protection
+			local players_table = { player1, player2, player3, player4 }
+			for i = 1, math.min(bombard_count, 8) do
+				local squad = SGroup_GetSquadAt(sg_siege_capture, i)
+				if squad ~= nil then
+					local owner_index = math.ceil(i / 2)  -- 1-2→p1, 3-4→p2, 5-6→p3, 7-8→p4
+					Squad_SetPlayerOwner(squad, players_table[owner_index])
+				else
+					print(string.format("[ERROR] Phase3_SiegeCapture: nil squad at index %d (count=%d)", i, bombard_count))
+				end
+			end
+			
+			-- Bombards remain invulnerable until OnComplete sets false,-1
+			SGroup_SetInvulnerable(sg_siege_capture, true, -1)
+			
+			-- Notification
+			local event_cue_siege = Loc_FormatText("$ae948c95a8c5425d8de28e0c193e0be9:22")  -- "Siege Engineers unlocked for infantry!"
+			UI_CreateEventCueClickable(-1, 15, -1, 0, event_cue_siege, "", "low_priority", "", "sfx_ui_event_queue_campaign_high_priority", 255, 255, 255, 255, ECV_Queue, nothing)
+			UI_CreateMinimapBlip(mkr_spawn_siege_5, 10, "general")
+			
+			-- Siege unlocks: use hardened DLC-aware helpers (nil-safe CBA_SIEGE_TABLE + IsCivFamily chain)
+			for _, player in pairs(PLAYERS) do
+				-- Mangonel / NestOfBees / Ribauldequin / Double siege — Intermediate -
+				if AI_Difficulty <= 1 then
+					_ApplySiegeRestrictions(player, ITEM_DEFAULT)
+				end
+				-- Siege Engineers upgrade + field constructs — Hard +
+				if AI_Difficulty >= 2 then
+					_ApplySiegeEngineersRestrictions(player, ITEM_DEFAULT)
+				end
+				-- Siege Workshop — Absurd only
+				if AI_Difficulty == 6 then
+					local ebp_workshop = TryGetCivilizationEntity(player.raceName, AGS_BP_WORKSHOP)
+					if ebp_workshop then
+						Player_SetEntityProductionAvailability(player.id, ebp_workshop, ITEM_DEFAULT)
+					end
+				end
+			end
+			
+			-- Remove UI
+			Objective_RemoveUIElements(OBJ_Phase3_SiegeCapture_Main, 1)
+			
+			-- Complete objective
+			Objective_Complete(OBJ_Phase3_SiegeCapture_Main, true, false)
+			
+			Rule_RemoveMe()
+			
+		end
+		
+		-- Send reserves to choke point #1
+		if SGroup_Count(sg_siege_defender_1) == 0 and siege_reserves_sent == false then
+			Cmd_FormationAttackMove(sg_siege_defender_5, mkr_spawn_siege_1)
+			siege_reserves_sent = true
+		end
+		-- Send reserves to choke point #2
+		if SGroup_Count(sg_siege_defender_2) == 0 and siege_reserves_sent == false then
+			Cmd_FormationAttackMove(sg_siege_defender_5, mkr_spawn_siege_2)
+			siege_reserves_sent = true
+		end
+		
+		-- Send choke point group to the camp
+		if SGroup_Count(sg_siege_defender_3) == 0 and siege_guards_retreated == false then
+			
+			-- Group #1
+			if SGroup_Count(sg_siege_defender_1) >= 1 then
+				Cmd_FormationAttackMove(sg_siege_defender_1, mkr_spawn_siege_5, false)
+				Cmd_FormationAttackMove(sg_siege_defender_1, mkr_spawn_siege_3, true)
+			end
+			
+			-- Group #2
+			if SGroup_Count(sg_siege_defender_2) >= 1 then
+				Cmd_FormationAttackMove(sg_siege_defender_2, mkr_spawn_siege_5, false)
+				Cmd_FormationAttackMove(sg_siege_defender_2, mkr_spawn_siege_3, true)
+			end
+			
+			siege_guards_retreated = true
+		end
+		
+		
+		
+	end		
+end
+
+function Phase3_SiegeCapture_OnComplete()
+	
+	-- Enable DMG for Bombards
+	SGroup_SetInvulnerable(sg_siege_capture, false, -1)
+
+	-- Unlock bombard/culverin/great bombard production after Bombard objective completion.
+	for _, player in pairs(PLAYERS) do
+		_ApplyBombardObjectiveRestrictions(player, ITEM_DEFAULT)
+	end
+	
+	-- Deploy side 4 siege army after bombard objective is complete
+	AlliedSiege_Deploy(4)
+	
+end
+
+-------------------------------------------
+-- Objective: Secure City enterances
+-------------------------------------------
+
+function Phase3_CityAssault_InitObjectives()
+	
+	OBJ_Phase3_CityAssault_Main = {
+		Title = "$ae948c95a8c5425d8de28e0c193e0be9:23",  -- "Clear a path for Siege Reinforcements"
+		Type = ObjectiveType_Battle, 
+		OnStart = Phase3_CityAssault_Start, --when objective start call function
+		OnComplete = Phase3_CityAssault_OnComplete, -- when objective completes, call function
+	}
+	OBJ_Phase3_CityAssault_side1 = {
+		Title =  "$ae948c95a8c5425d8de28e0c193e0be9:24",  -- "Defeat all resistance near the Checkpoints"
+		Type = ObjectiveType_Battle, 
+		Parent = OBJ_Phase3_CityAssault_Main,
+	}
+	OBJ_Phase3_CityAssault_side2 = {
+		Title =  "$ae948c95a8c5425d8de28e0c193e0be9:24",  -- "Defeat all resistance near the Checkpoints"
+		Type = ObjectiveType_Battle, 
+		Parent = OBJ_Phase3_CityAssault_Main,
+	}
+	OBJ_Phase3_CityAssault_side3 = {
+		Title =  "$ae948c95a8c5425d8de28e0c193e0be9:24",  -- "Defeat all resistance near the Checkpoints"
+		Type = ObjectiveType_Battle, 
+		Parent = OBJ_Phase3_CityAssault_Main,
+	}
+	
+	Objective_Register(OBJ_Phase3_CityAssault_Main)
+	Objective_Register(OBJ_Phase3_CityAssault_side1)
+	Objective_Register(OBJ_Phase3_CityAssault_side2)
+	Objective_Register(OBJ_Phase3_CityAssault_side3)
+
+end
+
+function Phase3_CityAssault_Start()
+	
+	-- Init siege army system
+	AlliedSiege_Init()
+	
+	-- Enable rule
+	Rule_AddInterval(Phase3_CityAssault_CountConditions, 1)
+	
+	-- Add UI
+	Objective_AddUIElements(OBJ_Phase3_CityAssault_Main, mkr_spawn_outer_city_1b, true, "$ae948c95a8c5425d8de28e0c193e0be9:15", true) -- "Checkpoint"
+	Objective_AddUIElements(OBJ_Phase3_CityAssault_Main, mkr_spawn_outer_city_2b, true, "$ae948c95a8c5425d8de28e0c193e0be9:15", true) -- "Checkpoint"
+	Objective_AddUIElements(OBJ_Phase3_CityAssault_Main, mkr_spawn_outer_city_3a, true, "$ae948c95a8c5425d8de28e0c193e0be9:15", true) -- "Checkpoint"
+
+	
+end
+
+function Phase3_CityAssault_CountConditions()
+	
+	local event_cue_text_cleared = Loc_FormatText("$ae948c95a8c5425d8de28e0c193e0be9:25")  -- "Position has been cleared"
+	
+	if Objective_IsComplete(OBJ_Phase3_CityAssault_Main) == false then
+		
+		-- Side #1
+		if SGroup_Count(sg_city_defender_group_1) <= 5 and city_ex_group1_kia == false then
+			if Objective_IsComplete(OBJ_Phase3_CityAssault_side1) == false then
+				
+				-- Enable allied siege waves
+				AlliedSiege_Deploy(1)
+				
+				-- Remove UI
+				Objective_RemoveUIElements(OBJ_Phase3_CityAssault_Main, 1)
+				
+				-- End objective
+				Objective_Complete(OBJ_Phase3_CityAssault_side1, true, false)
+				
+				-- Notification: Text & Ping
+				UI_CreateEventCueClickable(-1, 20, -1, 0, event_cue_text_cleared, "", "low_priority", "", "sfx_campaign_scripted_ui_objective_counter_update", 255, 255, 255, 255, ECV_Queue, nothing)
+				UI_CreateMinimapBlip(mkr_spawn_outer_city_1b, 60, "general")
+				
+				-- Switch
+				city_ex_group1_kia = true
+			end
+		end
+		
+		-- Side #2
+		if SGroup_Count(sg_city_defender_group_2) <= 5 and city_ex_group2_kia == false then
+			if Objective_IsComplete(OBJ_Phase3_CityAssault_side2) == false then
+				
+				-- Enable allied siege waves
+				AlliedSiege_Deploy(2)
+				
+				-- Remove UI
+				Objective_RemoveUIElements(OBJ_Phase3_CityAssault_Main, 2)
+				
+				-- End objective
+				Objective_Complete(OBJ_Phase3_CityAssault_side2, true, false)
+				
+				-- Notification: Text & Ping
+				UI_CreateEventCueClickable(-1, 20, -1, 0, event_cue_text_cleared, "", "low_priority", "", "sfx_campaign_scripted_ui_objective_counter_update", 255, 255, 255, 255, ECV_Queue, nothing)
+				UI_CreateMinimapBlip(mkr_spawn_outer_city_2b, 60, "general")
+				
+				-- Switch
+				city_ex_group2_kia = true
+			end
+		end
+		
+		-- Side #3
+		if SGroup_Count(sg_city_defender_group_3) <= 5 and city_ex_group3_kia == false then
+			if Objective_IsComplete(OBJ_Phase3_CityAssault_side3) == false then
+				
+				-- Enable allied siege waves
+				AlliedSiege_Deploy(3)
+				
+				-- Remove UI
+				Objective_RemoveUIElements(OBJ_Phase3_CityAssault_Main, 3)
+				
+				-- End objective
+				Objective_Complete(OBJ_Phase3_CityAssault_side3, true, false)
+				
+				-- Notification: Text & Ping
+				UI_CreateEventCueClickable(-1, 20, -1, 0, event_cue_text_cleared, "", "low_priority", "", "sfx_campaign_scripted_ui_objective_counter_update", 255, 255, 255, 255, ECV_Queue, nothing)
+				UI_CreateMinimapBlip(mkr_spawn_outer_city_3a, 60, "general")
+				
+				-- Switch
+				city_ex_group3_kia = true
+			end
+		end
+		
+		-- Cleared / complete objective
+		if SGroup_Count(sg_city_defender_group_all) == 0 then
+			Objective_Complete(OBJ_Phase3_CityAssault_Main)
+			Rule_RemoveMe()
+		end
+		
+	else
+		Rule_RemoveMe()
+	end		
+end
+
+function Phase3_CityAssault_OnComplete()
+	
+	-- Start siege respawn monitor so armies continue through FinalKeep phase
+	if Rule_Exists(AlliedSiege_RespawnMonitor) == false then
+		Rule_AddInterval(AlliedSiege_RespawnMonitor, 10)
+	end
+	
+end
+
+-------------------------------------------
+-- Allied Siege — Roving Army System
+-------------------------------------------
+-- Replaces legacy Units_Deploy siege waves with Roving Army patrol
+-- instances. Each side spawns, approaches via attack-move, then
+-- creates a Roving Army that loops between siege targets.
+-- On arrival at gate markers the army pauses and issues
+-- Cmd_Attack on nearby gate entities. After gates are destroyed
+-- the army resumes patrol toward the keeps.
+-------------------------------------------
+
+-- Per-side configuration table
+-- gate_markers: ordered list of markers where gates should be attacked (matched by distance)
+-- Sides 1-2 share mkr_dest_gate_1; sides 3-4 share mkr_dest_gate_2
+local ALLIED_SIEGE_SIDE_COUNT = 4
+local ALLIED_SIEGE_DEBUG_LOGS = false
+local ALLIED_SIEGE_CONFIG = {
+	[1] = { sgroup = "sg_allied_siege_1", spawn = "mkr_spawn_1", approach = "ally_siege_approach_1", patrol = "siege_patrol_1", gate_markers = { "mkr_dest_siege_1", "mkr_dest_gate_1" } },
+	[2] = { sgroup = "sg_allied_siege_2", spawn = "mkr_spawn_2", approach = "ally_siege_approach_2", patrol = "siege_patrol_2", gate_markers = { "mkr_dest_siege_2", "mkr_dest_gate_1" } },
+	[3] = { sgroup = "sg_allied_siege_3", spawn = "mkr_spawn_3", approach = "ally_siege_approach_3", patrol = "siege_patrol_3", gate_markers = { "mkr_dest_siege_3", "mkr_dest_gate_2" } },
+	[4] = { sgroup = "sg_allied_siege_4", spawn = "mkr_spawn_4", approach = "ally_siege_approach_4", patrol = "siege_patrol_4", gate_markers = { "mkr_dest_siege_4", "mkr_dest_gate_2" } },
+}
+
+-- Runtime state (set in AlliedSiege_Init)
+local _allied_siege_spawned = { false, false, false, false }
+local _allied_siege_respawn_due = { 0, 0, 0, 0 }
+local _allied_siege_attacking_gate = { false, false, false, false }
+local _allied_siege_active_gate_mkr = { nil, nil, nil, nil }  -- tracks which gate marker is currently being attacked
+local _allied_siege_respawn_monitor_active = false
+local _allied_siege_gate_lookup_last = {}  -- marker key -> "source:count"
+
+-- Resolve a config field that may reference a global variable by name
+local function _AlliedSiege_Resolve(field)
+	if type(field) == "string" then
+		return _G[field]
+	end
+	return field
+end
+
+local function _AlliedSiege_Log(message)
+	if ALLIED_SIEGE_DEBUG_LOGS then
+		print(message)
+	end
+end
+
+local function _AlliedSiege_LogGateLookup(gate_mkr, source, count)
+	local marker_key = tostring(gate_mkr)
+	local current = source .. ":" .. tostring(count)
+	if _allied_siege_gate_lookup_last[marker_key] ~= current then
+		_allied_siege_gate_lookup_last[marker_key] = current
+		_AlliedSiege_Log(string.format("[ALLIED_SIEGE] Gate lookup(%s): found %d", source, count))
+	end
+end
+
+-- Resolve gate targets near a marker. If direct type scans fail,
+-- return nil so monitor can resume patrol when local stage gates are gone.
+local function _AlliedSiege_FindGateTargets(gate_mkr)
+	local eg_temp = Player_GetEntitiesFromTypeInArea(player6, "stone_gate", gate_mkr, ALLIED_SIEGE_GATE_SEARCH_RADIUS)
+	if eg_temp ~= nil and EGroup_Count(eg_temp) > 0 then
+		_AlliedSiege_LogGateLookup(gate_mkr, "stone_gate", EGroup_Count(eg_temp))
+		return eg_temp
+	end
+
+	eg_temp = Player_GetEntitiesFromTypeInArea(player6, "gate", gate_mkr, ALLIED_SIEGE_GATE_SEARCH_RADIUS)
+	if eg_temp ~= nil and EGroup_Count(eg_temp) > 0 then
+		_AlliedSiege_LogGateLookup(gate_mkr, "gate", EGroup_Count(eg_temp))
+		return eg_temp
+	end
+	_AlliedSiege_LogGateLookup(gate_mkr, "none", 0)
+	return nil
+end
+
+-----------------------------------------------------------
+-- AlliedSiege_Init()
+-- Called from Phase3_CityAssault_Start. Populates gate
+-- EGroups using pre-placed Content Editor entities.
+-----------------------------------------------------------
+function AlliedSiege_Init()
+	
+	_allied_siege_spawned = { false, false, false, false }
+	_allied_siege_respawn_due = { 0, 0, 0, 0 }
+	_allied_siege_attacking_gate = { false, false, false, false }
+	_allied_siege_active_gate_mkr = { nil, nil, nil, nil }
+	_allied_siege_respawn_monitor_active = false
+	_allied_siege_gate_lookup_last = {}
+	
+	-- Scan for gate entities near each unique gate marker
+	-- Collect unique markers from all sides to avoid duplicate scans
+	local scanned = {}  -- marker name -> true
+	for side = 1, ALLIED_SIEGE_SIDE_COUNT do
+		local cfg = ALLIED_SIEGE_CONFIG[side]
+		for _, mkr_name in ipairs(cfg.gate_markers) do
+			if not scanned[mkr_name] then
+				scanned[mkr_name] = true
+				local mkr = _G[mkr_name]
+				if mkr ~= nil then
+					local eg_temp = _AlliedSiege_FindGateTargets(mkr)
+					local count = (eg_temp ~= nil) and EGroup_Count(eg_temp) or 0
+					_AlliedSiege_Log(string.format("[ALLIED_SIEGE] Init gate scan: %s -> %d entities", mkr_name, count))
+				else
+					_AlliedSiege_Log(string.format("[ALLIED_SIEGE] Init gate scan: %s -> marker NOT FOUND", mkr_name))
+				end
+			end
+		end
+	end
+	
+	_AlliedSiege_Log("[ALLIED_SIEGE] Init complete (staged gate markers)")
+end
+
+-----------------------------------------------------------
+-- AlliedSiege_Deploy(side)
+-- Triggers spawn notification and delayed deployment for
+-- the given side (1, 2, or 3). Replaces Allied_Siege_N().
+-----------------------------------------------------------
+function AlliedSiege_Deploy(side)
+	
+	local cfg = ALLIED_SIEGE_CONFIG[side]
+	local sgroup = _AlliedSiege_Resolve(cfg.sgroup)
+	
+	if SGroup_Count(sgroup) > 0 then
+		return
+	end
+	if _allied_siege_spawned[side] == true then
+		return
+	end
+	
+	_allied_siege_spawned[side] = true
+	
+	-- Notification: Text & Ping
+	local event_cue_text = Loc_FormatText("$11179775")  -- "Reinforcements arriving soon"
+	local spawn_mkr = _AlliedSiege_Resolve(cfg.spawn)
+	UI_CreateEventCueClickable(-1, 40, -1, 0, event_cue_text, "", "low_priority", "", "sfx_campaign_scripted_ui_objective_counter_update", 255, 255, 255, 255, ECV_Queue, nothing)
+	UI_CreateMinimapBlip(spawn_mkr, 40, "general")
+	
+	-- Delayed spawn + approach
+	Rule_AddOneShot(_AlliedSiege_SpawnAndApproach, 40, { side = side })
+	
+	_AlliedSiege_Log(string.format("[ALLIED_SIEGE] Side %d: deploy scheduled (40s)", side))
+end
+
+-----------------------------------------------------------
+-- _AlliedSiege_SpawnAndApproach(context, data)
+-- OneShot callback: spawns units and attack-moves them
+-- through approach waypoints toward the siege area.
+-----------------------------------------------------------
+function _AlliedSiege_SpawnAndApproach(context, data)
+	
+	local side = data.side
+	local cfg = ALLIED_SIEGE_CONFIG[side]
+	local sgroup = _AlliedSiege_Resolve(cfg.sgroup)
+	local spawn_mkr = _AlliedSiege_Resolve(cfg.spawn)
+	local approach = _AlliedSiege_Resolve(cfg.approach)
+	
+	-- Spawn units
+	UnitEntry_DeploySquads(player5, sgroup, Unit_Types.wave_allied_siege, spawn_mkr)
+	
+	-- Queue attack-move through approach waypoints
+	if approach ~= nil and #approach >= 1 then
+		Cmd_FormationAttackMove(sgroup, approach[1])
+		for idx = 2, #approach do
+			Cmd_FormationAttackMove(sgroup, approach[idx], true)
+		end
+	end
+	
+	-- Start approach monitor
+	Rule_AddInterval(_AlliedSiege_ApproachMonitor, 3, { side = side })
+	
+	_AlliedSiege_Log(string.format("[ALLIED_SIEGE] Side %d: spawned %d squads, approaching", side, SGroup_Count(sgroup)))
+end
+
+-----------------------------------------------------------
+-- _AlliedSiege_ApproachMonitor(context, data)
+-- Polls distance to first siege patrol target. When close
+-- enough, creates the Roving Army and removes self.
+-----------------------------------------------------------
+function _AlliedSiege_ApproachMonitor(context, data)
+	
+	local side = data.side
+	local cfg = ALLIED_SIEGE_CONFIG[side]
+	local sgroup = _AlliedSiege_Resolve(cfg.sgroup)
+	local patrol = _AlliedSiege_Resolve(cfg.patrol)
+	
+	-- Death during approach
+	if SGroup_Count(sgroup) <= 0 then
+		_AlliedSiege_Log(string.format("[ALLIED_SIEGE] Side %d: wiped during approach", side))
+		_AlliedSiege_ScheduleRespawn(side)
+		Rule_RemoveMe()
+		return
+	end
+	
+	-- Check distance to first siege-area target
+	local ok, dist = pcall(Util_GetDistance, sgroup, patrol[1])
+	if not ok then
+		return
+	end
+	
+	if dist <= 30 then
+		_AlliedSiege_CreatePatrol(side)
+		Rule_RemoveMe()
+	end
+end
+
+-----------------------------------------------------------
+-- _AlliedSiege_CreatePatrol(side)
+-- Creates a Roving Army instance for the siege-area loop.
+-----------------------------------------------------------
+function _AlliedSiege_CreatePatrol(side)
+	
+	local cfg = ALLIED_SIEGE_CONFIG[side]
+	local sgroup = _AlliedSiege_Resolve(cfg.sgroup)
+	local patrol = _AlliedSiege_Resolve(cfg.patrol)
+	local army_name = "allied_siege_" .. tostring(side)
+	
+	-- Clean up any existing army with this name
+	local existing = RovingArmy_Find(army_name)
+	if existing ~= nil then
+		RovingArmy_Disband(existing)
+	end
+	
+	local army = RovingArmy_Create({
+		name = army_name,
+		player = player5,
+		sgroup = sgroup,
+		targets = patrol,
+		target_order = ROVING_ORDER_LOOP,
+		poll_interval = 3,
+		arrival_distance = 15,
+		idle_time = 0,
+		on_arrived = function(army_ref, target_index)
+			_AlliedSiege_OnArrived(side, army_ref, target_index)
+		end,
+		on_death = function()
+			_AlliedSiege_OnDeath(side)
+		end,
+	})
+	RovingArmy_Start(army)
+	
+	_AlliedSiege_Log(string.format("[ALLIED_SIEGE] Side %d: Roving Army created — %d units, %d targets", side, SGroup_Count(sgroup), #patrol))
+end
+
+-----------------------------------------------------------
+-- _AlliedSiege_OnArrived(side, army, target_index)
+-- Fired when the army reaches a patrol waypoint. If the
+-- waypoint is a gate marker and gates still exist, pauses
+-- the army and issues Cmd_Attack on nearby gate entities.
+-----------------------------------------------------------
+function _AlliedSiege_OnArrived(side, army, target_index)
+	
+	local cfg = ALLIED_SIEGE_CONFIG[side]
+	local patrol = _AlliedSiege_Resolve(cfg.patrol)
+	local current_target = patrol[target_index]
+	
+	-- Check if current patrol waypoint matches ANY of the side's gate markers
+	local matched_mkr = nil
+	for _, mkr_name in ipairs(cfg.gate_markers) do
+		local mkr = _G[mkr_name]
+		if mkr ~= nil then
+			local ok, dist = pcall(Util_GetDistance, current_target, mkr)
+			if ok and dist ~= nil and dist <= 1 then
+				matched_mkr = mkr
+				_AlliedSiege_Log(string.format("[ALLIED_SIEGE] Side %d: arrived at gate marker %s (targetIndex=%d)", side, mkr_name, target_index))
+				break
+			end
+		end
+	end
+	
+	if matched_mkr == nil then
+		_AlliedSiege_Log(string.format("[ALLIED_SIEGE] Side %d: arrived at targetIndex=%d (not a gate marker)", side, target_index))
+		return
+	end
+	
+	-- Skip if already attacking a gate on this side
+	if _allied_siege_attacking_gate[side] == true then
+		return
+	end
+	
+	-- Dynamically find gate entities near the matched marker
+	local eg_nearby = _AlliedSiege_FindGateTargets(matched_mkr)
+	
+	if eg_nearby == nil or EGroup_Count(eg_nearby) == 0 then
+		_AlliedSiege_Log(string.format("[ALLIED_SIEGE] Side %d: gate already breached at stage marker, continuing patrol", side))
+		return
+	end
+	
+	-- Pause army and issue direct attack on gate entities
+	RovingArmy_Pause(army)
+	Cmd_Attack(army.sgroup, eg_nearby)
+	_allied_siege_attacking_gate[side] = true
+	_allied_siege_active_gate_mkr[side] = matched_mkr
+	
+	-- Start gate destruction monitor
+	Rule_AddInterval(_AlliedSiege_GateMonitor, 5, { side = side })
+	
+	_AlliedSiege_Log(string.format("[ALLIED_SIEGE] Side %d: attacking %d gate entities at stage marker", side, EGroup_Count(eg_nearby)))
+end
+
+-----------------------------------------------------------
+-- _AlliedSiege_GateMonitor(context, data)
+-- Polls gate entity state. When all gates at the target
+-- are destroyed, resumes the army. Re-issues Cmd_Attack
+-- if units go idle while gates still standing.
+-----------------------------------------------------------
+function _AlliedSiege_GateMonitor(context, data)
+	
+	local side = data.side
+	local cfg = ALLIED_SIEGE_CONFIG[side]
+	local sgroup = _AlliedSiege_Resolve(cfg.sgroup)
+	local active_mkr = _allied_siege_active_gate_mkr[side]
+	local army_name = "allied_siege_" .. tostring(side)
+	local army = RovingArmy_Find(army_name)
+	
+	-- Army died or was disbanded
+	if army == nil or SGroup_Count(sgroup) <= 0 then
+		_allied_siege_attacking_gate[side] = false
+		_allied_siege_active_gate_mkr[side] = nil
+		Rule_RemoveMe()
+		return
+	end
+	
+	-- Check remaining gates at the active stage marker
+	local eg_remaining = nil
+	if active_mkr ~= nil then
+		eg_remaining = _AlliedSiege_FindGateTargets(active_mkr)
+	end
+	
+	if eg_remaining == nil or EGroup_Count(eg_remaining) == 0 then
+		-- Gates destroyed at this stage — resume patrol toward next waypoint
+		_allied_siege_attacking_gate[side] = false
+		_allied_siege_active_gate_mkr[side] = nil
+		RovingArmy_Resume(army)
+		_AlliedSiege_Log(string.format("[ALLIED_SIEGE] Side %d: gates destroyed at stage marker, resuming patrol", side))
+		Rule_RemoveMe()
+		return
+	end
+	
+	-- Gates still standing — re-issue attack in case units went idle
+	Cmd_Attack(sgroup, eg_remaining)
+end
+
+-----------------------------------------------------------
+-- _AlliedSiege_OnDeath(side)
+-- Called when all units in a siege army are lost.
+-- Schedules a respawn after ALLIED_SIEGE_RESPAWN_TIMER.
+-----------------------------------------------------------
+function _AlliedSiege_OnDeath(side)
+	_AlliedSiege_Log(string.format("[ALLIED_SIEGE] Side %d: army destroyed, respawn in %ds", side, ALLIED_SIEGE_RESPAWN_TIMER))
+	_allied_siege_attacking_gate[side] = false
+	_allied_siege_active_gate_mkr[side] = nil
+	_AlliedSiege_ScheduleRespawn(side)
+end
+
+-----------------------------------------------------------
+-- _AlliedSiege_ScheduleRespawn(side)
+-- Sets respawn timer and ensures the respawn monitor is running.
+-----------------------------------------------------------
+function _AlliedSiege_ScheduleRespawn(side)
+	_allied_siege_spawned[side] = false
+	_allied_siege_respawn_due[side] = World_GetGameTime() + ALLIED_SIEGE_RESPAWN_TIMER
+	
+	if _allied_siege_respawn_monitor_active == false and Rule_Exists(AlliedSiege_RespawnMonitor) == false then
+		Rule_AddInterval(AlliedSiege_RespawnMonitor, 10)
+		_allied_siege_respawn_monitor_active = true
+	end
+end
+
+-----------------------------------------------------------
+-- AlliedSiege_RespawnMonitor()
+-- 10s interval rule. Re-deploys siege armies after their
+-- respawn timer expires. Self-removes when no respawns
+-- are pending and game is not ending.
+-----------------------------------------------------------
+function AlliedSiege_RespawnMonitor()
+	
+	-- Don't respawn if game is ending
+	if g_gameOver == true then
+		_allied_siege_respawn_monitor_active = false
+		Rule_RemoveMe()
+		return
+	end
+	
+	local now = World_GetGameTime()
+	local any_pending = false
+	
+	for side = 1, ALLIED_SIEGE_SIDE_COUNT do
+		if _allied_siege_respawn_due[side] > 0 and now >= _allied_siege_respawn_due[side] then
+			_allied_siege_respawn_due[side] = 0
+			AlliedSiege_Deploy(side)
+		end
+		if _allied_siege_respawn_due[side] > 0 then
+			any_pending = true
+		end
+	end
+	
+	-- Keep monitor alive as long as respawns are pending
+	if any_pending == false then
+		_allied_siege_respawn_monitor_active = false
+		Rule_RemoveMe()
+	end
+end
+
+function Phase3_FinalKeep_InitObjectives()
+	
+	OBJ_Phase3_FinalKeep_Main = {
+		Title = "$11172043",  -- "Destroy the keep" 
+		Type = ObjectiveType_Primary, 
+		SetupUI = Phase3_FinalKeep_UI,
+		OnStart = Phase3_FinalKeep_Start, 
+		OnComplete = Phase3_FinalKeep_OnComplete,
+	}
+	
+	Objective_Register(OBJ_Phase3_FinalKeep_Main)
+
+end
+
+function Phase3_FinalKeep_Start()
+	
+	-- Enable Rule
+	Rule_Add(Phase3_FinalKeep_count_rule)
+	
+end
+
+function Phase3_FinalKeep_UI()
+	
+	Objective_SetCounter(OBJ_Phase3_FinalKeep_Main, 0, 2) --Set the counter in the UI
+	
+end
+
+function Phase3_FinalKeep_count_rule()
+	
+	-- Counter +1
+	if EGroup_Count(eg_keeps) == 1 and keep1_kia == false then
+		if Objective_IsCounterSet(OBJ_Phase3_FinalKeep_Main) then
+			Objective_IncreaseCounter(OBJ_Phase3_FinalKeep_Main)
+			keep1_kia = true
+		end
+	end
+	
+	-- Victory
+	if EGroup_Count(eg_keeps) == 0 then
+		if Objective_IsComplete(OBJ_Phase3_FinalKeep_Main) == false then
+			Objective_Complete(OBJ_Phase3_FinalKeep_Main, true, true)
+			Rule_RemoveMe()
+			
+		else 
+			Rule_RemoveMe()
+		end
+	end
+	
+end
+
+function Phase3_FinalKeep_OnComplete() 
+	
+	--[[ Set eliminated / victorious
+	Core_SetPlayerDefeated(player6, Elimination_LoserPresentation, WR_ELIMINATION)
+	Core_SetPlayerVictorious(player1, Elimination_WinnerPresentation, WR_ELIMINATION)	
+	Core_SetPlayerVictorious(player2, Elimination_WinnerPresentation, WR_ELIMINATION)	
+	Core_SetPlayerVictorious(player3, Elimination_WinnerPresentation, WR_ELIMINATION)	
+	Core_SetPlayerVictorious(player4, Elimination_WinnerPresentation, WR_ELIMINATION)	
+	Core_SetPlayerVictorious(player5, Elimination_WinnerPresentation, WR_ELIMINATION)
+	Elimination_CheckVictory()]]
+	
+	Mission_Complete()
+	Rule_AddOneShot(Victory_Function, 10)
+	
+
+end 
+
+
+
+
+
+
+
+
+
+

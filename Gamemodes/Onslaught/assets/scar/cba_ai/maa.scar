@@ -1,0 +1,354 @@
+---------------------------------------------------------------------------------------------------
+-- CBA AI Player — Man-at-Arms State Machine
+-- Strict deterministic sequence: idle → scouting → enemy_found → rallying →
+--   regrouped → engaging → returning → scouting
+-- Origin: cba_ai_player.scar lines 1736–2152
+---------------------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------
+-- MaA State Machine: Transitions
+-----------------------------------------------------------------------
+
+function _AI_MaaTransition(player, new_state, reason)
+	local ai = player.ai
+	local now = World_GetGameTime()
+	local old_state = ai.maa_state or MAA_STATE_IDLE
+
+	local valid_transitions = {
+		[MAA_STATE_IDLE]        = { [MAA_STATE_SCOUTING] = true },
+		[MAA_STATE_SCOUTING]    = { [MAA_STATE_ENEMY_FOUND] = true, [MAA_STATE_RALLYING] = true },
+		[MAA_STATE_ENEMY_FOUND] = { [MAA_STATE_RALLYING] = true, [MAA_STATE_RETREATING] = true, [MAA_STATE_SCOUTING] = true, [MAA_STATE_ENGAGING] = true },
+		[MAA_STATE_RETREATING]  = { [MAA_STATE_RALLYING] = true, [MAA_STATE_SCOUTING] = true, [MAA_STATE_ENEMY_FOUND] = true },
+		[MAA_STATE_RALLYING]    = { [MAA_STATE_REGROUPED] = true, [MAA_STATE_ENGAGING] = true, [MAA_STATE_SCOUTING] = true },
+		[MAA_STATE_REGROUPED]   = { [MAA_STATE_ENGAGING] = true, [MAA_STATE_SCOUTING] = true },
+		[MAA_STATE_ENGAGING]    = { [MAA_STATE_SCOUTING] = true, [MAA_STATE_ENGAGING] = true },
+	}
+
+	local allowed = valid_transitions[old_state]
+	if allowed == nil or not allowed[new_state] then
+		ai.telemetry.maa_sequence_violations = (ai.telemetry.maa_sequence_violations or 0) + 1
+		_AI_DebugLog(1, string.format("[AI_PLAYER][MAA] %s SEQUENCE_VIOLATION %s -> %s reason=%s (BLOCKED)",
+			ai.label or "P?", old_state, new_state, reason or "?"))
+		return false
+	end
+
+	ai.maa_state = new_state
+	if old_state ~= new_state then
+		ai.maa_state_entered_at = now
+		-- BUG B FIX: stamp engage start time once on entry so the max-hold cap
+		-- in MAA_STATE_ENGAGING cannot be defeated by per-tick state_entered_at
+		-- resets while threats persist.
+		if new_state == MAA_STATE_ENGAGING then
+			ai.maa_engage_start_at = now
+		end
+	end
+	ai.maa_transition_count = (ai.maa_transition_count or 0) + 1
+	ai.telemetry.maa_transitions = (ai.telemetry.maa_transitions or 0) + 1
+
+	table.insert(ai.maa_state_history, { state = new_state, time = now, reason = reason })
+	if #ai.maa_state_history > 50 then
+		table.remove(ai.maa_state_history, 1)
+	end
+
+	_AI_DebugLog(1, string.format("[AI_PLAYER][MAA] %s %s -> %s reason=%s (t=%.1f)",
+		ai.label or "P?", old_state, new_state, reason or "?", now))
+end
+
+-----------------------------------------------------------------------
+-- MaA State Machine: Tick
+-----------------------------------------------------------------------
+
+function _AI_MaaStateTick(player)
+	local ai = player.ai
+	local now = World_GetGameTime()
+	local state = ai.maa_state or MAA_STATE_IDLE
+	local elapsed = now - (ai.maa_state_entered_at or 0)
+
+	if state == MAA_STATE_IDLE then
+		if ai.maa_claim_done and ai.patrol_sg ~= nil and SGroup_CountSpawned(ai.patrol_sg) > 0 then
+			_AI_MaaTransition(player, MAA_STATE_SCOUTING, "maa_claimed")
+			-- Claim already issues the first patrol order. Reissuing here can
+			-- immediately retarget the same squads before they reach waypoint 1.
+			if ai.patrol_current_target == nil then
+				_AI_IssuePatrolOrder(player)
+			end
+		end
+
+	elseif state == MAA_STATE_SCOUTING then
+		-- BUG A FIX: Threat detection must run before the hold guard so that
+		-- enemies approaching during army-dispatch / post-engage hold windows
+		-- are still detected. Hold only suppresses waypoint re-issuance below.
+		local patrol_pos = _AI_GetPatrolCurrentPosition(player)
+		local check_now = (now - (ai._last_threat_check_time or 0)) >= _AI_MAA_THREAT_CHECK_INTERVAL
+		if check_now and patrol_pos ~= nil then
+			ai._last_threat_check_time = now
+			local ok_threat, is_threatened = pcall(AIPlayer_IsPointThreatened, player.id, patrol_pos, true, 50.0)
+			if ok_threat and is_threatened then
+				if _AI_IsInsideKeepAttackBoundary(player, patrol_pos) then
+					ai.telemetry.maa_boundary_blocks = (ai.telemetry.maa_boundary_blocks or 0) + 1
+					_AI_LogBoundaryBlock(player, "scouting_threat_inside_boundary", patrol_pos)
+					_AI_RecordPatrolCommand(player, "maa_boundary_stop", "stop", patrol_pos, "scouting_threat_inside_boundary")
+					pcall(Cmd_Stop, ai.patrol_sg)
+					return
+				end
+				ai.maa_enemy_pos = patrol_pos
+				ai.patrol_last_threat_pos = patrol_pos
+				_AI_EmitThreatPing(player, patrol_pos)
+				_AI_MaaTransition(player, MAA_STATE_ENEMY_FOUND, "threat_detected")
+				pcall(Cmd_Stop, ai.patrol_sg)
+				return
+			end
+		end
+		local hold_active = (ai.patrol_order_hold_until ~= nil and now < ai.patrol_order_hold_until)
+		if hold_active then
+			ai.telemetry.patrol_orders_suppressed = (ai.telemetry.patrol_orders_suppressed or 0) + 1
+			return
+		end
+		if elapsed >= _AI_MAA_SCOUT_TIMEOUT then
+			ai.telemetry.maa_scout_timeouts = (ai.telemetry.maa_scout_timeouts or 0) + 1
+			ai.maa_state_entered_at = now
+			_AI_IssuePatrolOrder(player)
+			return
+		end
+		local target_pos = ai.patrol_current_target
+		if target_pos ~= nil then
+			local our_pos = _AI_GetPatrolCurrentPosition(player)
+			if our_pos ~= nil then
+				local ok_dist, dist = pcall(World_DistancePointToPoint, our_pos, target_pos)
+				if ok_dist and dist <= _AI_MAA_WAYPOINT_ARRIVAL_DIST then
+					ai.telemetry.maa_waypoint_arrivals = (ai.telemetry.maa_waypoint_arrivals or 0) + 1
+					_AI_IssuePatrolOrder(player)
+				end
+			end
+		else
+			_AI_IssuePatrolOrder(player)
+		end
+
+	elseif state == MAA_STATE_ENEMY_FOUND then
+		local enemy_pos = ai.maa_enemy_pos
+		if enemy_pos == nil then
+			ai._maa_hold_tick = nil
+			_AI_MaaTransition(player, MAA_STATE_SCOUTING, "lost_enemy_pos")
+			return
+		end
+
+		if ai._maa_hold_tick == nil then
+			ai._maa_hold_tick = true
+			ai.telemetry.maa_hold_entries = (ai.telemetry.maa_hold_entries or 0) + 1
+		end
+
+		local last_rally = ai._maa_last_rally_broadcast or 0
+		if (now - last_rally) >= _AI_MAA_RALLY_REBROADCAST then
+			ai._maa_last_rally_broadcast = now
+			local rallied = _AI_TryRallyAllies(player, enemy_pos)
+			if rallied then
+				ai.maa_rally_pos = ai.patrol_rally_pos
+				ai._maa_hold_tick = nil
+				_AI_MaaTransition(player, MAA_STATE_RALLYING, "allies_rallied")
+				return
+			end
+		end
+
+		if _AI_HasRallyTeammateAtThreat(player, enemy_pos) then
+			ai.maa_rally_pos = enemy_pos
+			ai.patrol_rally_pos = enemy_pos
+			ai._maa_hold_tick = nil
+			_AI_MaaTransition(player, MAA_STATE_RALLYING, "ally_arrived")
+			return
+		end
+
+		local ok_atk, under_attack = pcall(SGroup_IsUnderAttack, ai.patrol_sg, false, 3.0)
+		if ok_atk and under_attack then
+			local own_count = SGroup_CountSpawned(ai.patrol_sg)
+			if own_count >= _AI_MAA_SOLO_ENGAGE_MIN_COUNT then
+				-- RC1 fix: prevent same-tick solo_engage when dispatch_no_ally just entered ENEMY_FOUND
+				if elapsed < _AI_MAA_ENEMY_FOUND_MIN_DWELL then
+					return
+				end
+				if _AI_IsInsideKeepAttackBoundary(player, enemy_pos) then
+					ai.telemetry.maa_boundary_blocks = (ai.telemetry.maa_boundary_blocks or 0) + 1
+					_AI_LogBoundaryBlock(player, "solo_engage_blocked", enemy_pos)
+					_AI_RecordPatrolCommand(player, "maa_boundary_stop", "stop", enemy_pos, "solo_engage_blocked")
+					pcall(Cmd_Stop, ai.patrol_sg)
+					ai._maa_hold_tick = nil
+					return
+				end
+				ai.maa_engage_target = enemy_pos
+				ai.telemetry.maa_solo_engagements = (ai.telemetry.maa_solo_engagements or 0) + 1
+				ai._maa_hold_tick = nil
+				_AI_MaaTransition(player, MAA_STATE_ENGAGING, "solo_engage_superior")
+				_AI_RecordPatrolCommand(player, "maa_solo_engage", "attack_move", enemy_pos, "solo_engage_superior")
+				pcall(Cmd_AttackMove, ai.patrol_sg, enemy_pos, false)
+				_AI_SetPatrolOrderHold(player, "maa_solo_engage", _AI_MAA_ENGAGE_MIN_HOLD, "solo_engage_superior")
+				return
+			end
+			ai.telemetry.maa_retreats = (ai.telemetry.maa_retreats or 0) + 1
+			ai._maa_hold_tick = nil
+			_AI_MaaTransition(player, MAA_STATE_RETREATING, "attacked_no_ally")
+			return
+		end
+
+		local our_pos = _AI_GetPatrolCurrentPosition(player)
+		if our_pos ~= nil then
+			local ok_threat, is_threatened = pcall(AIPlayer_IsPointThreatened, player.id, our_pos, true, 50.0)
+			if ok_threat and not is_threatened then
+				ai.maa_enemy_pos = nil
+				ai._maa_hold_tick = nil
+				_AI_MaaTransition(player, MAA_STATE_SCOUTING, "threat_cleared")
+				_AI_ResumePatrolFromCurrentPosition(player)
+				return
+			end
+		end
+
+		if elapsed >= _AI_MAA_HOLD_TIMEOUT then
+			if _AI_IsInsideKeepAttackBoundary(player, enemy_pos) then
+				ai.telemetry.maa_boundary_blocks = (ai.telemetry.maa_boundary_blocks or 0) + 1
+				_AI_LogBoundaryBlock(player, "hold_timeout_blocked", enemy_pos)
+				_AI_RecordPatrolCommand(player, "maa_boundary_stop", "stop", enemy_pos, "hold_timeout_blocked")
+				pcall(Cmd_Stop, ai.patrol_sg)
+				return
+			end
+			ai.telemetry.maa_hold_timeouts = (ai.telemetry.maa_hold_timeouts or 0) + 1
+			ai.maa_engage_target = enemy_pos
+			ai._maa_hold_tick = nil
+			_AI_MaaTransition(player, MAA_STATE_ENGAGING, "hold_timeout_engage")
+			_AI_RecordPatrolCommand(player, "maa_hold_timeout_engage", "attack_move", enemy_pos, "hold_timeout_engage")
+			pcall(Cmd_AttackMove, ai.patrol_sg, enemy_pos, false)
+			_AI_SetPatrolOrderHold(player, "maa_hold_timeout_engage", _AI_MAA_ENGAGE_MIN_HOLD, "hold_timeout_engage")
+			return
+		end
+
+	elseif state == MAA_STATE_RETREATING then
+		local ally_pos = _AI_FindNearestAllyPatrolPosition(player)
+		local retreat_target = ally_pos or _AI_GetBasePosition(player)
+
+		if retreat_target ~= nil then
+			pcall(Cmd_Move, ai.patrol_sg, retreat_target, false)
+		end
+
+		local enemy_pos = ai.maa_enemy_pos
+		if enemy_pos ~= nil then
+			local last_rally = ai._maa_last_rally_broadcast or 0
+			if (now - last_rally) >= _AI_MAA_RALLY_REBROADCAST then
+				ai._maa_last_rally_broadcast = now
+				_AI_TryRallyAllies(player, enemy_pos)
+			end
+		end
+
+		if ally_pos ~= nil then
+			local our_pos = _AI_GetPatrolCurrentPosition(player)
+			if our_pos ~= nil then
+				local ok_dist, dist = pcall(World_DistancePointToPoint, our_pos, ally_pos)
+				if ok_dist and dist <= _AI_MAA_ALLY_PROXIMITY then
+					local rally_target = ai.maa_enemy_pos or our_pos
+					ai.maa_rally_pos = rally_target
+					ai.patrol_rally_pos = rally_target
+					_AI_MaaTransition(player, MAA_STATE_RALLYING, "ally_reached")
+					return
+				end
+			end
+		end
+
+		local our_pos = _AI_GetPatrolCurrentPosition(player)
+		if our_pos ~= nil then
+			local ok_threat, is_threatened = pcall(AIPlayer_IsPointThreatened, player.id, our_pos, true, 50.0)
+			if ok_threat and not is_threatened then
+				ai.maa_enemy_pos = nil
+				_AI_MaaTransition(player, MAA_STATE_SCOUTING, "retreat_threat_cleared")
+				_AI_ResumePatrolFromCurrentPosition(player)
+				return
+			end
+		end
+
+		if elapsed >= _AI_MAA_RETREAT_TIMEOUT then
+			ai.maa_enemy_pos = nil
+			_AI_MaaTransition(player, MAA_STATE_SCOUTING, "retreat_timeout")
+			_AI_ResumePatrolFromCurrentPosition(player)
+			return
+		end
+
+	elseif state == MAA_STATE_RALLYING then
+		local rally_pos = ai.maa_rally_pos or ai.patrol_rally_pos
+		if rally_pos == nil then
+			_AI_MaaTransition(player, MAA_STATE_SCOUTING, "lost_rally_pos")
+			ai.patrol_rallying = false
+			return
+		end
+		local our_pos = _AI_GetPatrolCurrentPosition(player)
+		if our_pos ~= nil then
+			local ok_dist, dist = pcall(World_DistancePointToPoint, our_pos, rally_pos)
+			if ok_dist and dist < _AI_MAA_RALLY_PROXIMITY then
+				if _AI_HasRallyTeammateAtThreat(player, rally_pos) then
+					_AI_MaaTransition(player, MAA_STATE_REGROUPED, "proximity_met")
+					return
+				end
+			end
+		end
+		if elapsed >= _AI_MAA_REGROUP_TIMEOUT then
+			if _AI_IsInsideKeepAttackBoundary(player, ai.maa_enemy_pos or rally_pos) then
+				ai.telemetry.maa_boundary_blocks = (ai.telemetry.maa_boundary_blocks or 0) + 1
+				_AI_LogBoundaryBlock(player, "regroup_timeout_blocked", ai.maa_enemy_pos or rally_pos)
+				_AI_RecordPatrolCommand(player, "maa_boundary_stop", "stop", ai.maa_enemy_pos or rally_pos, "regroup_timeout_blocked")
+				pcall(Cmd_Stop, ai.patrol_sg)
+				return
+			end
+			ai.telemetry.maa_regroup_timeouts = (ai.telemetry.maa_regroup_timeouts or 0) + 1
+			ai.maa_engage_target = ai.maa_enemy_pos or rally_pos
+			_AI_MaaTransition(player, MAA_STATE_ENGAGING, "regroup_timeout")
+			_AI_RecordPatrolCommand(player, "maa_timeout_engage", "attack_move", ai.maa_engage_target, "regroup_timeout")
+			pcall(Cmd_AttackMove, ai.patrol_sg, ai.maa_engage_target, false)
+			_AI_SetPatrolOrderHold(player, "maa_timeout_engage", _AI_MAA_ENGAGE_MIN_HOLD, "regroup_timeout")
+			ai.patrol_rallying = false
+		end
+
+	elseif state == MAA_STATE_REGROUPED then
+		local target = ai.maa_enemy_pos or ai.maa_rally_pos
+		if target == nil then
+			_AI_MaaTransition(player, MAA_STATE_SCOUTING, "no_engage_target")
+			ai.patrol_rallying = false
+			return
+		end
+		if _AI_IsInsideKeepAttackBoundary(player, target) then
+			ai.telemetry.maa_boundary_blocks = (ai.telemetry.maa_boundary_blocks or 0) + 1
+			_AI_LogBoundaryBlock(player, "regrouped_engage_blocked", target)
+			_AI_RecordPatrolCommand(player, "maa_boundary_stop", "stop", target, "regrouped_engage_blocked")
+			pcall(Cmd_Stop, ai.patrol_sg)
+			return
+		end
+		ai.maa_engage_target = target
+		ai.telemetry.maa_engagements = (ai.telemetry.maa_engagements or 0) + 1
+		_AI_MaaTransition(player, MAA_STATE_ENGAGING, "regroup_complete")
+		_AI_RecordPatrolCommand(player, "maa_coordinated_engage", "attack_move", target, "regroup_complete")
+		pcall(Cmd_AttackMove, ai.patrol_sg, target, false)
+		_AI_SetPatrolOrderHold(player, "maa_coordinated_engage", _AI_MAA_ENGAGE_MIN_HOLD, "regroup_complete")
+		ai.telemetry.patrol_orders = (ai.telemetry.patrol_orders or 0) + 1
+		ai.patrol_rallying = false
+
+	elseif state == MAA_STATE_ENGAGING then
+		if elapsed >= _AI_MAA_ENGAGE_MIN_HOLD then
+			local still_fighting = false
+			local our_pos = _AI_GetPatrolCurrentPosition(player)
+			if our_pos ~= nil then
+				local ok_threat, is_threatened = pcall(AIPlayer_IsPointThreatened, player.id, our_pos, true, 50.0)
+				still_fighting = (ok_threat and is_threatened)
+			end
+
+			-- BUG B FIX: max-hold cap is measured from engage_start_at (set once
+			-- on transition into ENGAGING), not from maa_state_entered_at which
+			-- was previously reset every tick under sustained threat and prevented
+			-- the 120s cap from ever firing.
+			local engage_elapsed = now - (ai.maa_engage_start_at or ai.maa_state_entered_at or now)
+			if still_fighting and engage_elapsed < _AI_MAA_ENGAGE_MAX_HOLD then
+				ai.telemetry.maa_engage_extensions = (ai.telemetry.maa_engage_extensions or 0) + 1
+			else
+				local reason = (engage_elapsed >= _AI_MAA_ENGAGE_MAX_HOLD) and "engage_max_timeout" or "engage_complete"
+				_AI_SetPatrolOrderHold(player, "engage_recovery", _AI_PATROL_RECOVERY_HOLD, reason)
+				ai.maa_enemy_pos = nil
+				ai.maa_rally_pos = nil
+				ai.maa_engage_target = nil
+				_AI_MaaTransition(player, MAA_STATE_SCOUTING, reason)
+				_AI_ResumePatrolFromCurrentPosition(player)
+			end
+		end
+	end
+end

@@ -1,0 +1,441 @@
+---------------------------------------------------------------------------------------------------
+-- Boon Selection UI — Choice Data Definitions
+-- Maps upgrade blueprints to display info (title, description, icon, unit name).
+-- Extensible: add new civs or boon sets by registering data tables.
+---------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------
+-- Runtime icon resolution helper
+-- Uses BP_GetUpgradeUIInfo to fetch the engine icon path for an upgrade blueprint.
+-- Returns a pack:// XAML-usable string, or "" on failure.
+---------------------------------------------------------------------------------------------------
+
+function BoonSelection_ResolveUpgradeIcon(upg_name)
+	if upg_name == nil or upg_name == "" then return "" end
+	local ok_bp, ubp = pcall(BP_GetUpgradeBlueprint, upg_name)
+	if not ok_bp or ubp == nil then return "" end
+	local ok_ui, uiinfo = pcall(BP_GetUpgradeUIInfo, ubp)
+	if not ok_ui or uiinfo == nil or uiinfo.iconName == nil then return "" end
+	return string.format("pack://application:,,,/WPFGUI;component/%s.png", string.gsub(uiinfo.iconName, "\\", "/"))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Wing family utilities
+-- Used by Abbasid/Ayyubid to enforce one-pick-per-family uniqueness across tier choices.
+---------------------------------------------------------------------------------------------------
+
+_BOON_WING_FAMILIES = { "culture", "economy", "military", "trade" }
+
+-- Returns the wing family name ("culture", "economy", "military", "trade") from an upgrade BP name.
+function BoonSelection_GetWingFamily(upgrade_name)
+	if upgrade_name == nil or upgrade_name == "" then return nil end
+	if string.find(upgrade_name, "culture_wing") then return "culture" end
+	if string.find(upgrade_name, "economy_wing") then return "economy" end
+	if string.find(upgrade_name, "military_wing") then return "military" end
+	if string.find(upgrade_name, "trade_wing") then return "trade" end
+	return nil
+end
+
+-- Returns a set { family = true } of wing families already completed by a player,
+-- checking all tier upgrades in _AUTOAGE_SPECIAL_UPGRADES.
+function BoonSelection_GetChosenWingFamilies(player_id, civ_name)
+	local chosen = {}
+	if player_id == nil or civ_name == nil then return chosen end
+	local civ_cfg = _AUTOAGE_SPECIAL_UPGRADES[civ_name]
+	if civ_cfg == nil then return chosen end
+
+	for _, tier_name in ipairs({"feudal", "castle", "imperial"}) do
+		local tier_upgrades = civ_cfg[tier_name]
+		if tier_upgrades ~= nil then
+			for _, upg_name in ipairs(tier_upgrades) do
+				local ok_bp, ubp = pcall(BP_GetUpgradeBlueprint, upg_name)
+				if ok_bp and ubp ~= nil and Player_HasUpgrade(player_id, ubp) then
+					local family = BoonSelection_GetWingFamily(upg_name)
+					if family ~= nil then
+						chosen[family] = true
+					end
+				end
+			end
+		end
+	end
+
+	return chosen
+end
+
+---------------------------------------------------------------------------------------------------
+-- Templar Commandery Data
+-- 9 commanderies: 3 per age tier (Feudal, Castle, Imperial).
+-- Index 1-3 = Feudal, 4-6 = Castle, 7-9 = Imperial.
+-- Icons from official templar_age_up_ui.scar DataContext.
+---------------------------------------------------------------------------------------------------
+
+_BOON_TEMPLAR_COMMANDERIES = {
+	-- Feudal (Age II)
+	{
+		upgrade = "upgrade_age_dark_com_1_tem",
+		title = "Knight Hospitaller",
+		unit = "Knight Hospitaller",
+		desc = "Grants access to mounted knight units from the Hospitaller order.",
+		icon = "pack://application:,,,/WPFGUI;component/icons/races/templar/commanderieflags/civ_icon_large_knight_hospitalier.png",
+	},
+	{
+		upgrade = "upgrade_age_dark_com_2_tem",
+		title = "Kingdom of France",
+		unit = "Chevalier Confrere",
+		desc = "Unlocks the Chevalier Confrere cavalry unit from France.",
+		icon = "pack://application:,,,/WPFGUI;component/icons/races/templar/commanderieflags/civ_icon_large_kingdom_of_france.png",
+	},
+	{
+		upgrade = "upgrade_age_dark_com_3_tem",
+		title = "Principality of Antioch",
+		unit = "Serjeant",
+		desc = "Unlocks the Serjeant infantry unit from Antioch.",
+		icon = "pack://application:,,,/WPFGUI;component/icons/races/templar/commanderieflags/civ_icon_large_principality_of_antioch.png",
+	},
+	-- Castle (Age III)
+	{
+		upgrade = "upgrade_age_feudal_com_1_tem",
+		title = "Angevin Empire",
+		unit = "Heavy Spearman",
+		desc = "Grants the Heavy Spearman from the Angevin Empire.",
+		icon = "pack://application:,,,/WPFGUI;component/icons/races/templar/commanderieflags/civ_icon_large_angevin_empire.png",
+	},
+	{
+		upgrade = "upgrade_age_feudal_com_2_tem",
+		title = "Republic of Genoa",
+		unit = "Genoese Crossbow",
+		desc = "Unlocks the deadly Genoese Crossbow ranged unit.",
+		icon = "pack://application:,,,/WPFGUI;component/icons/races/templar/commanderieflags/civ_icon_large_republic_of_genoa.png",
+	},
+	{
+		upgrade = "upgrade_age_feudal_com_3_tem",
+		title = "Kingdom of Castile",
+		unit = "Genitour",
+		desc = "Unlocks the Genitour mounted skirmisher from Castile.",
+		icon = "pack://application:,,,/WPFGUI;component/icons/races/templar/commanderieflags/civ_icon_large_kingdom_of_castile.png",
+	},
+	-- Imperial (Age IV)
+	{
+		upgrade = "upgrade_age_castle_com_1_tem",
+		title = "Kingdom of Poland",
+		unit = "Szlachta Knight",
+		desc = "Grants the armored Szlachta Knight heavy cavalry.",
+		icon = "pack://application:,,,/WPFGUI;component/icons/races/templar/commanderieflags/civ_icon_large_kingdom_of_poland.png",
+	},
+	{
+		upgrade = "upgrade_age_castle_com_2_tem",
+		title = "Teutonic Knights",
+		unit = "Teutonic Knight",
+		desc = "Unlocks the elite Teutonic Knight heavy infantry.",
+		icon = "pack://application:,,,/WPFGUI;component/icons/races/templar/commanderieflags/civ_icon_large_teutonic_knights.png",
+	},
+	{
+		upgrade = "upgrade_age_castle_com_3_tem",
+		title = "Republic of Venice",
+		unit = "Condottiero",
+		desc = "Grants Condottiero mercenaries and naval units from Venice.",
+		icon = "pack://application:,,,/WPFGUI;component/icons/races/templar/commanderieflags/civ_icon_large_republic_of_venice.png",
+	},
+}
+
+---------------------------------------------------------------------------------------------------
+-- Tier index helper: returns the 3 commandery entries for a given tier name.
+---------------------------------------------------------------------------------------------------
+
+function BoonSelection_GetTemplarChoicesForTier(tier_name)
+	local offset = 0
+	if tier_name == "feudal" then
+		offset = 0
+	elseif tier_name == "castle" then
+		offset = 3
+	elseif tier_name == "imperial" then
+		offset = 6
+	else
+		return nil
+	end
+
+	local choices = {}
+	for i = 1, 3 do
+		local entry = _BOON_TEMPLAR_COMMANDERIES[offset + i]
+		if entry ~= nil then
+			table.insert(choices, {
+				index = i,
+				upgrade = entry.upgrade,
+				title = entry.title,
+				unit = entry.unit,
+				desc = entry.desc,
+				icon = entry.icon,
+			})
+		end
+	end
+
+	if #choices == 0 then
+		return nil
+	end
+	return choices
+end
+
+---------------------------------------------------------------------------------------------------
+-- Tier title helper: returns display title for the selection prompt.
+---------------------------------------------------------------------------------------------------
+
+function BoonSelection_GetTemplarTierTitle(tier_name)
+	if tier_name == "feudal" then
+		return "Choose Feudal Age Commandery"
+	elseif tier_name == "castle" then
+		return "Choose Castle Age Commandery"
+	elseif tier_name == "imperial" then
+		return "Choose Imperial Age Commandery"
+	end
+	return "Choose Commandery"
+end
+
+function BoonSelection_GetTemplarTierSubtitle(tier_name)
+	if tier_name == "feudal" then
+		return "Select a Commandery to advance to the Feudal Age"
+	elseif tier_name == "castle" then
+		return "Select a Commandery to advance to the Castle Age"
+	elseif tier_name == "imperial" then
+		return "Select a Commandery to advance to the Imperial Age"
+	end
+	return "Select a Commandery to advance"
+end
+
+---------------------------------------------------------------------------------------------------
+-- Abbasid Wing Data (base abbasid)
+-- 4 wings per tier (Culture, Economy, Military, Trade).
+-- Tier key "feudal" = dark-age wings (chosen when aging to Feudal), etc.
+---------------------------------------------------------------------------------------------------
+
+_BOON_ABBASID_WINGS = {
+	feudal = {
+		{ upgrade = "upgrade_add_culture_wing",  title = "Culture Wing",  desc = "Improves technology research speed and healing rates." },
+		{ upgrade = "upgrade_add_economy_wing",  title = "Economic Wing", desc = "Boosts villager gathering rates and construction speed." },
+		{ upgrade = "upgrade_add_military_wing", title = "Military Wing", desc = "Enhances military production speed and unit stats." },
+		{ upgrade = "upgrade_add_trade_wing",    title = "Trade Wing",    desc = "Improves trade ship speed and market exchange rates." },
+	},
+	castle = {
+		{ upgrade = "upgrade_add_culture_wing_feudal",  title = "Culture Wing",  desc = "Further improves research and healing capabilities." },
+		{ upgrade = "upgrade_add_economy_wing_feudal",  title = "Economic Wing", desc = "Further boosts gathering and construction speed." },
+		{ upgrade = "upgrade_add_military_wing_feudal", title = "Military Wing", desc = "Further enhances military production and stats." },
+		{ upgrade = "upgrade_add_trade_wing_feudal",    title = "Trade Wing",    desc = "Further improves trade income and market rates." },
+	},
+	imperial = {
+		{ upgrade = "upgrade_add_culture_wing_castle",  title = "Culture Wing",  desc = "Maximum culture bonuses for research and healing." },
+		{ upgrade = "upgrade_add_economy_wing_castle",  title = "Economic Wing", desc = "Maximum economy bonuses for gathering and building." },
+		{ upgrade = "upgrade_add_military_wing_castle", title = "Military Wing", desc = "Maximum military bonuses for production and combat." },
+		{ upgrade = "upgrade_add_trade_wing_castle",    title = "Trade Wing",    desc = "Maximum trade bonuses for income and exchange." },
+	},
+}
+
+function BoonSelection_GetAbbasidChoicesForTier(tier_name, chosen_families)
+	local tier_data = _BOON_ABBASID_WINGS[tier_name]
+	if tier_data == nil then return nil end
+
+	local choices = {}
+	for i, entry in ipairs(tier_data) do
+		local dominated = false
+		if chosen_families ~= nil then
+			local family = BoonSelection_GetWingFamily(entry.upgrade)
+			if family ~= nil and chosen_families[family] then
+				dominated = true
+			end
+		end
+		if not dominated then
+			table.insert(choices, {
+				index = #choices + 1,
+				upgrade = entry.upgrade,
+				title = entry.title,
+				unit = "House of Wisdom",
+				desc = entry.desc,
+				icon = BoonSelection_ResolveUpgradeIcon(entry.upgrade),
+			})
+		end
+	end
+	return (#choices > 0) and choices or nil
+end
+
+function BoonSelection_GetAbbasidTierTitle(tier_name)
+	if tier_name == "feudal" then
+		return "Choose Feudal Age Wing"
+	elseif tier_name == "castle" then
+		return "Choose Castle Age Wing"
+	elseif tier_name == "imperial" then
+		return "Choose Imperial Age Wing"
+	end
+	return "Choose Wing"
+end
+
+function BoonSelection_GetAbbasidTierSubtitle(tier_name)
+	if tier_name == "feudal" then
+		return "Select a House of Wisdom wing to advance to the Feudal Age"
+	elseif tier_name == "castle" then
+		return "Select a House of Wisdom wing to advance to the Castle Age"
+	elseif tier_name == "imperial" then
+		return "Select a House of Wisdom wing to advance to the Imperial Age"
+	end
+	return "Select a House of Wisdom wing"
+end
+
+---------------------------------------------------------------------------------------------------
+-- Ayyubid Wing Data (abbasid_ha_01)
+-- 4 wings per tier, A-variant only (B-variants can be expanded later).
+-- Tier key "feudal" = dark-age wings (chosen when aging to Feudal), etc.
+---------------------------------------------------------------------------------------------------
+
+_BOON_AYYUBID_WINGS = {
+	feudal = {
+		{ upgrade = "upgrade_add_culture_wing_dark_a_abb_ha_01",  title = "Culture Wing",  desc = "Improves technology research speed and healing rates." },
+		{ upgrade = "upgrade_add_economy_wing_dark_a_abb_ha_01",  title = "Economic Wing", desc = "Boosts villager gathering rates and construction speed." },
+		{ upgrade = "upgrade_add_military_wing_dark_a_abb_ha_01", title = "Military Wing", desc = "Enhances military production speed and unit stats." },
+		{ upgrade = "upgrade_add_trade_wing_dark_a_abb_ha_01",    title = "Trade Wing",    desc = "Improves trade ship speed and market exchange rates." },
+	},
+	castle = {
+		{ upgrade = "upgrade_add_culture_wing_feudal_a_abb_ha_01",  title = "Culture Wing",  desc = "Further improves research and healing capabilities." },
+		{ upgrade = "upgrade_add_economy_wing_feudal_a_abb_ha_01",  title = "Economic Wing", desc = "Further boosts gathering and construction speed." },
+		{ upgrade = "upgrade_add_military_wing_feudal_a_abb_ha_01", title = "Military Wing", desc = "Further enhances military production and stats." },
+		{ upgrade = "upgrade_add_trade_wing_feudal_a_abb_ha_01",    title = "Trade Wing",    desc = "Further improves trade income and market rates." },
+	},
+	imperial = {
+		{ upgrade = "upgrade_add_culture_wing_castle_a_abb_ha_01",  title = "Culture Wing",  desc = "Maximum culture bonuses for research and healing." },
+		{ upgrade = "upgrade_add_economy_wing_castle_a_abb_ha_01",  title = "Economic Wing", desc = "Maximum economy bonuses for gathering and building." },
+		{ upgrade = "upgrade_add_military_wing_castle_a_abb_ha_01", title = "Military Wing", desc = "Maximum military bonuses for production and combat." },
+		{ upgrade = "upgrade_add_trade_wing_castle_a_abb_ha_01",    title = "Trade Wing",    desc = "Maximum trade bonuses for income and exchange." },
+	},
+}
+
+function BoonSelection_GetAyyubidChoicesForTier(tier_name, chosen_families)
+	local tier_data = _BOON_AYYUBID_WINGS[tier_name]
+	if tier_data == nil then return nil end
+
+	local choices = {}
+	for i, entry in ipairs(tier_data) do
+		local dominated = false
+		if chosen_families ~= nil then
+			local family = BoonSelection_GetWingFamily(entry.upgrade)
+			if family ~= nil and chosen_families[family] then
+				dominated = true
+			end
+		end
+		if not dominated then
+			table.insert(choices, {
+				index = #choices + 1,
+				upgrade = entry.upgrade,
+				title = entry.title,
+				unit = "House of Wisdom",
+				desc = entry.desc,
+				icon = BoonSelection_ResolveUpgradeIcon(entry.upgrade),
+			})
+		end
+	end
+	return (#choices > 0) and choices or nil
+end
+
+function BoonSelection_GetAyyubidTierTitle(tier_name)
+	if tier_name == "feudal" then
+		return "Choose Feudal Age Wing"
+	elseif tier_name == "castle" then
+		return "Choose Castle Age Wing"
+	elseif tier_name == "imperial" then
+		return "Choose Imperial Age Wing"
+	end
+	return "Choose Wing"
+end
+
+function BoonSelection_GetAyyubidTierSubtitle(tier_name)
+	if tier_name == "feudal" then
+		return "Select a House of Wisdom wing to advance to the Feudal Age"
+	elseif tier_name == "castle" then
+		return "Select a House of Wisdom wing to advance to the Castle Age"
+	elseif tier_name == "imperial" then
+		return "Select a House of Wisdom wing to advance to the Imperial Age"
+	end
+	return "Select a House of Wisdom wing"
+end
+
+---------------------------------------------------------------------------------------------------
+-- Golden Horde Tent Data (mongol_ha_gol)
+-- 2 choices per tier.
+---------------------------------------------------------------------------------------------------
+
+_BOON_GOLDEN_HORDE_TENTS = {
+	feudal = {
+		{ upgrade = "upgrade_tent_dark_1_khan_mon_ha_gol",  title = "Khan and Torguuds", desc = "Unlocks the Khan hero and Torguud elite units." },
+		{ upgrade = "upgrade_tent_dark_2_cart_mon_ha_gol",  title = "Building Carts",    desc = "Enables mobile building carts for rapid expansion." },
+	},
+	castle = {
+		{ upgrade = "upgrade_tent_feudal_1_pasture_mon_ha_gol", title = "Muscovy Yasak",  desc = "Pastures generate gold over time." },
+		{ upgrade = "upgrade_tent_feudal_2_relics_mon_ha_gol",  title = "Relic Ovoos",    desc = "Relics placed in Ovoos generate stone." },
+	},
+	imperial = {
+		{ upgrade = "upgrade_tent_castle_1_tribute_mon_ha_gol",            title = "Stone Armies",      desc = "Spend stone to tribute and reinforce military units." },
+		{ upgrade = "upgrade_tent_castle_2_batch_production_mon_ha_gol",   title = "Yam Network Trade", desc = "Enables batch production and Yam trade network." },
+	},
+}
+
+function BoonSelection_GetGoldenHordeChoicesForTier(tier_name)
+	local tier_data = _BOON_GOLDEN_HORDE_TENTS[tier_name]
+	if tier_data == nil then return nil end
+
+	local choices = {}
+	for i, entry in ipairs(tier_data) do
+		table.insert(choices, {
+			index = i,
+			upgrade = entry.upgrade,
+			title = entry.title,
+			unit = "Golden Tent",
+			desc = entry.desc,
+			icon = BoonSelection_ResolveUpgradeIcon(entry.upgrade),
+		})
+	end
+	return choices
+end
+
+function BoonSelection_GetGoldenHordeTierTitle(tier_name)
+	if tier_name == "feudal" then
+		return "Choose Feudal Age Tent Upgrade"
+	elseif tier_name == "castle" then
+		return "Choose Castle Age Tent Upgrade"
+	elseif tier_name == "imperial" then
+		return "Choose Imperial Age Tent Upgrade"
+	end
+	return "Choose Tent Upgrade"
+end
+
+function BoonSelection_GetGoldenHordeTierSubtitle(tier_name)
+	if tier_name == "feudal" then
+		return "Select a Golden Tent upgrade to advance to the Feudal Age"
+	elseif tier_name == "castle" then
+		return "Select a Golden Tent upgrade to advance to the Castle Age"
+	elseif tier_name == "imperial" then
+		return "Select a Golden Tent upgrade to advance to the Imperial Age"
+	end
+	return "Select a Golden Tent upgrade"
+end
+
+---------------------------------------------------------------------------------------------------
+-- Unified dispatcher — returns (choices, title, subtitle) for any supported civ.
+---------------------------------------------------------------------------------------------------
+
+function BoonSelection_GetChoicesForCiv(civ_name, tier_name, player_id)
+	if civ_name == "templar" then
+		return BoonSelection_GetTemplarChoicesForTier(tier_name),
+			BoonSelection_GetTemplarTierTitle(tier_name),
+			BoonSelection_GetTemplarTierSubtitle(tier_name)
+	elseif civ_name == "abbasid" then
+		local chosen = (player_id ~= nil) and BoonSelection_GetChosenWingFamilies(player_id, civ_name) or nil
+		return BoonSelection_GetAbbasidChoicesForTier(tier_name, chosen),
+			BoonSelection_GetAbbasidTierTitle(tier_name),
+			BoonSelection_GetAbbasidTierSubtitle(tier_name)
+	elseif civ_name == "abbasid_ha_01" then
+		local chosen = (player_id ~= nil) and BoonSelection_GetChosenWingFamilies(player_id, civ_name) or nil
+		return BoonSelection_GetAyyubidChoicesForTier(tier_name, chosen),
+			BoonSelection_GetAyyubidTierTitle(tier_name),
+			BoonSelection_GetAyyubidTierSubtitle(tier_name)
+	elseif civ_name == "mongol_ha_gol" then
+		return BoonSelection_GetGoldenHordeChoicesForTier(tier_name),
+			BoonSelection_GetGoldenHordeTierTitle(tier_name),
+			BoonSelection_GetGoldenHordeTierSubtitle(tier_name)
+	end
+	return nil, nil, nil
+end

@@ -1,0 +1,271 @@
+---------------------------------------------------------------------------------------------------
+-- CBA AI Player — Sanity, Wall Detection, Hostile Zone, Stage Progression
+-- Periodic cross-system consistency checks, wall scan, hostile secondary zone
+-- detection, and villager stage advancement logic.
+-- Origin: cba_ai_player.scar lines 4695–4970
+---------------------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------
+-- Wall Detection
+-----------------------------------------------------------------------
+
+function _AI_DetectWalls()
+	for _, player in ipairs(_ai_players) do
+		if not _AI_IsEliminated(player) and not player.ai.wall_scan_done then
+			_AI_ScanPlayerWalls(player)
+		end
+	end
+	-- Propagate: if any teammate is walled, flag entire team as speculatively walled
+	for _, player in ipairs(_ai_players) do
+		if player.ai.is_walled then
+			for _, ally in ipairs(_ai_players) do
+				if ally.id ~= player.id and _AI_IsSameTeam(player, ally) then
+					if not ally.ai.team_walled then
+						ally.ai.team_walled = true
+						_AI_DebugLog(1, string.format("[AI_PLAYER] %s team_walled=true (speculative, teammate %s is walled)",
+							ally.ai.label or "P?", player.ai.label or "P?"))
+					end
+				end
+			end
+		end
+	end
+end
+
+function _AI_ScanPlayerWalls(player)
+	local ai = player.ai
+	ai.wall_scan_done = true
+	local base_pos = _AI_GetBasePosition(player)
+	if base_pos == nil then return end
+
+	local eg_all = Player_GetEntities(player.id)
+	local wall_count = 0
+	local total = EGroup_CountSpawned(eg_all)
+	for i = 1, total do
+		local ent = EGroup_GetSpawnedEntityAt(eg_all, i)
+		if ent ~= nil then
+			local ok_type, is_wall = pcall(Entity_IsOfType, ent, "stone_wall")
+			if ok_type and is_wall then
+				local ok_pos, ent_pos = pcall(Entity_GetPosition, ent)
+				if ok_pos and ent_pos ~= nil then
+					local ok_dist, dist = pcall(World_DistancePointToPoint, ent_pos, base_pos)
+					if ok_dist and dist <= _AI_WALL_DETECT_RADIUS then
+						wall_count = wall_count + 1
+					end
+				end
+			end
+		end
+	end
+	EGroup_Destroy(eg_all)
+
+	if wall_count >= _AI_WALL_DETECT_MIN_SEGMENTS then
+		ai.is_walled = true
+		ai.team_walled = true
+		_AI_DebugLog(1, string.format("[AI_PLAYER] %s is_walled=true (detected %d stone wall segments within %.0f radius)",
+			ai.label or "P?", wall_count, _AI_WALL_DETECT_RADIUS))
+	else
+		_AI_DebugLog(1, string.format("[AI_PLAYER] %s wall scan: %d segments (below threshold %d)",
+			ai.label or "P?", wall_count, _AI_WALL_DETECT_MIN_SEGMENTS))
+	end
+end
+
+-----------------------------------------------------------------------
+-- Ram Production Check
+-----------------------------------------------------------------------
+
+function _AI_CanProduceRams(player)
+	local ai = player.ai
+	if ai.buildings.siege_workshop == nil or ai.buildings.siege_workshop.count < 1 then
+		return false
+	end
+	local player_civ = Player_GetRaceName(player.id)
+	local ok_sbp, sbp = pcall(Cardinal_ConvertTypeToSquadBlueprint, "scar_ram", player.id)
+	return ok_sbp and sbp ~= nil
+end
+
+-----------------------------------------------------------------------
+-- Hostile Secondary Zone Detection
+-----------------------------------------------------------------------
+
+function _AI_ScanSecondaryZoneHostile(player)
+	local ai = player.ai
+	local zone_center = _AI_GetSecondaryZoneCenter(player)
+	if zone_center == nil then
+		ai.secondary_zone_hostile = false
+		ai.secondary_zone_attack_target = nil
+		return
+	end
+
+	local found_hostile = false
+	local hostile_pos = nil
+
+	for _, other in ipairs(PLAYERS) do
+		if other.id ~= player.id then
+			local is_enemy = true
+			if player.AGS_Team ~= nil and other.AGS_Team ~= nil then
+				is_enemy = (player.AGS_Team.index ~= other.AGS_Team.index)
+			end
+			if is_enemy then
+				local eg_enemy = Player_GetEntities(other.id)
+				local count = EGroup_CountSpawned(eg_enemy)
+				for i = 1, count do
+					local ent = EGroup_GetSpawnedEntityAt(eg_enemy, i)
+					if ent ~= nil then
+						local ok_alive, alive = pcall(Entity_IsAlive, ent)
+						if ok_alive and alive then
+							local ok_pos, epos = pcall(Entity_GetPosition, ent)
+							if ok_pos and epos ~= nil then
+								local ok_dist, dist = pcall(World_DistancePointToPoint, epos, zone_center)
+								if ok_dist and dist <= _AI_HOSTILE_ZONE_SCAN_RADIUS then
+									found_hostile = true
+									hostile_pos = epos
+									break
+								end
+							end
+						end
+					end
+				end
+				EGroup_Destroy(eg_enemy)
+				if found_hostile then break end
+			end
+		end
+	end
+
+	local was_hostile = ai.secondary_zone_hostile
+	ai.secondary_zone_hostile = found_hostile
+	if found_hostile then
+		ai.secondary_zone_attack_target = hostile_pos
+		if not was_hostile then
+			_AI_DebugLog(1, string.format("[AI_PLAYER] %s secondary zone HOSTILE — enemy buildings detected at (%.0f,%.0f)",
+				ai.label or "P?", hostile_pos.x or 0, hostile_pos.z or 0))
+			for _, ally in ipairs(_ai_players) do
+				if ally.id ~= player.id and _AI_IsSameTeam(player, ally) and not _AI_IsEliminated(ally) then
+					ally.ai.secondary_zone_attack_target = hostile_pos
+					_AI_DebugLog(1, string.format("[AI_PLAYER] %s received shared attack target from %s at (%.0f,%.0f)",
+						ally.ai.label or "P?", ai.label or "P?", hostile_pos.x or 0, hostile_pos.z or 0))
+				end
+			end
+		end
+	else
+		ai.secondary_zone_attack_target = nil
+	end
+end
+
+-----------------------------------------------------------------------
+-- RULE: Periodic Sanity Check
+-----------------------------------------------------------------------
+
+function _AI_Rule_SanityCheck()
+	for _, player in ipairs(_ai_players) do
+		if not _AI_IsEliminated(player) then
+			_AI_UpdateVillagerStage(player)
+			_AI_SanityCheck(player)
+			_AI_ScanSecondaryZoneHostile(player)
+		end
+	end
+end
+
+function _AI_SanityCheck(player)
+	local ai = player.ai
+	if ai == nil then return end
+
+	if ai.economy ~= nil and ai.economy.suppressed ~= true then
+		_AI_DebugLog(1, string.format("[AI_PLAYER] SANITY: %s economy suppression state=false (last_reason=%s, applies=%d)",
+			ai.label or "P?", tostring(ai.economy.last_reason or ""), ai.economy.apply_count or 0))
+	end
+	if _AI_DISABLE_NATIVE_AI_BRAIN and ai.native_ai ~= nil then
+		local ok_enabled, enabled = pcall(AI_IsEnabled, player.id)
+		if ok_enabled and enabled then
+			_AI_DebugLog(1, string.format("[AI_PLAYER] SANITY: %s native AI unexpectedly enabled; re-disabling", ai.label or "P?"))
+			_AI_EnsureNativeAIDisabled(player, "sanity_recovery", true)
+		end
+	end
+
+	-- Check 1: total_buildings == sum of per-type counts
+	local sum_types = 0
+	local building_types = _AI_GetOrderedBuildingTypeKeys(player, ai.buildings)
+	for _, type_key in ipairs(building_types) do
+		local type_data = ai.buildings[type_key]
+		sum_types = sum_types + type_data.count
+	end
+	if ai.total_buildings ~= sum_types then
+		_AI_DebugLog(1, string.format("[AI_PLAYER] SANITY: %s total_buildings=%d but type_sum=%d — correcting",
+			ai.label or "P?", ai.total_buildings, sum_types))
+		ai.total_buildings = sum_types
+	end
+
+	-- Check 2: production egroups count matches building count
+	local prod_types = _AI_GetOrderedBuildingTypeKeys(player, ai.production_egroups)
+	for _, type_key in ipairs(prod_types) do
+		local egs = ai.production_egroups[type_key]
+		local alive_egs = 0
+		for _, eg_name in ipairs(egs) do
+			local eg = EGroup_CreateIfNotFound(eg_name)
+			if EGroup_Count(eg) > 0 then
+				local ent = EGroup_GetEntityAt(eg, 1)
+				if ent ~= nil then
+					local ok_alive, alive = pcall(Entity_IsAlive, ent)
+					if ok_alive and alive then alive_egs = alive_egs + 1 end
+				end
+			end
+		end
+		local tracked = ai.buildings[type_key] and ai.buildings[type_key].count or 0
+		if alive_egs ~= tracked then
+			_AI_DebugLog(1, string.format("[AI_PLAYER] SANITY: %s %s prod_egroups_alive=%d vs tracked=%d",
+				ai.label or "P?", type_key, alive_egs, tracked))
+		end
+	end
+
+	-- Check 3: force-remove stale entries older than 2× stale timeout
+	local now = World_GetGameTime()
+	local cleaned_queue = {}
+	for i, entry in ipairs(ai.construction_queue) do
+		if not entry.completed and entry.queued_at ~= nil then
+			local age = now - entry.queued_at
+			if age > _AI_CONSTRUCT_STALE_TIMEOUT * 2 then
+				_AI_DebugLog(1, string.format("[AI_PLAYER] SANITY: %s force-removing stale queue entry [%d] %s (age=%.1fs)",
+					ai.label or "P?", i, entry.type_key or "?", age))
+				ai.telemetry.queue_sanity_drops = (ai.telemetry.queue_sanity_drops or 0) + 1
+				_AI_BlacklistPosition(player, entry.pos, _AI_STALE_POS_BLACKLIST_TTL, "sanity_drop")
+				_AI_ReleaseTeamFromEntry(player, entry)
+				_AI_OnChainBuildingAbandoned(player, entry)
+				-- Decrement zone count
+				if entry.zone == "secondary" then
+					player.ai.secondary_zone_count = math.max(0, player.ai.secondary_zone_count - 1)
+				else
+					player.ai.primary_zone_count = math.max(0, player.ai.primary_zone_count - 1)
+				end
+			else
+				table.insert(cleaned_queue, entry)
+			end
+		else
+			table.insert(cleaned_queue, entry)
+		end
+	end
+	if #cleaned_queue ~= #ai.construction_queue then
+		ai.construction_queue = cleaned_queue
+	end
+end
+
+-----------------------------------------------------------------------
+-- Villager Stage Progression
+-----------------------------------------------------------------------
+
+function _AI_UpdateVillagerStage(player)
+	local ai = player.ai
+	if ai == nil then return end
+	local prev_stage = ai.villager_stage or _AI_VILLAGER_STAGE_PRODUCTION
+
+	if prev_stage == _AI_VILLAGER_STAGE_PRODUCTION then
+		if _AI_IsSpawnProductionSetupComplete(player) then
+			ai.villager_stage = _AI_VILLAGER_STAGE_OUTPOSTS
+			_AI_DebugLog(1, string.format("[AI_PLAYER] %s STAGE 1->2: production complete (%d buildings), now building vision outposts.",
+				ai.label or "P?", _AI_CountCompletedPrimaryProductionBuildings(player)))
+		end
+	elseif prev_stage == _AI_VILLAGER_STAGE_OUTPOSTS then
+		if ai.vision_outpost_count >= _AI_VISION_OUTPOST_TARGET then
+			ai.villager_stage = _AI_VILLAGER_STAGE_SECONDARY
+			_AI_DebugLog(1, string.format("[AI_PLAYER] %s STAGE 2->3: %d vision outposts placed, now building secondary zone.",
+				ai.label or "P?", ai.vision_outpost_count))
+		end
+	end
+end

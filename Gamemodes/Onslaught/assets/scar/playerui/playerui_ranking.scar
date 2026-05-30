@@ -1,0 +1,2476 @@
+-----------------------------------------------------------------------
+-- PlayerUI: Ranking System
+-- Sorts players within each team panel by kill score with rank
+-- stability (hysteresis) to prevent jitter from small score changes.
+--
+-- Architecture:
+--   • Maintains per-team rank state with stable scores
+--   • Hysteresis: player must exceed neighbor by THRESHOLD margin
+--     AND hold that lead for COOLDOWN seconds before swapping
+--   • Top player per team pinned to row 0
+--   • FLIP-style positional animation: on rank change, offset rows
+--     to old position then animate translateY → 0
+--   • Transition lock prevents reordering during animation (~400ms)
+--   • Contested state: adjacent players within threshold get visual flag
+--
+-- Row height: 34px (matches XAML Height="34" on player rows)
+-- Max 4 players per team (4v4), so sort overhead is negligible.
+-----------------------------------------------------------------------
+
+-- Tuning constants
+_RANKING_STABILITY_THRESHOLD = 15       -- score margin required to swap adjacent ranks
+_RANKING_STABILITY_COOLDOWN = 3.0       -- seconds between rank changes for same player
+_RANKING_GLOBAL_REORDER_COOLDOWN = 2.0  -- seconds between batch reorders
+_RANKING_ROW_HEIGHT = 34                -- pixels per player row
+_RANKING_STAGGER_DELAY = 0.05           -- seconds between staggered animations (50ms)
+_RANKING_TRANSITION_CONVERGE = 0.5      -- px threshold to consider animation converged
+_RANKING_TRANSITION_TIMEOUT = 2.0       -- seconds before force-releasing transition lock
+_RANKING_EASEOUT_FACTOR = 0.25          -- lerp factor per 0.1s tick (ease-out)
+_RANKING_ELIMINATED_SENTINEL = -100000  -- ranking-only score for eliminated players (always below active)
+_RANKING_CONTESTED_PULSE_PERIOD = 0.6   -- seconds per full contested glow cycle
+_RANKING_CONTESTED_PULSE_MIN = 0.3      -- minimum glow opacity during pulse
+_RANKING_CONTESTED_PULSE_PEAK = 0.6     -- maximum glow opacity during pulse
+_RANKING_CONTESTED_RESOLVE_FLASH_PEAK = 0.5    -- highlight flash peak on contested→resolved transition
+_RANKING_CONTESTED_RESOLVE_FLASH_DECAY = 0.15  -- decay rate for contested→resolved flash
+_RANKING_DIRECTIONAL_PULSE_PERIOD = 0.8  -- seconds per full up/down glow cycle (calmer than contested)
+_RANKING_DIRECTIONAL_PULSE_MIN = 0.5     -- minimum directional glow opacity
+_RANKING_DIRECTIONAL_PULSE_PEAK = 0.9    -- maximum directional glow opacity
+_RANKING_DIRECTIONAL_RESOLVE_FLASH_PEAK = 0.4   -- flash peak on directional arrow clear/change
+_RANKING_DIRECTIONAL_RESOLVE_FLASH_DECAY = 0.18  -- decay rate for directional resolution flash
+_RANKING_SHUFFLE_PULSE_PERIOD = 0.4    -- seconds per shuffle-imminent pulse cycle (faster than directional)
+_RANKING_SHUFFLE_PULSE_MIN = 0.35      -- minimum shuffle-arrow opacity
+_RANKING_SHUFFLE_PULSE_PEAK = 0.85     -- maximum shuffle-arrow opacity
+_RANKING_PULSE_LOOPS_PER_UPDATE = 2       -- number of pulse cycles to run after each ranking update
+_RANKING_DEBUG_FORCE_WINDOW = 5.0         -- seconds debug-forced prediction state persists against recompute
+
+local _playerui_ranking_print = print
+local function print(...)
+	local message = tostring(select(1, ...))
+	if type(PlayerUI_ShouldPrintMessage) ~= "function" or PlayerUI_ShouldPrintMessage(message) then
+		_playerui_ranking_print(...)
+	end
+end
+
+-- Rank change classification constants
+RANK_CHANGE_NONE = "none"
+RANK_CHANGE_MINOR = "minor"   -- moved 1 position
+RANK_CHANGE_MAJOR = "major"   -- moved 2+ positions
+
+-- Module state (initialized by PlayerUI_Ranking_Init)
+_PlayerUI_RankState = nil  -- { teamLeft = {}, teamRight = {} }
+_PlayerUI_RankTransitionLock = false
+_PlayerUI_RankTransitionLockTime = 0
+_PlayerUI_RankLastGlobalReorder = 0
+_PlayerUI_RankPendingReorder = false
+
+-- Runtime telemetry counters (cumulative, reset on init)
+_RANKING_STATS_COLLAPSE_HITS = 0              -- times contested collapse suppressed multi-arrows
+_RANKING_STATS_COLLAPSE_BYPASSED_FORCE = 0    -- times collapse skipped due to debug-force active
+
+-- One-update debug injection consumed by _Ranking_UpdateTeam phase 1.
+-- Shape: { teamLeft = { [idx] = { score=?, stableScore=?, lastRankChangeTime=? } }, teamRight = ... }
+_RANKING_DEBUG_SCORE_INJECTION = nil
+
+-- Convert a glow opacity (0.0-1.0) to a Fill-alpha #AARRGGBB string.
+-- XAML safety: avoids Opacity binding which crashes D3D on Toggle UI.
+local function _Ranking_GlowFill(opacity, hexColor)
+	local a = math.floor((opacity or 0) * 255 + 0.5)
+	a = math.max(0, math.min(255, a))
+	return string.format("#%02X%s", a, hexColor)
+end
+
+local function _PlayerUI_Ranking_LogLock(msg)
+	if _PLAYERUI_ELIM_ANIM_DEBUG then
+		print("[PLAYERUI_RANKING_LOCK] " .. tostring(msg))
+	end
+end
+
+function _Ranking_HasActiveEliminationSettleWindow()
+	local mappings = PlayerUIDataContextMappings
+	if mappings == nil or mappings.PlayersByIndex == nil then
+		return false, nil, 0, false
+	end
+
+	for i = 1, #mappings.PlayersByIndex do
+		local data = mappings.PlayersByIndex[i]
+		if data ~= nil then
+			local fenceCycles = data._elimCompletionFenceCycles or 0
+			local deferFrame = (data._elimSteadyDeferFrame == true)
+			if fenceCycles > 0 or deferFrame then
+				return true, i, fenceCycles, deferFrame
+			end
+		end
+	end
+
+	return false, nil, 0, false
+end
+
+-----------------------------------------------------------------------
+-- Init: called from PlayerUI_OnInit after teams are built
+-----------------------------------------------------------------------
+
+function PlayerUI_Ranking_Init()
+	_PlayerUI_RankState = {
+		teamLeft = {},
+		teamRight = {},
+	}
+	_PlayerUI_RankTransitionLock = false
+	_PlayerUI_RankTransitionLockTime = 0
+	_PlayerUI_RankLastGlobalReorder = 0
+	_PlayerUI_RankPendingReorder = false
+	_RANKING_STATS_COLLAPSE_HITS = 0
+	_RANKING_STATS_COLLAPSE_BYPASSED_FORCE = 0
+	_RANKING_DEBUG_SCORE_INJECTION = nil
+
+	-- Build initial rank entries from current team arrays
+	_Ranking_BuildTeamState("teamLeft", PlayerUiDataContext.teamLeft)
+	_Ranking_BuildTeamState("teamRight", PlayerUiDataContext.teamRight)
+
+	print("[PLAYERUI_RANKING] Init: teamLeft=" .. #_PlayerUI_RankState.teamLeft
+		.. " teamRight=" .. #_PlayerUI_RankState.teamRight)
+end
+
+-----------------------------------------------------------------------
+-- BuildTeamState: create rank entries from a team's data slots
+-----------------------------------------------------------------------
+
+function _Ranking_BuildTeamState(teamKey, teamSlots)
+	if teamSlots == nil then return end
+	local state = {}
+	for i = 1, #teamSlots do
+		state[i] = {
+			slotRef = teamSlots[i],        -- reference to DataContext player slot
+			visualIndex = i,               -- current display position (1-based)
+			targetIndex = i,               -- target position after rank sort
+			score = 0,                     -- current raw score
+			stableScore = 0,               -- score used for ordering (updated on threshold+cooldown)
+			lastRankChangeTime = 0,        -- timestamp of last rank change
+			rankChangeType = RANK_CHANGE_NONE,
+			isContested = false,
+			isTopPlayer = (i == 1),
+			wasContested = false,          -- previous cycle's contested prediction state
+			wasUp = false,                 -- previous cycle's up prediction state
+			wasDown = false,               -- previous cycle's down prediction state
+			upPulseUntilTime = 0,          -- update-window end for up pulse looping
+			downPulseUntilTime = 0,        -- update-window end for down pulse looping
+			contestedPulseUntilTime = 0,   -- update-window end for contested pulse looping
+			predictedRank = i,             -- where raw score would place this player
+			rankDelta = 0,                 -- signed displacement (positive = moving up)
+			landingBest = i,               -- best-case predicted rank
+			landingWorst = i,              -- worst-case predicted rank
+			predictionConfidence = 0.0,    -- margin/threshold confidence (0.0–1.0)
+			debugForceUntil = 0,           -- game-time expiry for debug-forced prediction state (0 = no force)
+		}
+	end
+	_PlayerUI_RankState[teamKey] = state
+end
+
+function _Ranking_ComputePulseWindowEndTime(now, period)
+	return now + (period * _RANKING_PULSE_LOOPS_PER_UPDATE)
+end
+
+function _Ranking_DebugInjectOneUpdate(teamKey, rows)
+	if teamKey == nil or rows == nil then return end
+	if _RANKING_DEBUG_SCORE_INJECTION == nil then
+		_RANKING_DEBUG_SCORE_INJECTION = {}
+	end
+	_RANKING_DEBUG_SCORE_INJECTION[teamKey] = rows
+end
+
+-----------------------------------------------------------------------
+-- Update: called once per 1.0s data refresh cycle.
+-- Reads current scores, applies stability logic, detects rank changes.
+-----------------------------------------------------------------------
+
+function PlayerUI_Ranking_Update()
+	if _PlayerUI_RankState == nil then return end
+
+	local gameTime = World_GetGameTime()
+
+	-- Update both teams
+	_Ranking_UpdateTeam("teamLeft", PlayerUiDataContext.teamLeft, gameTime)
+	_Ranking_UpdateTeam("teamRight", PlayerUiDataContext.teamRight, gameTime)
+end
+
+function _Ranking_UpdateTeam(teamKey, teamSlots, gameTime)
+	local state = _PlayerUI_RankState[teamKey]
+	if state == nil or #state == 0 then return end
+
+	-- Phase B hardening: always clean stale keys each update so ghost animation
+	-- entries cannot persist when no FLIP animation is triggered.
+	_Ranking_CleanStaleAnimKeys(teamKey, #state)
+
+	-- Phase 1: Read current scores from data context slots
+	--          Detect newly eliminated players for priority reorder.
+	local hasNewElimination = false
+	local debugRows = nil
+	if _RANKING_DEBUG_SCORE_INJECTION ~= nil then
+		debugRows = _RANKING_DEBUG_SCORE_INJECTION[teamKey]
+	end
+	for i = 1, #state do
+		local entry = state[i]
+		local slot = entry.slotRef
+		local injected = nil
+		if debugRows ~= nil then
+			injected = debugRows[i]
+		end
+		if injected ~= nil and injected.score ~= nil then
+			entry.score = injected.score
+		else
+			-- Use the animated kill score (already populated by PlayerUI_UpdateDataContext)
+			entry.score = slot.killScore or 0
+		end
+		if injected ~= nil and injected.stableScore ~= nil then
+			entry.stableScore = injected.stableScore
+		end
+		if injected ~= nil and injected.lastRankChangeTime ~= nil then
+			entry.lastRankChangeTime = injected.lastRankChangeTime
+		end
+		-- Detect first frame of elimination (score was positive, now eliminated)
+		if slot.IsEliminated and entry.stableScore >= 0 then
+			hasNewElimination = true
+		end
+	end
+	if debugRows ~= nil and _RANKING_DEBUG_SCORE_INJECTION ~= nil then
+		_RANKING_DEBUG_SCORE_INJECTION[teamKey] = nil
+		if _RANKING_DEBUG_SCORE_INJECTION.teamLeft == nil and _RANKING_DEBUG_SCORE_INJECTION.teamRight == nil then
+			_RANKING_DEBUG_SCORE_INJECTION = nil
+		end
+	end
+
+	-- Phase 2: If transition lock is active, skip reordering but still update contested/score fields
+	if _PlayerUI_RankTransitionLock and not hasNewElimination then
+		_Ranking_UpdateContestedFlags(state)
+		_Ranking_WriteFieldsToSlots(state)
+		_PlayerUI_RankPendingReorder = true
+		return
+	end
+	-- Force-release lock if elimination needs immediate processing
+	if hasNewElimination and _PlayerUI_RankTransitionLock then
+		local blocked, blockedIdx, blockedFence, blockedDefer = _Ranking_HasActiveEliminationSettleWindow()
+		if blocked then
+			local wasPending = _PlayerUI_RankPendingReorder
+			_PlayerUI_RankPendingReorder = true
+			_PlayerUI_Ranking_LogLock("pending_blocked_settle team=" .. tostring(teamKey)
+				.. " idx=" .. tostring(blockedIdx)
+				.. " fence=" .. tostring(blockedFence)
+				.. " defer=" .. tostring(blockedDefer)
+				.. " pending=" .. tostring(wasPending) .. "->true")
+			_Ranking_UpdateContestedFlags(state)
+			_Ranking_WriteFieldsToSlots(state)
+			return
+		end
+
+		local hadPending = _PlayerUI_RankPendingReorder
+		_PlayerUI_RankTransitionLock = false
+		_PlayerUI_RankPendingReorder = false
+		_PlayerUI_Ranking_LogLock("pending_release_elim team=" .. tostring(teamKey)
+			.. " pending=" .. tostring(hadPending) .. "->false")
+	end
+
+	-- Phase 3: Check global reorder cooldown (bypassed for new eliminations)
+	if not hasNewElimination and (gameTime - _PlayerUI_RankLastGlobalReorder) < _RANKING_GLOBAL_REORDER_COOLDOWN then
+		_Ranking_UpdateContestedFlags(state)
+		_Ranking_WriteFieldsToSlots(state)
+		_PlayerUI_RankPendingReorder = true
+		return
+	end
+
+	-- Phase 4: Apply stability logic — update stableScore where threshold+cooldown are met
+	--          Eliminated players bypass cooldown and drop to bottom immediately.
+	for i = 1, #state do
+		local entry = state[i]
+		if entry.slotRef.IsEliminated then
+			-- Force eliminated players below any alive score (immediate bottom-drop)
+			entry.score = _RANKING_ELIMINATED_SENTINEL
+			entry.stableScore = _RANKING_ELIMINATED_SENTINEL
+		else
+			local timeSinceLastChange = gameTime - entry.lastRankChangeTime
+			if timeSinceLastChange >= _RANKING_STABILITY_COOLDOWN then
+				entry.stableScore = entry.score
+			end
+		end
+	end
+
+	-- Phase 5: Sort by stableScore (descending) to determine target indices
+	-- Create a temporary sorted copy to compute new indices
+	local sorted = {}
+	for i = 1, #state do
+		sorted[i] = state[i]
+	end
+
+	-- Stable sort: only swap if the lower-ranked player exceeds by threshold
+	-- Use insertion sort for stability with small N (max 4)
+	for i = 2, #sorted do
+		local current = sorted[i]
+		local j = i - 1
+		while j >= 1 do
+			local neighbor = sorted[j]
+			local scoreDiff = current.stableScore - neighbor.stableScore
+			local currentElim = current.slotRef.IsEliminated == true
+			local neighborElim = neighbor.slotRef.IsEliminated == true
+			local shouldSwap = false
+			if neighborElim and not currentElim then
+				-- Active entries always rise above eliminated entries.
+				shouldSwap = true
+			elseif (not neighborElim) and currentElim then
+				shouldSwap = false
+			else
+				-- Same elimination class: keep hysteresis threshold behavior.
+				shouldSwap = (scoreDiff > _RANKING_STABILITY_THRESHOLD)
+			end
+			if shouldSwap then
+				sorted[j + 1] = neighbor
+				j = j - 1
+			else
+				break
+			end
+		end
+		sorted[j + 1] = current
+	end
+
+	-- Phase 6: Assign target indices and detect changes
+	local anyRankChanged = false
+	local movers = {}
+
+	for newIdx = 1, #sorted do
+		local entry = sorted[newIdx]
+		local oldIdx = entry.visualIndex
+
+		if newIdx ~= oldIdx then
+			local jumpSize = math.abs(newIdx - oldIdx)
+			if jumpSize >= 2 then
+				entry.rankChangeType = RANK_CHANGE_MAJOR
+			else
+				entry.rankChangeType = RANK_CHANGE_MINOR
+			end
+			entry.targetIndex = newIdx
+			entry.lastRankChangeTime = gameTime
+			anyRankChanged = true
+			table.insert(movers, { entry = entry, oldIdx = oldIdx, newIdx = newIdx })
+		else
+			entry.rankChangeType = RANK_CHANGE_NONE
+			entry.targetIndex = newIdx
+		end
+	end
+
+	-- Phase 7: Pin top player (highest raw score) to index 1
+	_Ranking_PinTopPlayer(sorted, gameTime)
+
+	-- Phase 8: Update contested flags based on sorted order
+	_Ranking_UpdateContestedFlags(sorted)
+
+	-- Phase 9: If any rank changed, start FLIP animation
+	if anyRankChanged then
+		_PlayerUI_RankLastGlobalReorder = gameTime
+		_PlayerUI_RankPendingReorder = false
+		_Ranking_StartFlipAnimation(teamKey, sorted, movers)
+	end
+
+	-- Phase 10: Write rank fields to data context slots
+	-- (Update state array to match sorted order)
+	_PlayerUI_RankState[teamKey] = sorted
+	_Ranking_WriteFieldsToSlots(sorted)
+end
+
+-----------------------------------------------------------------------
+-- Pin top player: force highest raw score to index 1
+-- Only releases pin if exceeded by >= threshold for >= cooldown
+-----------------------------------------------------------------------
+
+function _Ranking_PinTopPlayer(sorted, gameTime)
+	if #sorted == 0 then return end
+
+	-- Find the entry with the highest raw score
+	local topEntry = sorted[1]
+	local topScore = topEntry.score
+	for i = 2, #sorted do
+		if sorted[i].score > topScore then
+			topEntry = sorted[i]
+			topScore = sorted[i].score
+		end
+	end
+
+	-- Mark top player
+	for i = 1, #sorted do
+		sorted[i].isTopPlayer = (sorted[i] == topEntry)
+	end
+
+	-- If the highest-score player is already at index 1, nothing to do
+	if sorted[1] == topEntry then return end
+
+	-- Check if the current top player (index 1) has lost pin legitimately:
+	-- the new leader must exceed by >= threshold AND cooldown must have passed
+	local currentTop = sorted[1]
+	local margin = topScore - currentTop.score
+	local timeSince = gameTime - currentTop.lastRankChangeTime
+
+	if margin >= _RANKING_STABILITY_THRESHOLD and timeSince >= _RANKING_STABILITY_COOLDOWN then
+		-- Swap the top entry into position 1
+		for i = 1, #sorted do
+			if sorted[i] == topEntry then
+				sorted[i] = sorted[1]
+				sorted[1] = topEntry
+				topEntry.targetIndex = 1
+				sorted[i].targetIndex = i
+				break
+			end
+		end
+	end
+end
+
+-----------------------------------------------------------------------
+-- Contested flags: adjacent players within threshold are "contested"
+-----------------------------------------------------------------------
+
+function _Ranking_UpdateContestedFlags(entries)
+	-- Reset all contested flags
+	for i = 1, #entries do
+		entries[i].isContested = false
+	end
+
+	-- Check each adjacent pair
+	for i = 1, #entries - 1 do
+		local diff = math.abs(entries[i].score - entries[i + 1].score)
+		if diff <= _RANKING_STABILITY_THRESHOLD then
+			entries[i].isContested = true
+			entries[i + 1].isContested = true
+		end
+	end
+end
+
+-----------------------------------------------------------------------
+-- Prediction model: compute predictedRank, rankDelta, landingRange
+-- Pure snapshot model — uses only current raw scores and sorted order.
+-- O(n²) where n ≤ 4, trivial.
+-----------------------------------------------------------------------
+
+function _Ranking_ComputePredictions(entries)
+	for i = 1, #entries do
+		local entry = entries[i]
+		if entry.slotRef.IsEliminated then
+			entry.predictedRank = #entries
+			entry.rankDelta = 0
+			entry.landingBest = #entries
+			entry.landingWorst = #entries
+		else
+			local myScore = entry.score
+			local predicted = 1
+			local bestRank = 1
+			local worstRank = 1
+
+			for j = 1, #entries do
+				if j ~= i and not entries[j].slotRef.IsEliminated then
+					local theirScore = entries[j].score
+
+					-- predictedRank: count those strictly above
+					if theirScore > myScore then
+						predicted = predicted + 1
+					elseif theirScore == myScore and j < i then
+						predicted = predicted + 1
+					end
+
+					-- bestRank: same as predicted (snapshot best-case)
+					if theirScore > myScore then
+						bestRank = bestRank + 1
+					elseif theirScore == myScore and j < i then
+						bestRank = bestRank + 1
+					end
+
+					-- worstRank: also count neighbors within threshold below me
+					if theirScore > myScore then
+						worstRank = worstRank + 1
+					elseif theirScore == myScore and j < i then
+						worstRank = worstRank + 1
+					elseif myScore - theirScore <= _RANKING_STABILITY_THRESHOLD and j < i then
+						worstRank = worstRank + 1
+					end
+				end
+			end
+
+			entry.predictedRank = predicted
+			entry.rankDelta = i - predicted  -- positive = moving up toward #1
+			entry.landingBest = bestRank
+			entry.landingWorst = worstRank
+		end
+	end
+end
+
+-----------------------------------------------------------------------
+-- Write rank fields to DataContext slots for XAML consumption
+-----------------------------------------------------------------------
+
+function _Ranking_WriteFieldsToSlots(entries)
+	-- Compute full-scan prediction model (predictedRank, rankDelta, landingRange)
+	_Ranking_ComputePredictions(entries)
+
+	-- Compute rank predictions using threshold-aware hysteresis.
+	-- Uses predictedRank/rankDelta from _Ranking_ComputePredictions (Phase A),
+	-- plus half/tight threshold fractions to suppress noise from tiny margins.
+	local halfThreshold = _RANKING_STABILITY_THRESHOLD * 0.5
+	local tightThreshold = _RANKING_STABILITY_THRESHOLD * 0.33
+
+	-- Save debug-forced prediction state before recompute overwrites it
+	local dbgNow = World_GetGameTime()
+	local _debugForcedEntries = {}
+	for i = 1, #entries do
+		if dbgNow <= (entries[i].debugForceUntil or 0) then
+			_debugForcedEntries[i] = {
+				predictUp = entries[i].predictUp,
+				predictDown = entries[i].predictDown,
+				predictContested = entries[i].predictContested,
+				predictionConfidence = entries[i].predictionConfidence or 0.0,
+			}
+		end
+	end
+
+	for i = 1, #entries do
+		entries[i].predictUp = false
+		entries[i].predictDown = false
+		entries[i].predictContested = false
+		entries[i]._debugForceActive = nil
+	end
+
+	for i = 1, #entries do
+		if not entries[i].slotRef.IsEliminated then
+			local delta = entries[i].rankDelta
+			local hasUpMargin = false
+			local hasDownMargin = false
+
+			-- Up: at least one neighbor above has margin > halfThreshold in my favor
+			for j = math.max(1, i - 3), i - 1 do
+				if entries[i].score - entries[j].score > halfThreshold then
+					hasUpMargin = true
+					break
+				end
+			end
+
+			-- Down: at least one neighbor below has margin > halfThreshold against me
+			for j = i + 1, math.min(#entries, i + 3) do
+				if entries[j].score - entries[i].score > halfThreshold then
+					hasDownMargin = true
+					break
+				end
+			end
+
+			if delta > 0 and hasUpMargin then
+				entries[i].predictUp = true
+			end
+			if delta < 0 and hasDownMargin then
+				entries[i].predictDown = true
+			end
+		end
+	end
+
+	-- Normalization pass: dual-state (both up AND down) resolution.
+	-- Directional confidence wins when rankDelta != 0 (player has a clear predicted direction).
+	-- Only collapse to contested when rankDelta == 0 (true uncertainty / squeezed from both sides).
+	for i = 1, #entries do
+		if entries[i].predictUp and entries[i].predictDown then
+			local delta = entries[i].rankDelta
+			if delta > 0 then
+				-- Net movement is upward — keep up, suppress down
+				entries[i].predictDown = false
+			elseif delta < 0 then
+				-- Net movement is downward — keep down, suppress up
+				entries[i].predictUp = false
+			else
+				-- Genuinely squeezed (delta == 0) — contested
+				if PlayerUI_Settings.EnableRankPredictionContested ~= false then
+					entries[i].predictContested = true
+					entries[i].predictUp = false
+					entries[i].predictDown = false
+					if PlayerUI_Settings.EnableToggleTraceLogging then
+						print("[PLAYERUI_RANKING] contested prediction: slot=" .. tostring(i)
+							.. " score=" .. tostring(entries[i].score) .. " delta=0")
+					end
+				else
+					-- Fallback: offensive bias — keep predictUp, clear predictDown
+					entries[i].predictDown = false
+				end
+			end
+		end
+	end
+
+	-- Compute per-entry prediction confidence (margin / threshold, clamped 0.0–1.0)
+	for i = 1, #entries do
+		local entry = entries[i]
+		entry.predictionConfidence = 0.0
+		if entry.predictUp then
+			local bestMargin = 0
+			for j = math.max(1, i - 3), i - 1 do
+				local diff = entry.score - entries[j].score
+				if diff > bestMargin then bestMargin = diff end
+			end
+			entry.predictionConfidence = math.min(1.0, bestMargin / _RANKING_STABILITY_THRESHOLD)
+		elseif entry.predictDown then
+			local bestMargin = 0
+			for j = i + 1, math.min(#entries, i + 3) do
+				local diff = entries[j].score - entry.score
+				if diff > bestMargin then bestMargin = diff end
+			end
+			entry.predictionConfidence = math.min(1.0, bestMargin / _RANKING_STABILITY_THRESHOLD)
+		end
+	end
+
+	-- Tight-contested injection: very close pairs get contested even without directional signal
+	for i = 1, #entries do
+		if not entries[i].slotRef.IsEliminated
+			and not entries[i].predictUp and not entries[i].predictDown and not entries[i].predictContested then
+			local tight = false
+			if i > 1 then
+				local d = math.abs(entries[i].score - entries[i - 1].score)
+				if d <= tightThreshold and d > 0 then tight = true end
+			end
+			if not tight and i < #entries then
+				local d = math.abs(entries[i].score - entries[i + 1].score)
+				if d <= tightThreshold and d > 0 then tight = true end
+			end
+			if tight then
+				if PlayerUI_Settings.EnableRankPredictionContested ~= false then
+					entries[i].predictContested = true
+				end
+			end
+		end
+	end
+
+	-- Restore debug-forced prediction state after recompute
+	for i, saved in pairs(_debugForcedEntries) do
+		entries[i].predictUp = saved.predictUp
+		entries[i].predictDown = saved.predictDown
+		entries[i].predictContested = saved.predictContested
+		entries[i].predictionConfidence = saved.predictionConfidence
+		entries[i]._debugForceActive = true
+	end
+
+	local now = World_GetGameTime()
+	local directionalPulseWindowEnd = _Ranking_ComputePulseWindowEndTime(now, _RANKING_DIRECTIONAL_PULSE_PERIOD)
+	local contestedPulseWindowEnd = _Ranking_ComputePulseWindowEndTime(now, _RANKING_CONTESTED_PULSE_PERIOD)
+	for i = 1, #entries do
+		local entry = entries[i]
+		if entry._debugForceActive then
+			-- Debug force: skip pulse window recalculation, preserve existing windows
+		else
+			if entry.predictUp and not entry.wasUp then
+				entry.upPulseUntilTime = directionalPulseWindowEnd
+			end
+			if entry.predictDown and not entry.wasDown then
+				entry.downPulseUntilTime = directionalPulseWindowEnd
+			end
+			if entry.predictContested and not entry.wasContested then
+				entry.contestedPulseUntilTime = contestedPulseWindowEnd
+			end
+		end
+	end
+
+	for i = 1, #entries do
+		local entry = entries[i]
+		local slot = entry.slotRef
+		slot.rankPosition = i
+		slot.rankChangeType = entry.rankChangeType
+		slot.isContested = entry.isContested
+		slot.isTopPlayer = entry.isTopPlayer
+		-- Skip prediction slot writes for debug-forced entries (preserve slot values from force tool)
+		if entry._debugForceActive and entry.isContested then
+			_RANKING_STATS_COLLAPSE_BYPASSED_FORCE = _RANKING_STATS_COLLAPSE_BYPASSED_FORCE + 1
+		end
+		if not entry._debugForceActive then
+			if PlayerUI_Settings.EnableRankPredictionArrows ~= false then
+				slot.rankPredictionUp = entry.predictUp
+				slot.rankPredictionDown = entry.predictDown
+				slot.rankPredictionContested = entry.predictContested
+			else
+				slot.rankPredictionUp = false
+				slot.rankPredictionDown = false
+				slot.rankPredictionContested = false
+			end
+
+			-- Reset glow opacities when no active prediction flags.
+			-- ApplyAnimatedFields (animation tick) only runs when anyChanged is true;
+			-- without this reset, glow values from expired force windows latch indefinitely.
+			if not entry.predictUp and not entry.predictDown and not entry.predictContested then
+				slot.rankPredictionUpGlowOpacity = 0.0
+				slot.rankPredictionDownGlowOpacity = 0.0
+				slot.rankPredictionContestedGlowOpacity = 0.0
+				slot.rankPredictionShuffleGlowOpacity = 0.0
+			end
+
+			-- Delta + multi-arrow booleans (gated by EnableRankPredictionDelta)
+			if PlayerUI_Settings.EnableRankPredictionDelta then
+				slot.rankPredictionDelta = entry.rankDelta
+				local absDelta = math.abs(entry.rankDelta)
+				slot.rankPredictionUp2   = entry.predictUp   and absDelta >= 2
+				slot.rankPredictionUp3   = entry.predictUp   and absDelta >= 3
+				slot.rankPredictionDown2 = entry.predictDown and absDelta >= 2
+				slot.rankPredictionDown3 = entry.predictDown and absDelta >= 3
+
+				-- Strict contested policy: collapse multi-arrows when adjacent scores
+				-- are within threshold. Single directional arrow preserved; 2x/3x
+				-- suppressed because contested adjacency makes large jumps unreliable.
+				if entry.isContested and PlayerUI_Settings.EnableRankContestedCollapseMulti ~= false then
+					if slot.rankPredictionUp2 or slot.rankPredictionUp3
+						or slot.rankPredictionDown2 or slot.rankPredictionDown3 then
+						_RANKING_STATS_COLLAPSE_HITS = _RANKING_STATS_COLLAPSE_HITS + 1
+						slot.rankPredictionUp2   = false
+						slot.rankPredictionUp3   = false
+						slot.rankPredictionDown2 = false
+						slot.rankPredictionDown3 = false
+						if PlayerUI_Settings.EnableToggleTraceLogging then
+							print(string.format("[PLAYERUI_RANKING] contested collapse: slot=%d delta=%+d (2x/3x suppressed)",
+								i, entry.rankDelta or 0))
+						end
+					end
+				end
+			else
+				slot.rankPredictionDelta = 0
+				slot.rankPredictionUp2   = false
+				slot.rankPredictionUp3   = false
+				slot.rankPredictionDown2 = false
+				slot.rankPredictionDown3 = false
+			end
+		end
+	end
+end
+
+-----------------------------------------------------------------------
+-- Deferred animation target queue (Rule_AddOneShot requires named functions)
+-----------------------------------------------------------------------
+_RANKING_DEFERRED_TARGETS = {}
+
+function _Ranking_ProcessDeferredTarget()
+	if #_RANKING_DEFERRED_TARGETS == 0 then return end
+	local item = table.remove(_RANKING_DEFERRED_TARGETS, 1)
+	pcall(PlayerUI_Animate_SetPositionTarget, item.key, item.value)
+end
+
+-- Drain all remaining deferred targets immediately. Used when the transition
+-- lock releases (converged or timeout) so leftover pending Rule_AddOneShot
+-- callbacks don't leave stale items in the queue.
+function _Ranking_DrainDeferredTargets()
+	while #_RANKING_DEFERRED_TARGETS > 0 do
+		local item = table.remove(_RANKING_DEFERRED_TARGETS, 1)
+		pcall(PlayerUI_Animate_SetPositionTarget, item.key, item.value)
+	end
+end
+
+-----------------------------------------------------------------------
+-- CleanStaleAnimKeys: remove animation keys beyond current team size
+-----------------------------------------------------------------------
+
+function _Ranking_CleanStaleAnimKeys(teamKey, teamSize)
+	for idx = teamSize + 1, 8 do
+		local tyKey = "rank_translateY_" .. teamKey .. "_" .. tostring(idx)
+		local scKey = "rank_scale_" .. teamKey .. "_" .. tostring(idx)
+		local hlKey = "rank_highlight_" .. teamKey .. "_" .. tostring(idx)
+		_PlayerUI_AnimPositions[tyKey] = nil
+		if _PlayerUI_AnimDecay ~= nil then
+			_PlayerUI_AnimDecay[scKey] = nil
+			_PlayerUI_AnimDecay[hlKey] = nil
+		end
+	end
+end
+
+-----------------------------------------------------------------------
+-- FLIP Animation: calculate offsets and start positional animation
+-----------------------------------------------------------------------
+
+function _Ranking_StartFlipAnimation(teamKey, sorted, movers)
+	if #movers == 0 then return end
+
+	-- Activate transition lock
+	_PlayerUI_RankTransitionLock = true
+	_PlayerUI_RankTransitionLockTime = World_GetGameTime()
+	_PlayerUI_Ranking_LogLock("acquired team=" .. tostring(teamKey) .. " movers=" .. tostring(#movers))
+
+	-- Clean stale animation keys beyond current team size
+	_Ranking_CleanStaleAnimKeys(teamKey, #sorted)
+
+	-- Sort movers by target index (top moves first for visual hierarchy)
+	table.sort(movers, function(a, b) return a.newIdx < b.newIdx end)
+
+	-- For each mover: set translateY to offset from new position back to old position
+	-- then animate toward 0 (slide into new position)
+	for i, mover in ipairs(movers) do
+		local pixelOffset = (mover.oldIdx - mover.newIdx) * _RANKING_ROW_HEIGHT
+
+		-- Key for the positional animation entry
+		local animKey = "rank_translateY_" .. teamKey .. "_" .. tostring(mover.newIdx)
+
+		-- Set the initial offset (INVERT step of FLIP)
+		PlayerUI_Animate_SetPosition(animKey, pixelOffset)
+
+		-- Rank scale pop: mover briefly enlarges, then settles to 1.0
+		if PlayerUI_Settings.EnableRankScaleAnimation then
+			local scaleKey = "rank_scale_" .. teamKey .. "_" .. tostring(mover.newIdx)
+			PlayerUI_Animate_TriggerDecay(scaleKey, _PLAYERUI_SCALE_POP_PEAK, _PLAYERUI_SCALE_POP_DECAY_RATE)
+		end
+
+		-- Rank highlight flash: opacity fades from peak to 0.0
+		local highlightKey = "rank_highlight_" .. teamKey .. "_" .. tostring(mover.newIdx)
+		local highlightPeak = (mover.entry.rankChangeType == RANK_CHANGE_MAJOR) and 1.0 or 0.7
+		PlayerUI_Animate_TriggerDecay(highlightKey, highlightPeak, _PLAYERUI_HIGHLIGHT_DECAY_RATE)
+
+		-- Stagger: schedule target=0 with delay based on mover order
+		local delay = (i - 1) * _RANKING_STAGGER_DELAY
+		if delay <= 0 then
+			PlayerUI_Animate_SetPositionTarget(animKey, 0)
+		else
+			table.insert(_RANKING_DEFERRED_TARGETS, { key = animKey, value = 0 })
+			Rule_AddOneShot(_Ranking_ProcessDeferredTarget, delay)
+		end
+	end
+
+	-- Reorder the actual data context arrays to match new rank order
+	_Ranking_ReorderDataContextArrays(teamKey, sorted)
+
+	-- Schedule lock release check
+	Rule_AddOneShot(_Ranking_CheckTransitionConverged, 0.5)
+end
+
+-----------------------------------------------------------------------
+-- Reorder DataContext arrays: physically reorder teamLeft/teamRight
+-- to match new sorted rank order. Each slot's translateY offset
+-- visually holds it at the old position during animation.
+-----------------------------------------------------------------------
+
+local _Ranking_GetOffsetMargin
+
+function _Ranking_ReorderDataContextArrays(teamKey, sorted)
+	local teamArray = PlayerUiDataContext[teamKey]
+	if teamArray == nil then return end
+
+	-- Rebuild the array in sorted order
+	for i = 1, #sorted do
+		teamArray[i] = sorted[i].slotRef
+
+		-- Write the translateY into the slot for XAML binding
+		local animKey = "rank_translateY_" .. teamKey .. "_" .. tostring(i)
+		if PlayerUI_Settings.EnableRankTranslateAnimation then
+			sorted[i].slotRef.rankTranslateY = PlayerUI_Animate_GetPosition(animKey)
+		else
+			sorted[i].slotRef.rankTranslateY = 0
+		end
+		sorted[i].slotRef.rankOffsetMargin = _Ranking_GetOffsetMargin(sorted[i].slotRef.rankTranslateY)
+
+		-- Write scale
+		if PlayerUI_Settings.EnableRankScaleAnimation then
+			local scaleKey = "rank_scale_" .. teamKey .. "_" .. tostring(i)
+			sorted[i].slotRef.rankScale = 1.0 + PlayerUI_Animate_GetDecay(scaleKey)
+		else
+			sorted[i].slotRef.rankScale = 1.0
+		end
+
+		-- Update visual index to new position
+		sorted[i].visualIndex = i
+	end
+end
+
+_Ranking_GetOffsetMargin = function(translateY)
+	if PlayerUI_Settings.EnableRankTranslateAnimation == false then
+		return "0,0,0,0"
+	end
+
+	local rounded = 0
+	if math.abs(translateY) >= 0.5 then
+		if translateY > 0 then
+			rounded = math.floor(translateY + 0.5)
+		else
+			rounded = math.ceil(translateY - 0.5)
+		end
+	end
+
+	if rounded == 0 then
+		return "0,0,0,0"
+	end
+
+	return string.format("0,%d,0,%d", rounded, -rounded)
+end
+
+-----------------------------------------------------------------------
+-- Convergence check: release transition lock when all offsets ≈ 0
+-----------------------------------------------------------------------
+
+function _Ranking_CheckTransitionConverged()
+	if _PlayerUI_RankState == nil then
+		_PlayerUI_RankTransitionLock = false
+		return
+	end
+
+	-- Timeout guard: force-release lock if stuck beyond threshold
+	local elapsed = World_GetGameTime() - (_PlayerUI_RankTransitionLockTime or 0)
+	if elapsed >= _RANKING_TRANSITION_TIMEOUT then
+		-- Force snap all translateY to target (0)
+		for _, teamKey in ipairs({"teamLeft", "teamRight"}) do
+			local state = _PlayerUI_RankState[teamKey]
+			if state ~= nil then
+				for i = 1, #state do
+					local animKey = "rank_translateY_" .. teamKey .. "_" .. tostring(i)
+					PlayerUI_Animate_SetPosition(animKey, 0)
+					PlayerUI_Animate_SetPositionTarget(animKey, 0)
+				end
+			end
+		end
+		_PlayerUI_RankTransitionLock = false
+		if _PlayerUI_RankPendingReorder then
+			_PlayerUI_Ranking_LogLock("pending_release_timeout")
+			_PlayerUI_RankPendingReorder = false
+		end
+		_Ranking_DrainDeferredTargets()
+		_PlayerUI_Ranking_LogLock("force_released timeout elapsed=" .. string.format("%.2f", elapsed))
+		return
+	end
+
+	local allConverged = true
+
+	for _, teamKey in ipairs({"teamLeft", "teamRight"}) do
+		local state = _PlayerUI_RankState[teamKey]
+		if state ~= nil then
+			for i = 1, #state do
+				local animKey = "rank_translateY_" .. teamKey .. "_" .. tostring(i)
+				local current = PlayerUI_Animate_GetPosition(animKey)
+				if math.abs(current) > _RANKING_TRANSITION_CONVERGE then
+					allConverged = false
+					break
+				end
+			end
+		end
+		if not allConverged then break end
+	end
+
+	if allConverged then
+		_PlayerUI_RankTransitionLock = false
+		_PlayerUI_Ranking_LogLock("released converged elapsed=" .. string.format("%.2f", elapsed))
+		-- If changes were pending during lock, trigger update on next cycle
+		if _PlayerUI_RankPendingReorder then
+			_PlayerUI_Ranking_LogLock("pending_release_converged")
+			_PlayerUI_RankPendingReorder = false
+		end
+		_Ranking_DrainDeferredTargets()
+	else
+		-- Check again in 0.1s
+		Rule_AddOneShot(_Ranking_CheckTransitionConverged, 0.1)
+	end
+end
+
+-----------------------------------------------------------------------
+-- ApplyAnimatedFields: called from animation tick to update
+-- translateY and scale in DataContext slots from animation state.
+-- This bridges the position animation system to XAML binding.
+-----------------------------------------------------------------------
+
+function PlayerUI_Ranking_ApplyAnimatedFields()
+	if _PlayerUI_RankState == nil then return end
+
+	for _, teamKey in ipairs({"teamLeft", "teamRight"}) do
+		local state = _PlayerUI_RankState[teamKey]
+		if state ~= nil then
+			for i = 1, #state do
+				local slot = state[i].slotRef
+
+				-- TranslateY
+				local animKey = "rank_translateY_" .. teamKey .. "_" .. tostring(i)
+				if PlayerUI_Settings.EnableRankTranslateAnimation then
+					slot.rankTranslateY = PlayerUI_Animate_GetPosition(animKey)
+				else
+					slot.rankTranslateY = 0
+				end
+				slot.rankOffsetMargin = _Ranking_GetOffsetMargin(slot.rankTranslateY)
+
+				-- Rank scale: read from decay animation (boost + 1.0 base)
+				if PlayerUI_Settings.EnableRankScaleAnimation then
+					local scaleKey = "rank_scale_" .. teamKey .. "_" .. tostring(i)
+					slot.rankScale = 1.0 + PlayerUI_Animate_GetDecay(scaleKey)
+				else
+					slot.rankScale = 1.0
+				end
+
+				-- Rank highlight: read from decay animation (opacity 0.0-1.0)
+				local highlightKey = "rank_highlight_" .. teamKey .. "_" .. tostring(i)
+				local hlVal = PlayerUI_Animate_GetDecay(highlightKey)
+				slot.rankHighlightOpacity = math.max(0, math.min(1.0, hlVal))
+
+				-- Explicit, trigger-safe visibility flags for XAML layering.
+				local entry = state[i]
+				slot.rankFlashMajorVisible = (entry.rankChangeType == RANK_CHANGE_MAJOR and hlVal > 0)
+				slot.rankFlashMinorVisible = (entry.rankChangeType == RANK_CHANGE_MINOR and hlVal > 0)
+				if entry.rankChangeType == RANK_CHANGE_MAJOR and hlVal > 0 then
+					local alphaMajor = math.floor((0x30 * hlVal) + 0.5)
+					slot.rankHighlightFill = string.format("#%02XFFFFFF", alphaMajor)
+				elseif entry.rankChangeType == RANK_CHANGE_MINOR and hlVal > 0 then
+					local alphaMinor = math.floor((0x18 * hlVal) + 0.5)
+					slot.rankHighlightFill = string.format("#%02XFFFFFF", alphaMinor)
+				else
+					slot.rankHighlightFill = "#00FFFFFF"
+				end
+
+				-- Auto-clear rankChangeType when highlight decay finishes.
+				-- Drives the XAML DataTrigger Visibility back to Collapsed,
+				-- giving a self-clearing flash whose duration is set by
+				-- _PLAYERUI_HIGHLIGHT_DECAY_RATE (currently ~0.7-0.8s).
+				if hlVal <= 0 and entry.rankChangeType ~= RANK_CHANGE_NONE then
+					entry.rankChangeType = RANK_CHANGE_NONE
+					slot.rankChangeType = RANK_CHANGE_NONE
+					slot.rankFlashMajorVisible = false
+					slot.rankFlashMinorVisible = false
+					slot.rankHighlightFill = "#00FFFFFF"
+				end
+
+				-- Prediction glow pulses: sine-wave while each state is active;
+				-- brief decay flash on any state→none or state→different transition.
+				-- Up/down: calmer (slower period, dimmer peak); contested: more urgent (faster, brighter).
+				local pulseGameTime  = World_GetGameTime()
+				local isUpNow        = (slot.rankPredictionUp == true)
+				local isDownNow      = (slot.rankPredictionDown == true)
+				local isContestedNow = (slot.rankPredictionContested == true)
+				local upPulseWindowActive = pulseGameTime <= (entry.upPulseUntilTime or 0)
+				local downPulseWindowActive = pulseGameTime <= (entry.downPulseUntilTime or 0)
+				local contestedPulseWindowActive = pulseGameTime <= (entry.contestedPulseUntilTime or 0)
+
+				-- Confidence scaling: weak predictions pulse dimmer, strong ones pulse at full range
+				local confidence = entry.predictionConfidence or 0.5
+				local dirPulseMin = _RANKING_DIRECTIONAL_PULSE_MIN * (0.5 + 0.5 * confidence)
+				local dirPulsePeak = _RANKING_DIRECTIONAL_PULSE_PEAK * (0.6 + 0.4 * confidence)
+				-- Team-synchronized phase (no per-slot offset — all prediction arrows pulse in lockstep)
+				local dirPhase = (pulseGameTime % _RANKING_DIRECTIONAL_PULSE_PERIOD) / _RANKING_DIRECTIONAL_PULSE_PERIOD
+				local dirSine  = 0.5 + 0.5 * math.sin(dirPhase * 6.2831853)
+				local dirGlow  = dirPulseMin + (dirPulsePeak - dirPulseMin) * dirSine
+
+				if isUpNow then
+					if upPulseWindowActive then
+						slot.rankPredictionUpGlowOpacity = dirGlow
+					else
+						slot.rankPredictionUpGlowOpacity = dirPulseMin
+					end
+				elseif entry.wasUp then
+					local upResolveKey = "rank_up_resolve_" .. teamKey .. "_" .. tostring(i)
+					PlayerUI_Animate_TriggerDecay("rank_up_resolve_" .. teamKey .. "_" .. tostring(i),
+						_RANKING_DIRECTIONAL_RESOLVE_FLASH_PEAK, _RANKING_DIRECTIONAL_RESOLVE_FLASH_DECAY)
+					slot.rankPredictionUpGlowOpacity = math.max(0.0, PlayerUI_Animate_GetDecay(upResolveKey))
+				else
+					slot.rankPredictionUpGlowOpacity = 0.0
+				end
+				entry.wasUp = isUpNow
+
+				if isDownNow then
+					if downPulseWindowActive then
+						slot.rankPredictionDownGlowOpacity = dirGlow
+					else
+						slot.rankPredictionDownGlowOpacity = dirPulseMin
+					end
+				elseif entry.wasDown then
+					local downResolveKey = "rank_down_resolve_" .. teamKey .. "_" .. tostring(i)
+					PlayerUI_Animate_TriggerDecay("rank_down_resolve_" .. teamKey .. "_" .. tostring(i),
+						_RANKING_DIRECTIONAL_RESOLVE_FLASH_PEAK, _RANKING_DIRECTIONAL_RESOLVE_FLASH_DECAY)
+					slot.rankPredictionDownGlowOpacity = math.max(0.0, PlayerUI_Animate_GetDecay(downResolveKey))
+				else
+					slot.rankPredictionDownGlowOpacity = 0.0
+				end
+				entry.wasDown = isDownNow
+
+				-- Contested pulse: faster/more urgent cycle, no phase-offset (shared urgency across rows)
+				if isContestedNow then
+					if contestedPulseWindowActive then
+						local cPhase = (pulseGameTime % _RANKING_CONTESTED_PULSE_PERIOD) / _RANKING_CONTESTED_PULSE_PERIOD
+						local cSine  = 0.5 + 0.5 * math.sin(cPhase * 6.2831853)
+						slot.rankPredictionContestedGlowOpacity = _RANKING_CONTESTED_PULSE_MIN
+							+ (_RANKING_CONTESTED_PULSE_PEAK - _RANKING_CONTESTED_PULSE_MIN) * cSine
+					else
+						slot.rankPredictionContestedGlowOpacity = _RANKING_CONTESTED_PULSE_MIN
+					end
+				elseif entry.wasContested then
+					local contestedResolveKey = "rank_contested_resolve_" .. teamKey .. "_" .. tostring(i)
+					PlayerUI_Animate_TriggerDecay("rank_contested_resolve_" .. teamKey .. "_" .. tostring(i),
+						_RANKING_CONTESTED_RESOLVE_FLASH_PEAK, _RANKING_CONTESTED_RESOLVE_FLASH_DECAY)
+					slot.rankPredictionContestedGlowOpacity = math.max(0.0, PlayerUI_Animate_GetDecay(contestedResolveKey))
+				else
+					slot.rankPredictionContestedGlowOpacity = 0.0
+				end
+				entry.wasContested = isContestedNow
+
+				-- Shuffle-imminent glow: faster independent pulse for 2x/3x arrows.
+				-- Team-synchronized, always active when multi-arrows visible.
+				local hasShuffleArrows = (slot.rankPredictionUp2 == true) or (slot.rankPredictionDown2 == true)
+				if hasShuffleArrows then
+					local shufflePhase = (pulseGameTime % _RANKING_SHUFFLE_PULSE_PERIOD) / _RANKING_SHUFFLE_PULSE_PERIOD
+					local shuffleSine = 0.5 + 0.5 * math.sin(shufflePhase * 6.2831853)
+					slot.rankPredictionShuffleGlowOpacity = _RANKING_SHUFFLE_PULSE_MIN
+						+ (_RANKING_SHUFFLE_PULSE_PEAK - _RANKING_SHUFFLE_PULSE_MIN) * shuffleSine
+				else
+					slot.rankPredictionShuffleGlowOpacity = 0.0
+				end
+
+				-- Force-clear all prediction visuals on eliminated players
+				if slot.IsEliminated then
+					slot.rankPredictionUp        = false
+					slot.rankPredictionDown      = false
+					slot.rankPredictionContested = false
+					slot.rankPredictionUpGlowOpacity        = 0.0
+					slot.rankPredictionDownGlowOpacity      = 0.0
+					slot.rankPredictionContestedGlowOpacity = 0.0
+					slot.rankPredictionUp2   = false
+					slot.rankPredictionUp3   = false
+					slot.rankPredictionDown2 = false
+					slot.rankPredictionDown3 = false
+					slot.rankPredictionShuffleGlowOpacity = 0.0
+					entry.upPulseUntilTime = 0
+					entry.downPulseUntilTime = 0
+					entry.contestedPulseUntilTime = 0
+					entry.debugForceUntil = 0
+					entry.wasUp        = false
+					entry.wasDown      = false
+					entry.wasContested = false
+				end
+
+				-- Glow fills: opacity → Fill-alpha (XAML safety, no Opacity binding)
+				slot.rankPredictionUpGlowFill = _Ranking_GlowFill(slot.rankPredictionUpGlowOpacity, "4CAF50")
+				slot.rankPredictionDownGlowFill = _Ranking_GlowFill(slot.rankPredictionDownGlowOpacity, "F44336")
+				slot.rankPredictionContestedGlowFill = _Ranking_GlowFill(slot.rankPredictionContestedGlowOpacity, "FFC107")
+				slot.rankPredictionShuffleUpGlowFill = _Ranking_GlowFill(slot.rankPredictionShuffleGlowOpacity, "4CAF50")
+				slot.rankPredictionShuffleDownGlowFill = _Ranking_GlowFill(slot.rankPredictionShuffleGlowOpacity, "F44336")
+			end
+		end
+	end
+end
+
+-----------------------------------------------------------------------
+-- Reset: tear down state (game end / restart)
+-----------------------------------------------------------------------
+
+function PlayerUI_Ranking_Reset()
+	_PlayerUI_RankState = nil
+	_PlayerUI_RankTransitionLock = false
+	_PlayerUI_RankTransitionLockTime = 0
+	_PlayerUI_RankLastGlobalReorder = 0
+	_PlayerUI_RankPendingReorder = false
+end
+
+-----------------------------------------------------------------------
+-- Debug: force swap two players in a team for testing
+-- Usage (console): PlayerUI_Ranking_DebugForceSwap("teamLeft", 1, 2)
+-----------------------------------------------------------------------
+
+function PlayerUI_Ranking_DebugForceSwap(teamKey, idx1, idx2)
+	if _PlayerUI_RankState == nil then
+		print("[PLAYERUI_RANKING] RankState is nil — ranking not initialized")
+		return
+	end
+	local state = _PlayerUI_RankState[teamKey]
+	if state == nil then
+		print("[PLAYERUI_RANKING] Invalid teamKey: " .. tostring(teamKey))
+		return
+	end
+	if idx1 < 1 or idx1 > #state or idx2 < 1 or idx2 > #state then
+		print("[PLAYERUI_RANKING] Invalid indices: " .. tostring(idx1) .. ", " .. tostring(idx2) .. " (team size=" .. #state .. ")")
+		return
+	end
+
+	print("[PLAYERUI_RANKING] Forcing swap: " .. teamKey .. " [" .. idx1 .. "] <-> [" .. idx2 .. "]")
+
+	-- Swap entries in state
+	local temp = state[idx1]
+	state[idx1] = state[idx2]
+	state[idx2] = temp
+
+	-- Build movers list
+	local movers = {
+		{ entry = state[idx1], oldIdx = idx2, newIdx = idx1 },
+		{ entry = state[idx2], oldIdx = idx1, newIdx = idx2 },
+	}
+
+	-- Update target indices
+	state[idx1].targetIndex = idx1
+	state[idx2].targetIndex = idx2
+
+	-- Classify as minor since it's a direct swap
+	state[idx1].rankChangeType = RANK_CHANGE_MINOR
+	state[idx2].rankChangeType = RANK_CHANGE_MINOR
+	state[idx1].lastRankChangeTime = World_GetGameTime()
+	state[idx2].lastRankChangeTime = World_GetGameTime()
+
+	-- Trigger FLIP animation
+	_Ranking_StartFlipAnimation(teamKey, state, movers)
+	_Ranking_WriteFieldsToSlots(state)
+
+	print("[PLAYERUI_RANKING] Swap animation started")
+end
+
+-----------------------------------------------------------------------
+-- Debug: force a prediction state on one or all player slots.
+-- playerIndex = 0 applies to all active slots.
+-- state = "up" | "down" | "contested" | "none"
+-- Usage (console):
+--   PlayerUI_Debug_ForcePredictionState(1, "contested")
+--   PlayerUI_Debug_ForcePredictionState(0, "none")
+-----------------------------------------------------------------------
+
+function PlayerUI_Debug_ForcePredictionState(playerIndex, state, count)
+	count = count or 1
+	if count < 0 then count = 0 end
+	if count > 3 then count = 3 end
+	local mappings = PlayerUIDataContextMappings
+	if mappings == nil or mappings.PlayersByIndex == nil then
+		print("[PLAYERUI_DEBUG_PREDICT] not initialized")
+		return
+	end
+	local validStates = { up = true, down = true, contested = true, none = true }
+	if validStates[state] ~= true then
+		print("[PLAYERUI_DEBUG_PREDICT] invalid state='" .. tostring(state) .. "' (expected: up|down|contested|none)")
+		return
+	end
+	local targets = {}
+	if playerIndex == 0 then
+		for i = 1, #mappings.PlayersByIndex do
+			if mappings.PlayersByIndex[i] ~= nil then
+				table.insert(targets, i)
+			end
+		end
+	else
+		table.insert(targets, playerIndex)
+	end
+	for _, idx in ipairs(targets) do
+		local slot = mappings.PlayersByIndex[idx]
+		if slot ~= nil then
+			slot.rankPredictionUp        = (state == "up")
+			slot.rankPredictionDown      = (state == "down")
+			slot.rankPredictionContested = (state == "contested")
+			slot.rankPredictionUp2       = (state == "up" and count >= 2)
+			slot.rankPredictionUp3       = (state == "up" and count >= 3)
+			slot.rankPredictionDown2     = (state == "down" and count >= 2)
+			slot.rankPredictionDown3     = (state == "down" and count >= 3)
+
+			-- Seed glow immediately so forced debug states are visible before next animation tick.
+			if state == "up" then
+				slot.rankPredictionUpGlowOpacity = _RANKING_DIRECTIONAL_PULSE_PEAK
+				slot.rankPredictionDownGlowOpacity = 0.0
+				slot.rankPredictionContestedGlowOpacity = 0.0
+			elseif state == "down" then
+				slot.rankPredictionUpGlowOpacity = 0.0
+				slot.rankPredictionDownGlowOpacity = _RANKING_DIRECTIONAL_PULSE_PEAK
+				slot.rankPredictionContestedGlowOpacity = 0.0
+			elseif state == "contested" then
+				slot.rankPredictionUpGlowOpacity = 0.0
+				slot.rankPredictionDownGlowOpacity = 0.0
+				slot.rankPredictionContestedGlowOpacity = _RANKING_CONTESTED_PULSE_PEAK
+			else
+				slot.rankPredictionUpGlowOpacity = 0.0
+				slot.rankPredictionDownGlowOpacity = 0.0
+				slot.rankPredictionContestedGlowOpacity = 0.0
+			end
+			slot.rankPredictionShuffleGlowOpacity = (count >= 2 and state ~= "contested") and 0.7 or 0.0
+
+			-- Also stamp entry state + pulse windows so forced state survives animation tick
+			for _, teamKey in ipairs({"teamLeft", "teamRight"}) do
+				local rankState = _PlayerUI_RankState and _PlayerUI_RankState[teamKey]
+				if rankState then
+					for j = 1, #rankState do
+						if rankState[j].slotRef == slot then
+							rankState[j].predictUp = (state == "up")
+							rankState[j].predictDown = (state == "down")
+							rankState[j].predictContested = (state == "contested")
+							rankState[j].wasUp = (state == "up")
+							rankState[j].wasDown = (state == "down")
+							rankState[j].wasContested = (state == "contested")
+							local now = World_GetGameTime()
+							rankState[j].debugForceUntil = (state ~= "none") and (now + _RANKING_DEBUG_FORCE_WINDOW) or 0
+							if state == "up" then
+								rankState[j].upPulseUntilTime = _Ranking_ComputePulseWindowEndTime(now, _RANKING_DIRECTIONAL_PULSE_PERIOD)
+								rankState[j].downPulseUntilTime = 0
+								rankState[j].contestedPulseUntilTime = 0
+							elseif state == "down" then
+								rankState[j].downPulseUntilTime = _Ranking_ComputePulseWindowEndTime(now, _RANKING_DIRECTIONAL_PULSE_PERIOD)
+								rankState[j].upPulseUntilTime = 0
+								rankState[j].contestedPulseUntilTime = 0
+							elseif state == "contested" then
+								rankState[j].contestedPulseUntilTime = _Ranking_ComputePulseWindowEndTime(now, _RANKING_CONTESTED_PULSE_PERIOD)
+								rankState[j].upPulseUntilTime = 0
+								rankState[j].downPulseUntilTime = 0
+							else
+								rankState[j].upPulseUntilTime = 0
+								rankState[j].downPulseUntilTime = 0
+								rankState[j].contestedPulseUntilTime = 0
+								rankState[j].wasUp = false
+								rankState[j].wasDown = false
+								rankState[j].wasContested = false
+							end
+							break
+						end
+					end
+				end
+			end
+
+			print("[PLAYERUI_DEBUG_PREDICT] slot=" .. tostring(idx) .. " state=" .. tostring(state) .. " arrows=" .. tostring(count)
+				.. " forceWindow=" .. string.format("%.1fs", (state ~= "none") and _RANKING_DEBUG_FORCE_WINDOW or 0))
+		end
+	end
+end
+
+local function _PlayerUI_Debug_FindPredictionEntry(slot)
+	if _PlayerUI_RankState == nil or slot == nil then
+		return nil, nil, nil
+	end
+	for _, teamKey in ipairs({"teamLeft", "teamRight"}) do
+		local team = _PlayerUI_RankState[teamKey]
+		if team ~= nil then
+			for i = 1, #team do
+				if team[i].slotRef == slot then
+					return team[i], teamKey, i
+				end
+			end
+		end
+	end
+	return nil, nil, nil
+end
+
+local function _PlayerUI_Debug_PredictionVisibilitySnapshot(slot)
+	local blocked = (slot.IsEliminated == true) or (slot.hideAliveStats == true)
+	local up1 = (slot.rankPredictionUp == true) and (slot.rankPredictionContested ~= true)
+	local down1 = (slot.rankPredictionDown == true) and (slot.rankPredictionContested ~= true)
+	local contested = (slot.rankPredictionContested == true)
+	local up2 = (slot.rankPredictionUp2 == true)
+	local up3 = (slot.rankPredictionUp3 == true)
+	local down2 = (slot.rankPredictionDown2 == true)
+	local down3 = (slot.rankPredictionDown3 == true)
+	if blocked then
+		up1 = false
+		down1 = false
+		contested = false
+		up2 = false
+		up3 = false
+		down2 = false
+		down3 = false
+	end
+	return {
+		blocked = blocked,
+		up1 = up1,
+		down1 = down1,
+		contested = contested,
+		up2 = up2,
+		up3 = up3,
+		down2 = down2,
+		down3 = down3,
+	}
+end
+
+-----------------------------------------------------------------------
+-- Debug: audit prediction visibility for one slot or all slots.
+-- Reports blockers, contradictory state, and expected visible glyphs.
+-- Usage (console):
+--   PlayerUI_Debug_AuditPredictionVisibility(0)
+--   PlayerUI_Debug_AuditPredictionVisibility(3)
+-----------------------------------------------------------------------
+function PlayerUI_Debug_AuditPredictionVisibility(playerIndex)
+	local mappings = PlayerUIDataContextMappings
+	if mappings == nil or mappings.PlayersByIndex == nil then
+		print("[PLAYERUI_DEBUG_AUDIT] not initialized")
+		return
+	end
+
+	local targets = {}
+	if playerIndex == nil or playerIndex == 0 then
+		for i = 1, #mappings.PlayersByIndex do
+			if mappings.PlayersByIndex[i] ~= nil then
+				table.insert(targets, i)
+			end
+		end
+	else
+		table.insert(targets, playerIndex)
+	end
+
+	local issueCount = 0
+	for _, idx in ipairs(targets) do
+		local slot = mappings.PlayersByIndex[idx]
+		if slot ~= nil then
+			local entry, teamKey, teamPos = _PlayerUI_Debug_FindPredictionEntry(slot)
+			local vis = _PlayerUI_Debug_PredictionVisibilitySnapshot(slot)
+
+			local issues = {}
+			if slot.rankPredictionUp and slot.rankPredictionDown then
+				table.insert(issues, "both up and down flags set")
+			end
+			if slot.rankPredictionContested and (slot.rankPredictionUp or slot.rankPredictionDown) then
+				table.insert(issues, "contested overlaps directional flags")
+			end
+			if slot.rankPredictionUp2 and (not slot.rankPredictionUp) then
+				table.insert(issues, "up2 set without up1")
+			end
+			if slot.rankPredictionUp3 and (not slot.rankPredictionUp2) then
+				table.insert(issues, "up3 set without up2")
+			end
+			if slot.rankPredictionDown2 and (not slot.rankPredictionDown) then
+				table.insert(issues, "down2 set without down1")
+			end
+			if slot.rankPredictionDown3 and (not slot.rankPredictionDown2) then
+				table.insert(issues, "down3 set without down2")
+			end
+
+			local visibleSummary = "visible=["
+			if vis.up1 then visibleSummary = visibleSummary .. "up1 " end
+			if vis.down1 then visibleSummary = visibleSummary .. "down1 " end
+			if vis.contested then visibleSummary = visibleSummary .. "contested " end
+			if vis.up2 then visibleSummary = visibleSummary .. "up2 " end
+			if vis.up3 then visibleSummary = visibleSummary .. "up3 " end
+			if vis.down2 then visibleSummary = visibleSummary .. "down2 " end
+			if vis.down3 then visibleSummary = visibleSummary .. "down3 " end
+			visibleSummary = visibleSummary .. "]"
+
+			local ctx = string.format("slot=%d team=%s teamPos=%s blocked=%s %s",
+				idx,
+				tostring(teamKey or "?"),
+				tostring(teamPos or "?"),
+				tostring(vis.blocked),
+				visibleSummary)
+
+			if #issues > 0 then
+				issueCount = issueCount + #issues
+				print("[PLAYERUI_DEBUG_AUDIT] ISSUE " .. ctx .. " flags="
+					.. string.format("up=%s down=%s contested=%s up2=%s up3=%s down2=%s down3=%s",
+						tostring(slot.rankPredictionUp), tostring(slot.rankPredictionDown), tostring(slot.rankPredictionContested),
+						tostring(slot.rankPredictionUp2), tostring(slot.rankPredictionUp3), tostring(slot.rankPredictionDown2), tostring(slot.rankPredictionDown3)))
+				for ii = 1, #issues do
+					print("[PLAYERUI_DEBUG_AUDIT]  - " .. issues[ii])
+				end
+			else
+				print("[PLAYERUI_DEBUG_AUDIT] OK " .. ctx)
+			end
+
+			if entry ~= nil then
+				local forceRemaining = math.max(0, (entry.debugForceUntil or 0) - World_GetGameTime())
+				local forceTag = ""
+				if forceRemaining > 0 then
+					forceTag = " FORCE_PRESERVED remaining=" .. string.format("%.1fs", forceRemaining)
+				else
+					forceTag = " model_recomputed"
+				end
+				print("[PLAYERUI_DEBUG_AUDIT]  entryPredict up=" .. tostring(entry.predictUp)
+					.. " down=" .. tostring(entry.predictDown)
+					.. " contested=" .. tostring(entry.predictContested)
+					.. " delta=" .. tostring(entry.rankDelta or 0)
+					.. " conf=" .. string.format("%.2f", entry.predictionConfidence or 0.0)
+					.. forceTag)
+			end
+		end
+	end
+
+	print("[PLAYERUI_DEBUG_AUDIT] complete issues=" .. tostring(issueCount))
+end
+
+-----------------------------------------------------------------------
+-- Debug: force known edge cases for visibility debugging.
+-- caseName: up1|up2|up3|down1|down2|down3|contested|none
+--           overlap_ud|overlap_contested_up|orphan_up2|orphan_down3
+-- Usage (console):
+--   PlayerUI_Debug_ForcePredictionCase(1, "overlap_contested_up")
+--   PlayerUI_Debug_ForcePredictionCase(0, "up3")
+-----------------------------------------------------------------------
+function PlayerUI_Debug_ForcePredictionCase(playerIndex, caseName)
+	if caseName == "up1" then
+		PlayerUI_Debug_ForcePredictionState(playerIndex, "up", 1)
+		return
+	elseif caseName == "up2" then
+		PlayerUI_Debug_ForcePredictionState(playerIndex, "up", 2)
+		return
+	elseif caseName == "up3" then
+		PlayerUI_Debug_ForcePredictionState(playerIndex, "up", 3)
+		return
+	elseif caseName == "down1" then
+		PlayerUI_Debug_ForcePredictionState(playerIndex, "down", 1)
+		return
+	elseif caseName == "down2" then
+		PlayerUI_Debug_ForcePredictionState(playerIndex, "down", 2)
+		return
+	elseif caseName == "down3" then
+		PlayerUI_Debug_ForcePredictionState(playerIndex, "down", 3)
+		return
+	elseif caseName == "contested" then
+		PlayerUI_Debug_ForcePredictionState(playerIndex, "contested", 1)
+		return
+	elseif caseName == "none" then
+		PlayerUI_Debug_ForcePredictionState(playerIndex, "none", 0)
+		return
+	end
+
+	local mappings = PlayerUIDataContextMappings
+	if mappings == nil or mappings.PlayersByIndex == nil then
+		print("[PLAYERUI_DEBUG_CASE] not initialized")
+		return
+	end
+
+	local targets = {}
+	if playerIndex == 0 then
+		for i = 1, #mappings.PlayersByIndex do
+			if mappings.PlayersByIndex[i] ~= nil then
+				table.insert(targets, i)
+			end
+		end
+	else
+		table.insert(targets, playerIndex)
+	end
+
+	for _, idx in ipairs(targets) do
+		local slot = mappings.PlayersByIndex[idx]
+		if slot ~= nil then
+			if caseName == "overlap_ud" then
+				slot.rankPredictionUp = true
+				slot.rankPredictionDown = true
+				slot.rankPredictionContested = false
+				slot.rankPredictionUp2 = true
+				slot.rankPredictionUp3 = false
+				slot.rankPredictionDown2 = true
+				slot.rankPredictionDown3 = false
+				slot.rankPredictionUpGlowOpacity = _RANKING_DIRECTIONAL_PULSE_PEAK
+				slot.rankPredictionDownGlowOpacity = _RANKING_DIRECTIONAL_PULSE_PEAK
+				slot.rankPredictionContestedGlowOpacity = 0.0
+				slot.rankPredictionShuffleGlowOpacity = 0.7
+			elseif caseName == "overlap_contested_up" then
+				slot.rankPredictionUp = true
+				slot.rankPredictionDown = false
+				slot.rankPredictionContested = true
+				slot.rankPredictionUp2 = true
+				slot.rankPredictionUp3 = false
+				slot.rankPredictionDown2 = false
+				slot.rankPredictionDown3 = false
+				slot.rankPredictionUpGlowOpacity = _RANKING_DIRECTIONAL_PULSE_PEAK
+				slot.rankPredictionDownGlowOpacity = 0.0
+				slot.rankPredictionContestedGlowOpacity = _RANKING_CONTESTED_PULSE_PEAK
+				slot.rankPredictionShuffleGlowOpacity = 0.7
+			elseif caseName == "orphan_up2" then
+				slot.rankPredictionUp = false
+				slot.rankPredictionDown = false
+				slot.rankPredictionContested = false
+				slot.rankPredictionUp2 = true
+				slot.rankPredictionUp3 = false
+				slot.rankPredictionDown2 = false
+				slot.rankPredictionDown3 = false
+				slot.rankPredictionUpGlowOpacity = 0.0
+				slot.rankPredictionDownGlowOpacity = 0.0
+				slot.rankPredictionContestedGlowOpacity = 0.0
+				slot.rankPredictionShuffleGlowOpacity = 0.7
+			elseif caseName == "orphan_down3" then
+				slot.rankPredictionUp = false
+				slot.rankPredictionDown = false
+				slot.rankPredictionContested = false
+				slot.rankPredictionUp2 = false
+				slot.rankPredictionUp3 = false
+				slot.rankPredictionDown2 = false
+				slot.rankPredictionDown3 = true
+				slot.rankPredictionUpGlowOpacity = 0.0
+				slot.rankPredictionDownGlowOpacity = 0.0
+				slot.rankPredictionContestedGlowOpacity = 0.0
+				slot.rankPredictionShuffleGlowOpacity = 0.7
+			else
+				print("[PLAYERUI_DEBUG_CASE] unknown case='" .. tostring(caseName)
+					.. "' (expected up1|up2|up3|down1|down2|down3|contested|none|overlap_ud|overlap_contested_up|orphan_up2|orphan_down3)")
+				return
+			end
+
+			-- Stamp debug force window on ranking entry so forced state persists through recompute
+			local forceEntry = _PlayerUI_Debug_FindPredictionEntry(slot)
+			if forceEntry ~= nil then
+				local forceNow = World_GetGameTime()
+				forceEntry.debugForceUntil = forceNow + _RANKING_DEBUG_FORCE_WINDOW
+				forceEntry.predictUp = (slot.rankPredictionUp == true)
+				forceEntry.predictDown = (slot.rankPredictionDown == true)
+				forceEntry.predictContested = (slot.rankPredictionContested == true)
+				forceEntry.wasUp = forceEntry.predictUp
+				forceEntry.wasDown = forceEntry.predictDown
+				forceEntry.wasContested = forceEntry.predictContested
+				if forceEntry.predictUp then
+					forceEntry.upPulseUntilTime = _Ranking_ComputePulseWindowEndTime(forceNow, _RANKING_DIRECTIONAL_PULSE_PERIOD)
+				end
+				if forceEntry.predictDown then
+					forceEntry.downPulseUntilTime = _Ranking_ComputePulseWindowEndTime(forceNow, _RANKING_DIRECTIONAL_PULSE_PERIOD)
+				end
+				if forceEntry.predictContested then
+					forceEntry.contestedPulseUntilTime = _Ranking_ComputePulseWindowEndTime(forceNow, _RANKING_CONTESTED_PULSE_PERIOD)
+				end
+			end
+
+			print("[PLAYERUI_DEBUG_CASE] slot=" .. tostring(idx) .. " case=" .. tostring(caseName)
+				.. " forceWindow=" .. string.format("%.1fs", _RANKING_DEBUG_FORCE_WINDOW))
+		end
+	end
+end
+
+-----------------------------------------------------------------------
+-- Debug: cycle prediction states with varying arrow counts across slots.
+-- 8-element variety: up×1, down×2, up×3, contested, down×1, up×2, down×3, none.
+-- Delegates to ForcePredictionState for pulse-window persistence.
+-- Usage (console): PlayerUI_Debug_DemoPredictionStates()
+-----------------------------------------------------------------------
+
+function PlayerUI_Debug_DemoPredictionStates()
+	local mappings = PlayerUIDataContextMappings
+	if mappings == nil or mappings.PlayersByIndex == nil then
+		print("[PLAYERUI_DEBUG_PREDICT] not initialized")
+		return
+	end
+	local cycle = {
+		{ state = "up",        count = 1 },
+		{ state = "down",      count = 2 },
+		{ state = "up",        count = 3 },
+		{ state = "contested", count = 1 },
+		{ state = "down",      count = 1 },
+		{ state = "up",        count = 2 },
+		{ state = "down",      count = 3 },
+		{ state = "none",      count = 0 },
+	}
+	local idx = 0
+	for i = 1, #mappings.PlayersByIndex do
+		if mappings.PlayersByIndex[i] ~= nil then
+			idx = idx + 1
+			local entry = cycle[((idx - 1) % #cycle) + 1]
+			PlayerUI_Debug_ForcePredictionState(i, entry.state, entry.count)
+		end
+	end
+end
+
+-----------------------------------------------------------------------
+-- Debug: print current rank state for both teams
+-- Usage (console): PlayerUI_Ranking_DebugPrintState()
+-----------------------------------------------------------------------
+
+function PlayerUI_Ranking_DebugPrintState()
+	if _PlayerUI_RankState == nil then
+		print("[PLAYERUI_RANKING] RankState is nil — ranking not initialized")
+		return
+	end
+
+	for _, teamKey in ipairs({"teamLeft", "teamRight"}) do
+		local state = _PlayerUI_RankState[teamKey]
+		if state ~= nil and #state > 0 then
+			print("[PLAYERUI_RANKING] === " .. teamKey .. " (" .. #state .. " players) ===")
+			for i = 1, #state do
+				local e = state[i]
+				local name = (e.slotRef and e.slotRef.name) or "?"
+				local dbgNow = World_GetGameTime()
+				local dbgForceRem = math.max(0, (e.debugForceUntil or 0) - dbgNow)
+				local cooldownRem = math.max(0, _RANKING_STABILITY_COOLDOWN - (dbgNow - e.lastRankChangeTime))
+				print(string.format(
+					"  [%d] %s  score=%d  stable=%d  predicted=%d  delta=%+d  range=#%d-#%d  conf=%.2f  "
+					.. "visual=%d  target=%d  change=%s  contested=%s  top=%s  pUp=%s  pDown=%s  pCon=%s  dbgForce=%.1f",
+					i, name, e.score, e.stableScore, e.predictedRank or i, e.rankDelta or 0,
+					e.landingBest or i, e.landingWorst or i, e.predictionConfidence or 0,
+					e.visualIndex, e.targetIndex,
+					e.rankChangeType, tostring(e.isContested), tostring(e.isTopPlayer),
+					tostring(e.predictUp), tostring(e.predictDown), tostring(e.predictContested),
+					dbgForceRem
+				))
+				print(string.format(
+					"         cooldown=%.1f  wasUp=%s  wasDown=%s  wasCon=%s  "
+					.. "upPulse=%.1f  downPulse=%.1f  conPulse=%.1f",
+					cooldownRem,
+					tostring(e.wasUp), tostring(e.wasDown), tostring(e.wasContested),
+					math.max(0, (e.upPulseUntilTime or 0) - dbgNow),
+					math.max(0, (e.downPulseUntilTime or 0) - dbgNow),
+					math.max(0, (e.contestedPulseUntilTime or 0) - dbgNow)
+				))
+			end
+		end
+	end
+	local lockElapsed = _PlayerUI_RankTransitionLock and string.format("%.1f", World_GetGameTime() - (_PlayerUI_RankTransitionLockTime or 0)) or "n/a"
+	local reorderCooldownRem = math.max(0, _RANKING_GLOBAL_REORDER_COOLDOWN - (World_GetGameTime() - (_PlayerUI_RankLastGlobalReorder or 0)))
+	print("[PLAYERUI_RANKING] transitionLock=" .. tostring(_PlayerUI_RankTransitionLock)
+		.. "  lockElapsed=" .. lockElapsed
+		.. "  pendingReorder=" .. tostring(_PlayerUI_RankPendingReorder)
+		.. "  reorderCooldown=" .. string.format("%.1f", reorderCooldownRem))
+end
+
+-----------------------------------------------------------------------
+-- Debug: force a score override to test rank stability
+-- Usage (console): PlayerUI_Ranking_DebugSetScore("teamLeft", 2, 500)
+-----------------------------------------------------------------------
+
+function PlayerUI_Ranking_DebugSetScore(teamKey, idx, newScore)
+	if _PlayerUI_RankState == nil then
+		print("[PLAYERUI_RANKING] RankState is nil")
+		return
+	end
+	local state = _PlayerUI_RankState[teamKey]
+	if state == nil or idx < 1 or idx > #state then
+		print("[PLAYERUI_RANKING] Invalid team/index")
+		return
+	end
+
+	local entry = state[idx]
+	local oldScore = entry.score
+	entry.score = newScore
+	entry.stableScore = newScore
+	entry.slotRef.killScore = newScore
+
+	print(string.format("[PLAYERUI_RANKING] %s[%d] score: %d -> %d (stable forced)",
+		teamKey, idx, oldScore, newScore))
+end
+
+-----------------------------------------------------------------------
+-- Debug: detailed per-slot snapshot — entry model + slot booleans + glow
+-- opacities + force/pulse window state on a single tagged log batch.
+-- tag: short label included in every line (e.g. "pre-force", "post-wait")
+-- playerIndex: 0 = all active slots, else specific 1-based index
+-- Usage (console): PlayerUI_Debug_PredictionSnapshot("baseline", 0)
+-----------------------------------------------------------------------
+
+function PlayerUI_Debug_PredictionSnapshot(tag, playerIndex)
+	local mappings = PlayerUIDataContextMappings
+	if mappings == nil or mappings.PlayersByIndex == nil then
+		print("[PLAYERUI_DEBUG_SNAP] not initialized")
+		return
+	end
+
+	local targets = {}
+	if playerIndex == nil or playerIndex == 0 then
+		for i = 1, #mappings.PlayersByIndex do
+			if mappings.PlayersByIndex[i] ~= nil then
+				table.insert(targets, i)
+			end
+		end
+	else
+		table.insert(targets, playerIndex)
+	end
+
+	local now = World_GetGameTime()
+	local lockElapsed = _PlayerUI_RankTransitionLock and string.format("%.1f", now - (_PlayerUI_RankTransitionLockTime or 0)) or "n/a"
+	local reorderCooldownRem = math.max(0, _RANKING_GLOBAL_REORDER_COOLDOWN - (now - (_PlayerUI_RankLastGlobalReorder or 0)))
+	print(string.format("[PLAYERUI_DEBUG_SNAP] tag=%s  gameTime=%.1f  slots=%d  lock=%s  lockElapsed=%s  pending=%s  reorderCD=%.1f",
+		tostring(tag), now, #targets,
+		tostring(_PlayerUI_RankTransitionLock), lockElapsed,
+		tostring(_PlayerUI_RankPendingReorder), reorderCooldownRem))
+
+	for _, idx in ipairs(targets) do
+		local slot = mappings.PlayersByIndex[idx]
+		if slot ~= nil then
+			local entry, teamKey, teamPos = _PlayerUI_Debug_FindPredictionEntry(slot)
+			local vis = _PlayerUI_Debug_PredictionVisibilitySnapshot(slot)
+
+			-- Source: entry model state
+			local entryLine = "  no_entry"
+			if entry ~= nil then
+				local forceRem = math.max(0, (entry.debugForceUntil or 0) - now)
+				local source = (forceRem > 0) and "FORCED" or "MODEL"
+				local cooldownRem = math.max(0, _RANKING_STABILITY_COOLDOWN - (now - entry.lastRankChangeTime))
+				entryLine = string.format(
+					"  src=%s  rank=%d  predicted=%d  delta=%+d  conf=%.2f  "
+					.. "pUp=%s  pDown=%s  pCon=%s  contested=%s  forceRem=%.1f  forceActive=%s",
+					source,
+					entry.visualIndex or 0, entry.predictedRank or 0, entry.rankDelta or 0,
+					entry.predictionConfidence or 0.0,
+					tostring(entry.predictUp), tostring(entry.predictDown), tostring(entry.predictContested),
+					tostring(entry.isContested or false),
+					forceRem, tostring(entry._debugForceActive or false))
+			end
+
+			-- Target: slot boolean state + glow opacities
+			local slotLine = string.format(
+				"  slotUp=%s  slotDown=%s  slotCon=%s  up2=%s  up3=%s  down2=%s  down3=%s  "
+				.. "upGlow=%.2f  downGlow=%.2f  conGlow=%.2f  shuffGlow=%.2f",
+				tostring(slot.rankPredictionUp), tostring(slot.rankPredictionDown), tostring(slot.rankPredictionContested),
+				tostring(slot.rankPredictionUp2), tostring(slot.rankPredictionUp3),
+				tostring(slot.rankPredictionDown2), tostring(slot.rankPredictionDown3),
+				slot.rankPredictionUpGlowOpacity or 0, slot.rankPredictionDownGlowOpacity or 0,
+				slot.rankPredictionContestedGlowOpacity or 0, slot.rankPredictionShuffleGlowOpacity or 0)
+
+			-- Pulse windows + was* transition state
+			local pulseLine = ""
+			if entry ~= nil then
+				local cooldownRem = math.max(0, _RANKING_STABILITY_COOLDOWN - (now - entry.lastRankChangeTime))
+				pulseLine = string.format(
+					"  cooldown=%.1f  wasUp=%s  wasDown=%s  wasCon=%s  "
+					.. "upPulse=%.1f  downPulse=%.1f  conPulse=%.1f  score=%d  stable=%d",
+					cooldownRem,
+					tostring(entry.wasUp), tostring(entry.wasDown), tostring(entry.wasContested),
+					math.max(0, (entry.upPulseUntilTime or 0) - now),
+					math.max(0, (entry.downPulseUntilTime or 0) - now),
+					math.max(0, (entry.contestedPulseUntilTime or 0) - now),
+					entry.score or 0, entry.stableScore or 0)
+			end
+
+			-- Visible: effective XAML visibility
+			local visLine = "  vis=["
+			if vis.up1 then visLine = visLine .. "up1 " end
+			if vis.up2 then visLine = visLine .. "up2 " end
+			if vis.up3 then visLine = visLine .. "up3 " end
+			if vis.down1 then visLine = visLine .. "down1 " end
+			if vis.down2 then visLine = visLine .. "down2 " end
+			if vis.down3 then visLine = visLine .. "down3 " end
+			if vis.contested then visLine = visLine .. "contested " end
+			visLine = visLine .. "]"
+			if vis.blocked then visLine = visLine .. " BLOCKED" end
+
+			print(string.format("[PLAYERUI_DEBUG_SNAP] [%s] slot=%d  team=%s  pos=%s",
+				tostring(tag), idx, tostring(teamKey or "?"), tostring(teamPos or "?")))
+			print("[PLAYERUI_DEBUG_SNAP]" .. entryLine)
+			print("[PLAYERUI_DEBUG_SNAP]" .. slotLine)
+			if pulseLine ~= "" then
+				print("[PLAYERUI_DEBUG_SNAP]" .. pulseLine)
+			end
+			print("[PLAYERUI_DEBUG_SNAP]" .. visLine)
+		end
+	end
+end
+
+-----------------------------------------------------------------------
+-- Debug: deterministic force → wait → audit cycle.
+-- Forces a prediction case, schedules an audit + snapshot after a delay
+-- so one console command yields a before/after pair in the scarlog.
+-- caseName: any valid ForcePredictionCase name (up1|up3|down2|contested|...)
+-- waitSeconds: delay before the follow-up audit fires (default 2.0)
+-- Usage (console):
+--   PlayerUI_Debug_ForceWaitAudit("up3", 3.0)
+--   PlayerUI_Debug_ForceWaitAudit("contested")
+-----------------------------------------------------------------------
+
+_PLAYERUI_DEBUG_FWA_PENDING = nil
+
+function PlayerUI_Debug_ForceWaitAudit(caseName, waitSeconds)
+	waitSeconds = waitSeconds or 2.0
+	if waitSeconds < 0.5 then waitSeconds = 0.5 end
+	if waitSeconds > 30.0 then waitSeconds = 30.0 end
+
+	print(string.format("[PLAYERUI_DEBUG_FWA] === Force-Wait-Audit: case=%s  wait=%.1fs ===", tostring(caseName), waitSeconds))
+
+	-- Pre-force snapshot
+	PlayerUI_Debug_PredictionSnapshot("fwa_pre", 0)
+
+	-- Apply force on all slots
+	PlayerUI_Debug_ForcePredictionCase(0, caseName)
+
+	-- Immediate post-force snapshot
+	PlayerUI_Debug_PredictionSnapshot("fwa_post_force", 0)
+
+	-- Schedule deferred audit
+	_PLAYERUI_DEBUG_FWA_PENDING = { case = caseName, tag = "fwa_after_" .. tostring(waitSeconds) .. "s" }
+	Rule_AddOneShot(_PlayerUI_Debug_FWA_DeferredAudit, waitSeconds)
+
+	print(string.format("[PLAYERUI_DEBUG_FWA] deferred audit scheduled in %.1fs", waitSeconds))
+end
+
+function _PlayerUI_Debug_FWA_DeferredAudit()
+	local ctx = _PLAYERUI_DEBUG_FWA_PENDING or {}
+	_PLAYERUI_DEBUG_FWA_PENDING = nil
+	local tag = ctx.tag or "fwa_deferred"
+	print(string.format("[PLAYERUI_DEBUG_FWA] === Deferred audit firing: tag=%s ===", tag))
+
+	-- Take pre-recompute snapshot (force states may still be active)
+	PlayerUI_Debug_PredictionSnapshot(tag .. "_PRE_RECOMPUTE", 0)
+
+	-- Trigger fresh ranking update to clear expired force states and recompute model
+	print("[PLAYERUI_DEBUG_FWA] Triggering fresh ranking update for deterministic recompute...")
+	PlayerUI_Ranking_Update()
+
+	-- Take post-recompute snapshot (should show cleared forced states, zeroed glows)
+	PlayerUI_Debug_PredictionSnapshot(tag .. "_POST_RECOMPUTE", 0)
+
+	-- Full visibility audit
+	PlayerUI_Debug_AuditPredictionVisibility(0)
+	print("[PLAYERUI_DEBUG_FWA] === Deferred audit complete ===")
+end
+
+-----------------------------------------------------------------------
+-- Debug: one-line diagnostic — full prediction visibility audit.
+-- Prints: 1) snapshot, 2) full entry state + force windows, 3) slot-by-slot
+-- audit with XAML blocking flags, 4) force up3 on all, 5) snapshot again.
+-- Usage (console): PlayerUI_Debug_PredictionDiagnostics()
+-----------------------------------------------------------------------
+
+function PlayerUI_Debug_PredictionDiagnostics()
+	print("[PLAYERUI_DEBUG_DIAG] === START ===")
+	PlayerUI_Debug_PredictionSnapshot("diag_baseline", 0)
+	PlayerUI_Ranking_DebugPrintState()
+	print("[PLAYERUI_DEBUG_DIAG] --- Before force ---")
+	PlayerUI_Debug_AuditPredictionVisibility(0)
+	print("[PLAYERUI_DEBUG_DIAG] --- Force up3 on all slots ---")
+	PlayerUI_Debug_ForcePredictionCase(0, "up3")
+	print("[PLAYERUI_DEBUG_DIAG] --- After force (should show FORCE_PRESERVED) ---")
+	PlayerUI_Debug_PredictionSnapshot("diag_post_force", 0)
+	PlayerUI_Debug_AuditPredictionVisibility(0)
+	print("[PLAYERUI_DEBUG_DIAG] === DONE ===")
+end
+
+-----------------------------------------------------------------------
+-- Debug: automated prediction model test — two-phase.
+--
+-- Phase 1 (Model verification):
+--   Sets divergent stableScore vs rawScore to create genuine prediction
+--   deltas.  Blocks Phase 4 stableScore sync by setting lastRankChangeTime
+--   to now (cooldown won't expire within the same tick).
+--   Exercises: directional up/down, multi-arrow counts, tight-contested,
+--   confidence scaling, direction-wins-over-contested normalization.
+--
+-- Phase 2 (Visual demo):
+--   Stamps each teamLeft slot with a different arrow configuration via
+--   ForcePredictionState so the HUD display can be visually inspected.
+--
+-- Single command, no user input required, re-runnable.
+-- Usage (console): PlayerUI_Ranking_DebugTestPredictions()
+-----------------------------------------------------------------------
+
+function PlayerUI_Ranking_DebugTestPredictions()
+	if _PlayerUI_RankState == nil then
+		print("[RANKING_TEST] RankState nil — not initialized")
+		return
+	end
+
+	local state = _PlayerUI_RankState["teamLeft"]
+	if state == nil or #state < 2 then
+		print("[RANKING_TEST] teamLeft has fewer than 2 entries")
+		return
+	end
+
+	local n = #state
+	local now = World_GetGameTime()
+	print(string.format("[RANKING_TEST] === Phase 1: Model verification — teamLeft (%d entries), gameTime=%.1f ===", n, now))
+
+	-- stableScore: well-spaced descending values that preserve current visual sort order.
+	-- rawScore:    divergent values that force the prediction model to compute non-zero deltas.
+	-- 4-player example:
+	--   P1: stable=300 raw=50   → predicted rank 4 → delta=-3 DOWN  arrows=3 conf=1.00
+	--   P2: stable=200 raw=105  → predicted rank 2 → delta=0  CONTESTED     conf=0.00
+	--   P3: stable=100 raw=103  → predicted rank 3 → delta=0  CONTESTED     conf=0.00
+	--   P4: stable=0   raw=300  → predicted rank 1 → delta=+3 UP    arrows=3 conf=1.00
+	local stableScores, rawScores
+	if n >= 4 then
+		stableScores = { 300, 200, 100, 0 }
+		rawScores    = { 50, 105, 103, 300 }
+	elseif n == 3 then
+		stableScores = { 300, 200, 100 }
+		rawScores    = { 50, 105, 103 }
+	else
+		stableScores = { 200, 0 }
+		rawScores    = { 50, 200 }
+	end
+
+	for i = 1, n do
+		local entry = state[i]
+		local oldScore = entry.score
+		local oldStable = entry.stableScore
+
+		-- Set divergent scores
+		entry.stableScore = stableScores[i] or entry.stableScore
+		entry.score = rawScores[i] or entry.score
+		entry.slotRef.killScore = entry.score
+
+		-- Block Phase 4 sync: cooldown = 3.0s, so lastRankChangeTime = now means
+		-- timeSinceLastChange = 0 < 3.0 → stableScore will NOT be overwritten.
+		entry.lastRankChangeTime = now
+
+		print(string.format("[RANKING_TEST]   [%d] score %d->%d  stable %d->%d  lastChange=%.1f",
+			i, oldScore, entry.score, oldStable, entry.stableScore, entry.lastRankChangeTime))
+	end
+
+	-- Release locks so Update() processes fully
+	_PlayerUI_RankTransitionLock = false
+	_PlayerUI_RankPendingReorder = false
+	_PlayerUI_RankLastGlobalReorder = 0
+
+	-- Force immediate ranking update
+	PlayerUI_Ranking_Update()
+
+	-- Print full state with computed predictions
+	PlayerUI_Ranking_DebugPrintState()
+
+	-- Self-verifying expected outcomes
+	print("[RANKING_TEST] --- Expected ---")
+	if n >= 4 then
+		print("[RANKING_TEST]   [1] delta=-3  DOWN   arrows=3  conf=1.00")
+		print("[RANKING_TEST]   [2] delta=0   CONTESTED         conf=0.00")
+		print("[RANKING_TEST]   [3] delta=0   CONTESTED         conf=0.00")
+		print("[RANKING_TEST]   [4] delta=+3  UP     arrows=3  conf=1.00")
+	elseif n == 3 then
+		print("[RANKING_TEST]   [1] delta=-2  DOWN   arrows=2  conf=1.00")
+		print("[RANKING_TEST]   [2] delta=+1  CONTESTED         conf=0.00")
+		print("[RANKING_TEST]   [3] delta=0   CONTESTED         conf=0.00")
+	else
+		print("[RANKING_TEST]   [1] delta=-1  DOWN              conf=1.00")
+		print("[RANKING_TEST]   [2] delta=+1  UP                conf=1.00")
+	end
+
+	-- Phase 2: Visual demo — stamp different arrow configs for HUD inspection
+	print("[RANKING_TEST] === Phase 2: Visual demo ===")
+	local demos
+	if n >= 4 then
+		demos = {
+			{ state = "up",        count = 1 },
+			{ state = "down",      count = 2 },
+			{ state = "up",        count = 3 },
+			{ state = "contested", count = 1 },
+		}
+	elseif n == 3 then
+		demos = {
+			{ state = "up",        count = 1 },
+			{ state = "down",      count = 2 },
+			{ state = "up",        count = 3 },
+		}
+	else
+		demos = {
+			{ state = "up",   count = 2 },
+			{ state = "down", count = 3 },
+		}
+	end
+	for i = 1, n do
+		local d = demos[i]
+		if d then
+			PlayerUI_Debug_ForcePredictionState(i, d.state, d.count)
+		end
+	end
+
+	print("[RANKING_TEST] === Complete — re-run anytime ===")
+end
+
+-----------------------------------------------------------------------
+-- Debug: system-wide ranking status — one-shot overview of all
+-- module-level state plus condensed per-entry summary for both teams.
+-- Usage (console): PlayerUI_Debug_SystemStatus()
+-----------------------------------------------------------------------
+
+function PlayerUI_Debug_SystemStatus()
+	if _PlayerUI_RankState == nil then
+		print("[PLAYERUI_DEBUG_STATUS] RankState nil — not initialized")
+		return
+	end
+
+	local now = World_GetGameTime()
+	local lockElapsed = _PlayerUI_RankTransitionLock and string.format("%.1f", now - (_PlayerUI_RankTransitionLockTime or 0)) or "n/a"
+	local reorderCD = math.max(0, _RANKING_GLOBAL_REORDER_COOLDOWN - (now - (_PlayerUI_RankLastGlobalReorder or 0)))
+
+	print(string.format("[PLAYERUI_DEBUG_STATUS] === System Status  gameTime=%.1f ===", now))
+	print(string.format("[PLAYERUI_DEBUG_STATUS] transitionLock=%s  elapsed=%s  pendingReorder=%s  reorderCooldown=%.1f",
+		tostring(_PlayerUI_RankTransitionLock), lockElapsed,
+		tostring(_PlayerUI_RankPendingReorder), reorderCD))
+
+	local settingsLine = string.format(
+		"[PLAYERUI_DEBUG_STATUS] settings: arrows=%s  delta=%s  contested=%s  conCollapse=%s  translate=%s  scale=%s",
+		tostring(PlayerUI_Settings.EnableRankPredictionArrows ~= false),
+		tostring(PlayerUI_Settings.EnableRankPredictionDelta == true),
+		tostring(PlayerUI_Settings.EnableRankPredictionContested ~= false),
+		tostring(PlayerUI_Settings.EnableRankContestedCollapseMulti ~= false),
+		tostring(PlayerUI_Settings.EnableRankTranslateAnimation == true),
+		tostring(PlayerUI_Settings.EnableRankScaleAnimation == true))
+	print(settingsLine)
+
+	print(string.format("[PLAYERUI_DEBUG_STATUS] constants: threshold=%d  cooldown=%.1f  globalCD=%.1f  forceWindow=%.1f  rowH=%d",
+		_RANKING_STABILITY_THRESHOLD, _RANKING_STABILITY_COOLDOWN,
+		_RANKING_GLOBAL_REORDER_COOLDOWN, _RANKING_DEBUG_FORCE_WINDOW, _RANKING_ROW_HEIGHT))
+	print(string.format("[PLAYERUI_DEBUG_STATUS] counters: collapseHits=%d  collapseBypassedForce=%d",
+		_RANKING_STATS_COLLAPSE_HITS or 0, _RANKING_STATS_COLLAPSE_BYPASSED_FORCE or 0))
+
+	for _, teamKey in ipairs({"teamLeft", "teamRight"}) do
+		local state = _PlayerUI_RankState[teamKey]
+		if state ~= nil and #state > 0 then
+			local activeCount = 0
+			local elimCount = 0
+			local contestedCount = 0
+			local predUpCount = 0
+			local predDownCount = 0
+			local predConCount = 0
+			local forcedCount = 0
+			local cooldownCount = 0
+
+			for i = 1, #state do
+				local e = state[i]
+				if e.slotRef.IsEliminated then
+					elimCount = elimCount + 1
+				else
+					activeCount = activeCount + 1
+				end
+				if e.isContested then contestedCount = contestedCount + 1 end
+				if e.predictUp then predUpCount = predUpCount + 1 end
+				if e.predictDown then predDownCount = predDownCount + 1 end
+				if e.predictContested then predConCount = predConCount + 1 end
+				if now <= (e.debugForceUntil or 0) then forcedCount = forcedCount + 1 end
+				local cd = _RANKING_STABILITY_COOLDOWN - (now - e.lastRankChangeTime)
+				if cd > 0 then cooldownCount = cooldownCount + 1 end
+			end
+
+			print(string.format(
+				"[PLAYERUI_DEBUG_STATUS] %s: %d entries (%d active, %d elim)  "
+				.. "contested=%d  pUp=%d  pDown=%d  pCon=%d  forced=%d  cooldown=%d",
+				teamKey, #state, activeCount, elimCount,
+				contestedCount, predUpCount, predDownCount, predConCount,
+				forcedCount, cooldownCount))
+
+			for i = 1, #state do
+				local e = state[i]
+				local name = (e.slotRef and e.slotRef.name) or "?"
+				local elim = e.slotRef.IsEliminated and "ELIM" or "live"
+				local cdRem = math.max(0, _RANKING_STABILITY_COOLDOWN - (now - e.lastRankChangeTime))
+				local pred = "none"
+				if e.predictUp then pred = "UP" end
+				if e.predictDown then pred = "DOWN" end
+				if e.predictContested then pred = "CONTESTED" end
+				local forceRem = math.max(0, (e.debugForceUntil or 0) - now)
+				print(string.format(
+					"[PLAYERUI_DEBUG_STATUS]   [%d] %s  %s  score=%d  stable=%d  gap=%+d  cd=%.1f  "
+					.. "pred=%s  delta=%+d  conf=%.2f  contested=%s  top=%s  force=%.1f",
+					i, name, elim, e.score, e.stableScore, e.score - e.stableScore, cdRem,
+					pred, e.rankDelta or 0, e.predictionConfidence or 0,
+					tostring(e.isContested), tostring(e.isTopPlayer), forceRem))
+			end
+		end
+	end
+	print("[PLAYERUI_DEBUG_STATUS] === End ===")
+end
+
+-----------------------------------------------------------------------
+-- Debug: stability lifecycle test — exercises hysteresis, contested,
+-- cooldown blocking, and top-player pin in a single command.
+-- Sets specific score/stableScore/lastRankChangeTime on teamLeft to
+-- create known scenarios, then runs Update and prints full state.
+--
+-- 4-player scenario:
+--   [1] stable=300 raw=300 cd=expired  → pinned top, no prediction
+--   [2] stable=200 raw=250 cd=expired  → raw>stable by 50 (above threshold) → should swap up
+--   [3] stable=190 raw=195 cd=blocked  → within threshold of [2], cooldown blocked
+--   [4] stable=50  raw=60  cd=expired  → within threshold of [3] → contested
+--
+-- Usage (console): PlayerUI_Debug_TestStability()
+-----------------------------------------------------------------------
+
+function PlayerUI_Debug_TestStability()
+	if _PlayerUI_RankState == nil then
+		print("[STABILITY_TEST] RankState nil — not initialized")
+		return
+	end
+
+	local state = _PlayerUI_RankState["teamLeft"]
+	if state == nil or #state < 2 then
+		print("[STABILITY_TEST] teamLeft has fewer than 2 entries")
+		return
+	end
+
+	local n = #state
+	local now = World_GetGameTime()
+	print(string.format("[STABILITY_TEST] === Stability lifecycle — teamLeft (%d entries), gameTime=%.1f ===", n, now))
+	print(string.format("[STABILITY_TEST] threshold=%d  cooldown=%.1f  globalCD=%.1f",
+		_RANKING_STABILITY_THRESHOLD, _RANKING_STABILITY_COOLDOWN, _RANKING_GLOBAL_REORDER_COOLDOWN))
+
+	-- Scenario scores: designed for threshold=15
+	local stableScores, rawScores, lastChangeTimes
+	if n >= 4 then
+		stableScores    = { 300, 200, 190, 180 }
+		rawScores       = { 300, 250, 195, 185 }
+		lastChangeTimes = { 0,   0,   now, 0  }  -- [3] has active cooldown; [4] should be contested (gap=10 < threshold=15)
+	elseif n == 3 then
+		stableScores    = { 300, 200, 190 }
+		rawScores       = { 300, 250, 195 }
+		lastChangeTimes = { 0,   0,   now }
+	else
+		stableScores    = { 200, 180 }
+		rawScores       = { 200, 185 }
+		lastChangeTimes = { 0,   0  }
+	end
+
+	for i = 1, n do
+		local entry = state[i]
+		local oldScore = entry.score
+		local oldStable = entry.stableScore
+		entry.score = rawScores[i] or entry.score
+		entry.stableScore = stableScores[i] or entry.stableScore
+		entry.slotRef.killScore = entry.score
+		entry.lastRankChangeTime = lastChangeTimes[i] or 0
+		local cdState = (now - entry.lastRankChangeTime < _RANKING_STABILITY_COOLDOWN) and "BLOCKED" or "expired"
+		print(string.format("[STABILITY_TEST]   [%d] score %d->%d  stable %d->%d  cd=%s  gap=%+d",
+			i, oldScore, entry.score, oldStable, entry.stableScore,
+			cdState, entry.score - entry.stableScore))
+	end
+
+	-- Release locks for clean run
+	_PlayerUI_RankTransitionLock = false
+	_PlayerUI_RankPendingReorder = false
+	_PlayerUI_RankLastGlobalReorder = 0
+
+	-- Run update cycle
+	PlayerUI_Ranking_Update()
+
+	-- Print results
+	PlayerUI_Ranking_DebugPrintState()
+
+	-- Expected outcomes
+	print("[STABILITY_TEST] --- Expected ---")
+	if n >= 4 then
+		print("[STABILITY_TEST]   [1] top=true  pinned at rank 1  no prediction (delta=0)")
+		print("[STABILITY_TEST]   [2] stable=250 synced (cd expired, raw>threshold over [3])")
+		print("[STABILITY_TEST]   [3] stable=190 KEPT (cd blocked, raw barely +5 over old stable)")
+		print("[STABILITY_TEST]   [4] contested=true (gap=10 < threshold=15, within [3] after [3] locked)")
+	elseif n == 3 then
+		print("[STABILITY_TEST]   [1] top=true  rank 1")
+		print("[STABILITY_TEST]   [2] stable synced  rank 2")
+		print("[STABILITY_TEST]   [3] cd blocked  rank 3")
+	else
+		print("[STABILITY_TEST]   [1] top=true  rank 1")
+		print("[STABILITY_TEST]   [2] contested=true (gap=20 < threshold=15? NO, gap=20 > 15, NOT contested)")
+	end
+
+	print("[STABILITY_TEST] === Complete — re-run anytime ===")
+end
+
+-----------------------------------------------------------------------
+-- Debug: contested collapse proof — exercises multi-arrow suppression
+-- under contested adjacency using real score/stableScore manipulation
+-- (no debug-force). Proves Phase Next-4 collapse on the production
+-- recompute path.
+--
+-- 4-player scenario (threshold=15):
+--   [1] stable=400 raw=400 cd=expired → pinned top, well separated
+--   [2] stable=100 raw=100 cd=expired → baseline, large gap to [1]
+--   [3] stable=95  raw=95  cd=expired → contested with [2] (gap=5<15)
+--   [4] stable=90  raw=90  cd=expired → contested with [3] (gap=5<15)
+--
+-- After sort: [1]=400, [2]=100, [3]=95, [4]=90
+-- rankDelta for [4]: sorted pos=4, predicted rank=4 → delta=0.
+-- That won't trigger multi-arrows. So we need scores that create
+-- high raw score but low stableScore to produce delta magnitude.
+--
+-- Revised scenario:
+--   [1] stable=400 raw=400 cd=expired → top, no prediction
+--   [2] stable=200 raw=200 cd=expired → clean rank 2
+--   [3] stable=105 raw=105 cd=expired → contested with [4]
+--   [4] stable=100 raw=310 cd=expired → raw=310 predicts rank 2,
+--       but stableScore=100 keeps sorted at rank 4 → delta=+2
+--       isContested with [3] (100 vs 105, gap=5 < 15)
+--       predictUp=true, absDelta=2 → up2=true BEFORE collapse
+--       collapse should suppress up2/up3.
+--
+-- Usage (console): PlayerUI_Debug_TestContestedCollapse()
+-----------------------------------------------------------------------
+
+function PlayerUI_Debug_TestContestedCollapse()
+	if _PlayerUI_RankState == nil then
+		print("[COLLAPSE_TEST] RankState nil — not initialized")
+		return
+	end
+
+	local state = _PlayerUI_RankState["teamLeft"]
+	if state == nil or #state < 4 then
+		print("[COLLAPSE_TEST] teamLeft needs >= 4 entries")
+		return
+	end
+
+	local n = #state
+	local now = World_GetGameTime()
+	print(string.format("[COLLAPSE_TEST] === Contested collapse proof — teamLeft (%d entries), gameTime=%.1f ===", n, now))
+	print(string.format("[COLLAPSE_TEST] threshold=%d  collapseEnabled=%s",
+		_RANKING_STABILITY_THRESHOLD,
+		tostring(PlayerUI_Settings.EnableRankContestedCollapseMulti ~= false)))
+
+	-- Record pre-test counter
+	local preCollapseHits = _RANKING_STATS_COLLAPSE_HITS or 0
+
+	-- Scenario tuned for current contested logic (adjacent RAW score diff <= threshold):
+	-- stable order remains [1]=400, [2]=210, [3]=205, [4]=100
+	-- raw scores make [4] predict upward while staying RAW-contested with [3]:
+	--   [4].raw=215, [3].raw=205 => diff=10 (contested=true)
+	--   predicted([4])=2 while sorted position([4])=4 => delta=+2
+	local stableScores    = { 400, 210, 205, 100 }
+	local rawScores       = { 400, 210, 205, 215 }
+	-- Keep cooldown active for one cycle so phase-4 stability rewrite does not
+	-- normalize stableScore=score before prediction/collapse evaluation.
+	local lockTs = now
+	local injectRows = {}
+
+	for i = 1, n do
+		local entry = state[i]
+		local oldScore = entry.score
+		local oldStable = entry.stableScore
+		injectRows[i] = {
+			score = rawScores[i] or entry.score,
+			stableScore = stableScores[i] or entry.stableScore,
+			lastRankChangeTime = lockTs,
+		}
+		print(string.format("[COLLAPSE_TEST]   [%d] score %d->%d  stable %d->%d",
+			i, oldScore, injectRows[i].score, oldStable, injectRows[i].stableScore))
+	end
+	print(string.format("[COLLAPSE_TEST] cooldown lock: age=%.2f < cooldown=%.2f (expect stable preserved this cycle)",
+		now - lockTs, _RANKING_STABILITY_COOLDOWN))
+
+	-- Release locks for clean run
+	_PlayerUI_RankTransitionLock = false
+	_PlayerUI_RankPendingReorder = false
+	_PlayerUI_RankLastGlobalReorder = 0
+	_Ranking_DebugInjectOneUpdate("teamLeft", injectRows)
+
+	-- Run update cycle (production path — no debug force involved)
+	PlayerUI_Ranking_Update()
+
+	-- Post-update: read slot state for entry [4] (the collapse candidate)
+	local postCollapseHits = _RANKING_STATS_COLLAPSE_HITS or 0
+	local newHits = postCollapseHits - preCollapseHits
+
+	print("[COLLAPSE_TEST] --- Results ---")
+	PlayerUI_Ranking_DebugPrintState()
+
+	-- Snapshot the critical entry for explicit validation
+	for i = 1, #state do
+		local e = state[i]
+		local slot = e.slotRef
+		print(string.format(
+			"[COLLAPSE_TEST]   [%d] pUp=%s pDown=%s delta=%+d contested=%s | up2=%s up3=%s down2=%s down3=%s",
+			i, tostring(e.predictUp), tostring(e.predictDown), e.rankDelta or 0,
+			tostring(e.isContested),
+			tostring(slot.rankPredictionUp2), tostring(slot.rankPredictionUp3),
+			tostring(slot.rankPredictionDown2), tostring(slot.rankPredictionDown3)))
+	end
+
+	print(string.format("[COLLAPSE_TEST] collapseHits: before=%d after=%d delta=%d",
+		preCollapseHits, postCollapseHits, newHits))
+
+	print("[COLLAPSE_TEST] --- Expected ---")
+	print("[COLLAPSE_TEST]   [1] top=true, no prediction, not contested")
+	print("[COLLAPSE_TEST]   [2] no prediction (delta=0, well separated)")
+	print("[COLLAPSE_TEST]   [3] contested=true (RAW gap=10 to [4]), pUp=false (delta=0)")
+	print("[COLLAPSE_TEST]   [4] contested=true, pUp=true, delta=+2, up2=false (COLLAPSED), up3=false")
+	print("[COLLAPSE_TEST]   collapseHits delta >= 1 (at least entry [4] triggered)")
+
+	print("[COLLAPSE_TEST] === Complete ===")
+end
+
+-----------------------------------------------------------------------
+-- Debug: settings matrix — toggles key feature flags through all
+-- permutations, runs a ranking update for each, and validates that
+-- slot booleans and glow values are coherent with the setting state.
+--
+-- Tests 4 combinations:
+--   A) arrows=ON,  delta=ON,  collapse=ON  (default production)
+--   B) arrows=ON,  delta=ON,  collapse=OFF (multi-arrows preserved)
+--   C) arrows=ON,  delta=OFF              (all multi-arrows forced false)
+--   D) arrows=OFF                          (all predictions forced false)
+--
+-- Each uses the same contested + multi-arrow scenario from
+-- TestContestedCollapse.
+--
+-- Usage (console): PlayerUI_Debug_TestSettingsMatrix()
+-----------------------------------------------------------------------
+
+function PlayerUI_Debug_TestSettingsMatrix()
+	if _PlayerUI_RankState == nil then
+		print("[MATRIX_TEST] RankState nil — not initialized")
+		return
+	end
+
+	local state = _PlayerUI_RankState["teamLeft"]
+	if state == nil or #state < 4 then
+		print("[MATRIX_TEST] teamLeft needs >= 4 entries")
+		return
+	end
+
+	local now = World_GetGameTime()
+	print(string.format("[MATRIX_TEST] === Settings matrix — teamLeft, gameTime=%.1f ===", now))
+
+	-- Save original settings
+	local origArrows    = PlayerUI_Settings.EnableRankPredictionArrows
+	local origDelta     = PlayerUI_Settings.EnableRankPredictionDelta
+	local origContested = PlayerUI_Settings.EnableRankPredictionContested
+	local origCollapse  = PlayerUI_Settings.EnableRankContestedCollapseMulti
+
+	local cases = {
+		{ label="A_default",        arrows=true,  delta=true,  collapse=true  },
+		{ label="B_collapse_off",   arrows=true,  delta=true,  collapse=false },
+		{ label="C_delta_off",      arrows=true,  delta=false, collapse=true  },
+		{ label="D_arrows_off",     arrows=false, delta=false, collapse=true  },
+	}
+
+	-- Consistent scenario scores: identical to TestContestedCollapse
+	local stableScores    = { 400, 210, 205, 100 }
+	local rawScores       = { 400, 210, 205, 215 }
+
+	local allPassed = true
+
+	for _, case in ipairs(cases) do
+		-- Apply settings
+		PlayerUI_Settings.EnableRankPredictionArrows = case.arrows
+		PlayerUI_Settings.EnableRankPredictionDelta = case.delta
+		PlayerUI_Settings.EnableRankContestedCollapseMulti = case.collapse
+
+		-- Reset scenario
+		local injectRows = {}
+		for i = 1, #state do
+			injectRows[i] = {
+				score = rawScores[i] or 0,
+				stableScore = stableScores[i] or 0,
+				lastRankChangeTime = now,
+			}
+		end
+		_PlayerUI_RankTransitionLock = false
+		_PlayerUI_RankPendingReorder = false
+		_PlayerUI_RankLastGlobalReorder = 0
+		_Ranking_DebugInjectOneUpdate("teamLeft", injectRows)
+
+		PlayerUI_Ranking_Update()
+
+		-- Validate the contested+delta=+2 candidate by signature (raw=215, stable=100)
+		local e = nil
+		for i = 1, #state do
+			if state[i].score == 215 and state[i].stableScore == 100 then
+				e = state[i]
+				break
+			end
+		end
+		if e == nil then
+			for i = 1, #state do
+				if state[i].score == 215 then
+					e = state[i]
+					break
+				end
+			end
+		end
+		local s = (e ~= nil) and e.slotRef or nil
+		local issues = {}
+
+		if e == nil or s == nil then
+			table.insert(issues, "candidate row not found (raw=215)")
+		else
+			if not e.isContested then
+				table.insert(issues, "candidate should be contested=true")
+			end
+			if (e.rankDelta or 0) < 2 and case.arrows then
+				table.insert(issues, "candidate delta should be >= +2")
+			end
+		end
+
+		if not case.arrows then
+			-- D: all prediction slots must be false
+			if s ~= nil and s.rankPredictionUp then table.insert(issues, "slotUp should be false") end
+			if s ~= nil and s.rankPredictionDown then table.insert(issues, "slotDown should be false") end
+			if s ~= nil and s.rankPredictionContested then table.insert(issues, "slotCon should be false") end
+		elseif not case.delta then
+			-- C: all multi-arrows must be false (delta disabled)
+			if s ~= nil and s.rankPredictionUp2 then table.insert(issues, "up2 should be false") end
+			if s ~= nil and s.rankPredictionUp3 then table.insert(issues, "up3 should be false") end
+			if s ~= nil and s.rankPredictionDown2 then table.insert(issues, "down2 should be false") end
+			if s ~= nil and s.rankPredictionDown3 then table.insert(issues, "down3 should be false") end
+		elseif case.collapse then
+			-- A: contested collapse active → up2/up3 must be false even with delta=+2
+			if s ~= nil and s.rankPredictionUp2 then table.insert(issues, "up2 should be false (collapsed)") end
+			if s ~= nil and s.rankPredictionUp3 then table.insert(issues, "up3 should be false (collapsed)") end
+			-- Single arrow should still be present
+			if s ~= nil and not s.rankPredictionUp then table.insert(issues, "slotUp should be true") end
+		else
+			-- B: collapse disabled → up2 must be true (delta=+2 >= 2)
+			if s ~= nil and not s.rankPredictionUp2 then table.insert(issues, "up2 should be true (no collapse)") end
+			if s ~= nil and not s.rankPredictionUp then table.insert(issues, "slotUp should be true") end
+		end
+
+		local status = #issues == 0 and "PASS" or "FAIL"
+		if #issues > 0 then allPassed = false end
+
+		print(string.format("[MATRIX_TEST] [%s] %s: arrows=%s delta=%s collapse=%s | up=%s up2=%s up3=%s con=%s contested=%s delta=%+d",
+			status, case.label,
+			tostring(case.arrows), tostring(case.delta), tostring(case.collapse),
+			tostring((s ~= nil) and s.rankPredictionUp or false),
+			tostring((s ~= nil) and s.rankPredictionUp2 or false),
+			tostring((s ~= nil) and s.rankPredictionUp3 or false),
+			tostring((s ~= nil) and s.rankPredictionContested or false),
+			tostring((e ~= nil) and e.isContested or false), (e ~= nil) and (e.rankDelta or 0) or 0))
+
+		for _, issue in ipairs(issues) do
+			print(string.format("[MATRIX_TEST]   ISSUE: %s", issue))
+		end
+	end
+
+	-- Restore original settings
+	PlayerUI_Settings.EnableRankPredictionArrows = origArrows
+	PlayerUI_Settings.EnableRankPredictionDelta = origDelta
+	PlayerUI_Settings.EnableRankPredictionContested = origContested
+	PlayerUI_Settings.EnableRankContestedCollapseMulti = origCollapse
+
+	print(string.format("[MATRIX_TEST] === %s — %d cases tested ===",
+		allPassed and "ALL PASSED" or "FAILURES DETECTED", #cases))
+end

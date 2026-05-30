@@ -1,0 +1,1608 @@
+-----------------------------------------------------------------------
+-- DevMenu Multiplayer Gate + Determinism Instrumentation
+--
+-- Phase 0: Hard MP gate for sim-mutating handlers.
+-- Phase 1: Permanent-modifier accountant (`Modifier_ApplyToEntity`).
+-- Phase 2: Per-handler frame/time brackets for cross-peer scarlog diff.
+-- Phase 3: Replication verifier probe for engine ChatCheat* paths.
+--
+-- All helpers are intentionally globals or `_devmenu_*` underscore-prefixed
+-- so they can be referenced by the action layer without import cycles.
+--
+-- Source of truth for the audit driving this file:
+--   docs/project_overview/changelog/2026-05-12_devmenu_mp_safety_audit.md
+--
+-- Imported FIRST by devmenu.scar so the MP gate exists before any handler
+-- file loads.
+-----------------------------------------------------------------------
+
+-----------------------------------------------------------------------
+-- Phase 0 - MP gate (advisory mode by default)
+--
+-- The gate has three modes (set via _DEVMENU_MP_GATE_MODE):
+--   "allow" - silent passthrough. No log, no toast. Use when you have
+--             externally verified MP safety (e.g. SP-only soak tests).
+--   "warn"  - DEFAULT. LOW/MED-classified actions proceed. HIGH/CRIT/UNKNOWN
+--             actions are blocked with a [DEVMENU-MPGATE] log + toast - matching
+--             "block" behaviour. OOS is a critical failure; no bypass path exists.
+--             Fix root causes (audit + network-route), then add to _DEVMENU_MP_RISK at MED.
+--   "block" - fail-closed. Returns true so the handler early-outs. This is
+--             the original Phase 0 behaviour from the 2026-05-12 audit.
+--
+-- Per-handler risk classes (see _DEVMENU_MP_RISK below):
+--   SAFE - no sim writes; UI/logging only.
+--   LOW  - per-client presentation only (engine-confirmed via API docs).
+--   MED  - routes through a synchronized command (LocalCommand_*).
+--   HIGH - sim write with no synchronized variant; will desync.
+--   CRIT - destructive sim write (kills/spawns/owner-changes); WILL desync
+--          and likely crash the receiving peer.
+--
+-- The toast's tone reflects the class. SAFE actions skip the gate entirely.
+-----------------------------------------------------------------------
+
+-- Detect multiplayer. World_IsMultiplayerGame is the canonical SCAR API
+-- (see game_data/extracted/aoe4/scardocs/Essence_ScarFunctions.api line 1961). Fall back
+-- to a human-player count probe for forward-compat.
+function _devmenu_is_multiplayer()
+	if type(World_IsMultiplayerGame) == "function" then
+		local ok, is_mp = pcall(World_IsMultiplayerGame)
+		if ok then return is_mp == true end
+	end
+	if type(World_GetPlayerCount) == "function" and type(Player_IsHuman) == "function" and type(World_GetPlayerAt) == "function" then
+		local humans = 0
+		local n = World_GetPlayerCount()
+		for i = 1, n do
+			local p = World_GetPlayerAt(i)
+			if p ~= nil and Player_IsHuman(p) == true then
+				humans = humans + 1
+				if humans > 1 then return true end
+			end
+		end
+		return false
+	end
+	return false
+end
+
+-- Mode is mutable via DevMenu_SetMPGateMode / DevMenu_CycleMPGateMode.
+-- Default is "warn": LOW/MED (already-safe) actions always proceed; HIGH/CRIT/UNKNOWN
+-- actions are blocked - matching "block" behaviour. OOS is a critical failure; no
+-- warn-then-proceed bypass exists in production. Unclassified or unsafe actions must
+-- be audited and network-routed before being added to _DEVMENU_MP_RISK at MED/LOW.
+-- Use "allow" only for verified SP-soak passes or explicit test overrides.
+_DEVMENU_MP_GATE_MODE = _DEVMENU_MP_GATE_MODE or "warn"
+
+-- Audit / replay override. Forces mode="allow" without persisting it.
+_devmenu_mp_gate_force_allow = false
+
+-- Per-handler MP-risk classification. Action names match the strings
+-- passed to _devmenu_mp_gate(action_name) by handlers in
+-- devmenu_actions.scar / devmenu.scar. Anything not in this table is
+-- treated as risk = "UNKNOWN" → blocked in "warn" and "block" modes; passes only in "allow".
+--
+-- Ground-truth references:
+--   * game_data/extracted/aoe4/scar_dump/scar gameplay/gameplay/chatcheats.scar
+--   * game_data/extracted/aoe4/scardocs/Essence_ScarFunctions.api
+_DEVMENU_MP_RISK = {
+	-- ---- MED: synchronized command, MP-safe ----
+	["age_up"]            = { level = "MED",  reason = "Routed via DevMenu_NetworkDispatch → CBA_Auto_Age_AgeUp + Player_CompleteUpgrade on all peers (matches AutoAge timer pattern)" },
+
+	-- ---- LOW: per-client presentation only ----
+	["teleport_camera"]   = { level = "LOW",  reason = "Camera_* writes are local viewport only" },
+
+	-- ---- MED: now routed via lockstep GE_BroadcastMessage network dispatch ----
+	-- Economy/resources: Command_PlayerBroadcastMessage type-0 → Cheat_Callback →
+	-- CheatEconomy / Player_AddResource on ALL peers at same sim tick.
+	["economy"]           = { level = "MED", reason = "Routed via type-0 broadcast → CheatEconomy → Player_AddResource on all peers" },
+	["resources_all"]     = { level = "MED", reason = "Routed via DevMenu_NetworkDispatch → Player_AddResource on all peers" },
+	["resources_food"]    = { level = "MED", reason = "Routed via DevMenu_NetworkDispatch → Player_AddResource on all peers" },
+	["resources_wood"]    = { level = "MED", reason = "Routed via DevMenu_NetworkDispatch → Player_AddResource on all peers" },
+	["resources_gold"]    = { level = "MED", reason = "Routed via DevMenu_NetworkDispatch → Player_AddResource on all peers" },
+	["resources_stone"]   = { level = "MED", reason = "Routed via DevMenu_NetworkDispatch → Player_AddResource on all peers" },
+	["resources_oil"]     = { level = "MED", reason = "Routed via DevMenu_NetworkDispatch → Player_AddResource(RT_Merc_Byz) on all peers" },
+	["pop_cap_max"]       = { level = "MED", reason = "Routed via DevMenu_NetworkDispatch → Player_SetPopCapOverride on all peers" },
+	["explore_all"]       = { level = "MED", reason = "Routed via DevMenu_NetworkDispatch → Game_SetMapExplored on all peers" },
+	["instant_build"]     = { level = "MED", reason = "Routed via DevMenu_NetworkDispatch → ChatCheatInstantBuildAndGather on all peers" },
+	["invulnerable"]      = { level = "MED", reason = "Routed via DevMenu_NetworkDispatch → ChatCheatInvulnerable on all peers" },
+	-- FoW: routed via DevMenu_NetworkDispatch → ChatCheatFOW on all peers; manages gFoWCheat toggle.
+	["fog_of_war"]        = { level = "MED", reason = "Routed via DevMenu_NetworkDispatch (FOW_TOGGLE) → ChatCheatFOW on all peers" },
+	-- Sim rate: broadcast target rate so ALL peers change at the same sim tick.
+	["turbo"]             = { level = "MED", reason = "Routed via DevMenu_NetworkDispatch → Misc_SetSimRate(target) on all peers" },
+	["slow"]              = { level = "MED", reason = "Routed via DevMenu_NetworkDispatch → Misc_SetSimRate(target) on all peers" },
+	["speed_default"]     = { level = "MED", reason = "Routed via DevMenu_NetworkDispatch → Misc_SetSimRate(default) on all peers" },
+	["speed_increase"]    = { level = "MED", reason = "Routed via DevMenu_NetworkDispatch → Misc_SetSimRate(target) on all peers" },
+	["speed_decrease"]    = { level = "MED", reason = "Routed via DevMenu_NetworkDispatch → Misc_SetSimRate(target) on all peers" },
+	-- World mutations: no selection IDs needed.
+	["sheep_to_wolves"]   = { level = "MED", reason = "Routed via DevMenu_NetworkDispatch → CheatReplaceSheepWithWolves on all peers" },
+	["kill_gaia"]         = { level = "MED", reason = "Routed via DevMenu_NetworkDispatch → CheatKillAllGaia on all peers" },
+	["lose_instantly"]    = { level = "MED", reason = "Routed via DevMenu_NetworkDispatch → CheatLoseInstantly for sender pid on all peers" },
+
+	-- ---- MED: selection-based and spawn actions, now routed via ID/position serialization ----
+	-- Destroy: entity IDs serialized by pressing peer → Entity_Kill on all peers.
+	["destroy_selected"]  = { level = "MED", reason = "Routed via DEVMENU_DESTROY → Entity_Kill with serialized entity IDs on all peers" },
+	-- Teleport: squad IDs + camera position serialized → SGroup_WarpToPos via TELEPORTSELECTED on all peers.
+	["teleport_selected"] = { level = "MED", reason = "Routed via TELEPORTSELECTED cheat broadcast → SGroup_WarpToPos with serialized squad IDs + position on all peers" },
+	-- Convert: target player ID + squad/entity IDs → Squad/Entity_SetPlayerOwner on all peers.
+	["convert_selected"]  = { level = "MED", reason = "Routed via DEVMENU_CONVERT → Squad/Entity_SetPlayerOwner with serialized IDs + target player ID on all peers" },
+	-- Burn: classified as burn/unburn at press time → Entity_SetOnFire/StopFire with serialized IDs on all peers.
+	["burn_selected"]     = { level = "MED", reason = "Routed via DEVMENU_BURN/DEVMENU_UNBURN → Entity_SetOnFire/StopFire with serialized entity IDs on all peers" },
+	-- Invuln selected: direction + squad/entity IDs serialized → Squad/Entity_SetInvulnerableMinCap on all peers.
+	["invuln_selected"]   = { level = "MED", reason = "Routed via DEVMENU_INVULN_SEL → Squad/Entity_SetInvulnerableMinCap with serialized IDs on all peers" },
+	-- Spawn: keep position is deterministic sim state; camera position is serialized for camera-variant.
+	["spawn_army"]        = { level = "MED", reason = "Routed via DEVMENU_SPAWN_ARMY → SpawnCheatArmy on all peers (keep position is deterministic sim state)" },
+	["spawn_army_camera"] = { level = "MED", reason = "Routed via DEVMENU_SPAWN_ARMY_CAM → CheatSpawnCoreUnits with serialized camera position on all peers" },
+	["spawn_photon_man"]  = { level = "MED", reason = "Routed via DEVMENU_SPAWN_PHOTON → SpawnCheatPhotonMan on all peers" },
+	-- Unit Spawner Menu: per-civ unit spawn at Keep. SBP name is serialized; Keep position is deterministic sim state.
+	["unit_spawner"]      = { level = "MED", reason = "Routed via DEVMENU_SPAWN_UNIT → SpawnUnitBPForPlayer ×count at GetTownCentrePosition on all peers (count embedded in message, clamped 1-8)" },
+	["unit_spawner_cam"] = { level = "MED", reason = "Routed via DEVMENU_SPAWN_UNIT_CAM -> SpawnUnitBPForPlayer xcnt at serialized camera position on all peers" },
+}
+
+local function _devmenu_classify(action_name)
+	local entry = _DEVMENU_MP_RISK[action_name]
+	if entry == nil then
+		return "UNKNOWN", "no MP-risk classification on file (treat as HIGH)"
+	end
+	return entry.level, entry.reason
+end
+
+local _DEVMENU_MP_GATE_VALID_MODES = { allow = true, warn = true, block = true }
+
+function DevMenu_GetMPGateMode()
+	return _DEVMENU_MP_GATE_MODE
+end
+
+function DevMenu_SetMPGateMode(mode)
+	if _DEVMENU_MP_GATE_VALID_MODES[mode] ~= true then
+		print("[DEVMENU-MPGATE] reject mode '" .. tostring(mode) .. "' - must be allow|warn|block")
+		return
+	end
+	_DEVMENU_MP_GATE_MODE = mode
+	print("[DEVMENU-MPGATE] mode -> " .. mode)
+	if type(DevMenu_ShowToast) == "function" then
+		DevMenu_ShowToast({ prefix = "MP gate: ", state_word = string.upper(mode), state_on = (mode ~= "block") })
+	end
+end
+
+function DevMenu_CycleMPGateMode()
+	local order = { warn = "block", block = "allow", allow = "warn" }
+	DevMenu_SetMPGateMode(order[_DEVMENU_MP_GATE_MODE] or "warn")
+end
+
+-- _devmenu_mp_gate(action_name)
+-- Returns true ONLY when mode == "block" AND we are in MP. In "warn" mode
+-- (the default) the function emits a tagged log line + a toast classifying
+-- the action and returns false so the handler proceeds.
+--
+-- LOW-risk actions are not toasted (they are deterministic per docs); they
+-- still get a log line so the audit trail is intact.
+function _devmenu_mp_gate(action_name)
+	if _devmenu_mp_gate_force_allow == true then return false end
+	if not _devmenu_is_multiplayer() then return false end
+	local mode = _DEVMENU_MP_GATE_MODE or "warn"
+	if mode == "allow" then return false end
+	local level, reason = _devmenu_classify(action_name)
+	-- LOW & MED: presentation-only or already MP-safe - log-only.
+	if level == "LOW" or level == "MED" then
+		print(string.format("[DEVMENU-MPGATE] %s mp=true level=%s reason=%s mode=%s -> proceed",
+			tostring(action_name), level, tostring(reason), mode))
+		return false
+	end
+	-- HIGH / CRIT / UNKNOWN: blocked in both "warn" and "block" modes.
+	-- Only "allow" mode passes through. OOS is a critical failure; no bypass.
+	print(string.format("[DEVMENU-MPGATE] %s mp=true level=%s reason=%s mode=%s -> BLOCKED",
+		tostring(action_name), level, tostring(reason), mode))
+	if type(DevMenu_ShowToast) == "function" then
+		DevMenu_ShowToast({
+			prefix     = tostring(action_name) .. ": ",
+			state_word = "BLOCKED (" .. level .. ")",
+			state_on   = false,
+			suffix     = " - " .. tostring(reason),
+		})
+	end
+	return mode ~= "allow"
+end
+
+-----------------------------------------------------------------------
+-- Phase 1 - Permanent-modifier accountant
+--
+-- Wraps Modifier_ApplyToEntity so every DevMenu-side application is
+-- counted and logged. Cross-peer scarlog diff: equal counts on both
+-- peers => parity; nonzero on only one peer => local-only sim write.
+--
+-- The wrapper is kept off the global `Modifier_ApplyToEntity` to avoid
+-- distorting other systems' accounting. Handlers opt in by calling
+-- `_devmenu_modifier_apply_to_entity(...)`.
+-----------------------------------------------------------------------
+
+_devmenu_modifier_apply_count = _devmenu_modifier_apply_count or 0
+_devmenu_modifier_remove_count = _devmenu_modifier_remove_count or 0
+
+function _devmenu_modifier_apply_to_entity(mod, eid, dur, source)
+	if type(Modifier_ApplyToEntity) ~= "function" then return nil end
+	_devmenu_modifier_apply_count = _devmenu_modifier_apply_count + 1
+	local mp = _devmenu_is_multiplayer()
+	print(string.format("[DEVMENU-MOD] apply #%d eid=%s dur=%s src=%s mp=%s",
+		_devmenu_modifier_apply_count, tostring(eid), tostring(dur),
+		tostring(source or "?"), tostring(mp)))
+	return Modifier_ApplyToEntity(mod, eid, dur)
+end
+
+function _devmenu_modifier_remove(mod_id, source)
+	if type(Modifier_Remove) ~= "function" then return end
+	_devmenu_modifier_remove_count = _devmenu_modifier_remove_count + 1
+	print(string.format("[DEVMENU-MOD] remove #%d mod_id=%s src=%s",
+		_devmenu_modifier_remove_count, tostring(mod_id), tostring(source or "?")))
+	Modifier_Remove(mod_id)
+end
+
+function DevMenu_DiagModifierAccount()
+	print("[DEVMENU-DIAG] modifier_account: applies=" .. tostring(_devmenu_modifier_apply_count)
+		.. " removes=" .. tostring(_devmenu_modifier_remove_count)
+		.. " net=" .. tostring(_devmenu_modifier_apply_count - _devmenu_modifier_remove_count))
+end
+
+-----------------------------------------------------------------------
+-- Phase 2 - Frame/time brackets
+--
+-- _devmenu_frame_bracket(name, fn, ...) wraps a handler call and emits
+-- pre/post lines containing World_GetGameTime + frame if available.
+-- Designed so that diff'ing two peers' scarlogs by `name` and `pre_t`
+-- localizes any handler that fires on only one peer to a single line.
+-----------------------------------------------------------------------
+
+local function _devmenu_now_str()
+	if type(World_GetGameTime) == "function" then
+		local ok, t = pcall(World_GetGameTime)
+		if ok then return tostring(t) end
+	end
+	return "?"
+end
+
+function _devmenu_frame_bracket(name, fn, ...)
+	if type(fn) ~= "function" then return end
+	local pre = _devmenu_now_str()
+	print(string.format("[DEVMENU-FRAME] %s pre_t=%s mp=%s", tostring(name), pre, tostring(_devmenu_is_multiplayer())))
+	local results = { pcall(fn, ...) }
+	local ok = table.remove(results, 1)
+	local post = _devmenu_now_str()
+	print(string.format("[DEVMENU-FRAME] %s post_t=%s ok=%s", tostring(name), post, tostring(ok)))
+	if not ok then
+		print("[DEVMENU-FRAME] " .. tostring(name) .. " ERROR: " .. tostring(results[1]))
+		return nil
+	end
+	return table.unpack(results)
+end
+
+-----------------------------------------------------------------------
+-- Phase 3 - Replication verifier
+--
+-- For ChatCheat* paths we want to confirm whether they actually broadcast
+-- through the engine command bus. Strategy: record per-player getter
+-- before+after firing; if a remote peer (different from local) shows the
+-- expected state on both peers, the cheat replicated. If only the local
+-- peer shows it, the cheat is local-only and unsafe in MP.
+--
+-- Caller supplies a getter(player) -> any-comparable. The probe dumps
+-- per-player snapshots tagged with [DEVMENU-REPL] for cross-peer diff.
+-----------------------------------------------------------------------
+
+local function _devmenu_iter_players(callback)
+	if type(World_GetPlayerCount) ~= "function" or type(World_GetPlayerAt) ~= "function" then return end
+	local n = World_GetPlayerCount()
+	for i = 1, n do
+		local p = World_GetPlayerAt(i)
+		if p ~= nil then callback(p) end
+	end
+end
+
+function DevMenu_DiagReplicationProbe(label, getter)
+	if type(getter) ~= "function" then
+		print("[DEVMENU-REPL] " .. tostring(label) .. " ABORT: getter not a function")
+		return
+	end
+	local mp = _devmenu_is_multiplayer()
+	print("[DEVMENU-REPL] " .. tostring(label) .. " snapshot mp=" .. tostring(mp) .. " t=" .. _devmenu_now_str())
+	_devmenu_iter_players(function(p)
+		local pid = (type(Player_GetID) == "function") and Player_GetID(p) or "?"
+		local ok, val = pcall(getter, p)
+		print(string.format("[DEVMENU-REPL] %s pid=%s val=%s ok=%s",
+			tostring(label), tostring(pid), tostring(ok and val or "ERR"), tostring(ok)))
+	end)
+end
+
+-----------------------------------------------------------------------
+-- Combined audit entry point. Wired into the DEV menu by
+-- devmenu_dev_data.scar so testers can run the full safety pass on
+-- demand from inside the game.
+-----------------------------------------------------------------------
+
+function DevMenu_RunMPSafetyAudit()
+	print("[DEVMENU-DIAG] === MP Safety Audit START ===")
+	print("[DEVMENU-DIAG] mp=" .. tostring(_devmenu_is_multiplayer())
+		.. " t=" .. _devmenu_now_str()
+		.. " gate_mode=" .. tostring(_DEVMENU_MP_GATE_MODE or "warn")
+		.. " gate_force_allow=" .. tostring(_devmenu_mp_gate_force_allow))
+	DevMenu_DiagModifierAccount()
+	if type(gInvulnerableCheat) == "table" then
+		DevMenu_DiagReplicationProbe("invuln", function(p)
+			return gInvulnerableCheat[Player_GetID(p)]
+		end)
+	end
+	if type(gFoWCheat) == "table" then
+		DevMenu_DiagReplicationProbe("fow", function(p)
+			return gFoWCheat[Player_GetID(p)]
+		end)
+	end
+	if type(gInstantBuildCheat) == "table" then
+		DevMenu_DiagReplicationProbe("instant_build", function(p)
+			return gInstantBuildCheat[Player_GetID(p)]
+		end)
+	end
+	-- Block-actions map replication snapshot.
+	DevMenu_DiagReplicationProbe("block_actions", function(p)
+		local pid = type(Player_GetID) == "function" and Player_GetID(p) or nil
+		return (_DEVMENU_BLOCK_ACTIONS_MAP ~= nil and pid ~= nil)
+			and (_DEVMENU_BLOCK_ACTIONS_MAP[pid] == true) or false
+	end)
+	print("[DEVMENU-DIAG] === MP Safety Audit END ===")
+end
+
+
+-- Structural verification probe for 2026-05-16 MP bug fixes.
+-- Checks: block-actions map, DEVMENU_BURN/SPAWN_UNIT_CAM net handlers,
+-- Network_CallEvent, DevMenu_RefreshToggleStates, spawn cam flag, camera pos.
+-- Read-only, MP-safe: no sim mutations.
+function DevMenu_RunCheatActionsVerify()
+	if type(DevMenu_ShowToast) ~= "function" then return end
+	local pass = 0
+	local fail = 0
+	local function chk(label, cond)
+		if cond then
+			pass = pass + 1
+			print("[DEVMENU-VERIFY] PASS: " .. label)
+		else
+			fail = fail + 1
+			print("[DEVMENU-VERIFY] FAIL: " .. label)
+		end
+	end
+	-- 1. _DEVMENU_BLOCK_ACTIONS_MAP is a table
+	chk("_DEVMENU_BLOCK_ACTIONS_MAP is table", type(_DEVMENU_BLOCK_ACTIONS_MAP) == "table")
+	-- 2. DEVMENU_BLOCK_ACTIONS_SET net handler registered
+	chk("DEVMENU_BLOCK_ACTIONS_SET handler exists",
+		type(_DEVMENU_NET_ACTIONS) == "table" and type(_DEVMENU_NET_ACTIONS.DEVMENU_BLOCK_ACTIONS_SET) == "function")
+	-- 3. DEVMENU_BURN net handler registered (bug-fix: now has block-actions guard + toast)
+	chk("DEVMENU_BURN handler exists",
+		type(_DEVMENU_NET_ACTIONS) == "table" and type(_DEVMENU_NET_ACTIONS.DEVMENU_BURN) == "function")
+	-- 4. DEVMENU_SPAWN_UNIT_CAM net handler registered (bug-fix: cam mode in MP)
+	chk("DEVMENU_SPAWN_UNIT_CAM handler exists",
+		type(_DEVMENU_NET_ACTIONS) == "table" and type(_DEVMENU_NET_ACTIONS.DEVMENU_SPAWN_UNIT_CAM) == "function")
+	-- 5. Network_CallEvent available (required for MP dispatch)
+	chk("Network_CallEvent is function", type(Network_CallEvent) == "function")
+	-- 6. DevMenu_RefreshToggleStates available (used by block-actions UI refresh fix)
+	chk("DevMenu_RefreshToggleStates is function", type(DevMenu_RefreshToggleStates) == "function")
+	-- 7. _devmenu.spawn_at_camera field accessible (spawn cam toggle state)
+	chk("_devmenu.spawn_at_camera accessible",
+		type(_devmenu) == "table" and _devmenu.spawn_at_camera ~= nil or type(_devmenu) == "table")
+	-- 8. _devmenu_camera_forward_pos available (used at spawn time for cam position)
+	chk("_devmenu_camera_forward_pos is function", type(_devmenu_camera_forward_pos) == "function")
+	-- Block-actions map replication read-only probe (local peer only)
+	local local_player = nil
+	if type(Game_GetLocalPlayer) == "function" then
+		local ok, p = pcall(Game_GetLocalPlayer); if ok then local_player = p end
+	end
+	if local_player ~= nil and type(Player_GetID) == "function" then
+		local lpid = Player_GetID(local_player)
+		local blocked = (_DEVMENU_BLOCK_ACTIONS_MAP ~= nil) and (_DEVMENU_BLOCK_ACTIONS_MAP[lpid] == true) or false
+		print("[DEVMENU-VERIFY] block_actions[local]=" .. tostring(blocked))
+	end
+	local summary = "Cheat Verify: " .. pass .. " pass, " .. fail .. " fail"
+	DevMenu_ShowToast(summary)
+	print("[DEVMENU-VERIFY] " .. summary)
+end
+-----------------------------------------------------------------------
+-- Network Dispatch - lockstep-safe MP routing (Phase 5)
+--
+-- ARCHITECTURE: Every sim-mutating SCAR call is MP-safe ONLY if it
+-- executes inside a lockstep-synchronized callback (Rule_Add*,
+-- GE_BroadcastMessage, etc.). Calling the same function from a UI
+-- button handler runs on ONE peer only → OOS.
+--
+-- FIX: Command_PlayerBroadcastMessage routes a command through the
+-- engine's lockstep bus. GE_BroadcastMessage fires on ALL peers at the
+-- same sim tick. Sim writes inside the callback are therefore safe.
+--
+-- Reference implementation: game_data/extracted/aoe4/scar_dump/scar gameplay/network.scar
+--                            game_data/extracted/aoe4/scar_dump/scar gameplay/gameplay/cheat.scar
+--
+-- Two broadcast channels used by DevMenu:
+--   Channel 0   - cheat.scar Cheat_Callback (ECONOMY, FOW, AGEUP, ...)
+--   DevMenu ch. - DevMenu_NetworkDispatch registered via Network_RegisterEvent
+--
+-- Network_RegisterEvent / Network_CallEvent are available because cba.scar
+-- imports cardinal.scar → GameScarUtil.scar → network.scar.
+-----------------------------------------------------------------------
+
+-- DevMenu-specific action dispatch table.
+-- Each entry: function(playerID, args) - called from GE_BroadcastMessage callback.
+-- `playerID` = the PlayerID of the peer who pressed the button (same on all peers).
+-- `args` = message split by space; args[1] is the action key.
+-- ALL sim writes here are lockstep-safe because this runs in the event callback.
+-- Block-actions protection system
+-- _DEVMENU_BLOCK_ACTIONS_MAP: keyed by Player_GetID(player). When true for a player,
+--   DEVMENU_DESTROY, DEVMENU_CONVERT, DEVMENU_BURN, DEVMENU_TELEPORT, and
+--   DEVMENU_INVULN_SEL skip units/buildings owned by that player on ALL peers.
+--   Updated on all peers via DEVMENU_BLOCK_ACTIONS_SET (lockstep bus).
+_DEVMENU_BLOCK_ACTIONS_MAP = _DEVMENU_BLOCK_ACTIONS_MAP or {}
+
+-- Victim-notify toggle. true = show toasts (default). Changed per-client via
+-- DevMenu_ToggleBlockVictimNotify. Survives hot-reloads via the `or true` init.
+_DEVMENU_BLOCK_VICTIM_NOTIFY_ENABLED   = _DEVMENU_BLOCK_VICTIM_NOTIFY_ENABLED or true
+-- Per-attacker throttle: [pressing_pid] = World_GetGameTime() of last toast.
+_DEVMENU_BLOCK_VICTIM_NOTIFY_LAST_TIME = {}  -- always reset on (re)load; entries are session-scoped attacker PIDs that would be stale across reload
+-- Victim prompt: interactive per-client overlay shown when local units are targeted.
+_DEVMENU_VICTIM_PROMPT_ENABLED     = (_DEVMENU_VICTIM_PROMPT_ENABLED ~= false)  -- default true, preserved across reload
+_DEVMENU_VICTIM_PROMPT_LAST_TIME   = {}   -- always reset on (re)load
+_DEVMENU_VICTIM_PROMPT_CLOSE_UNTIL = 0    -- game time after which Close-cooldown expires; reset on (re)load
+
+-- Show BlockNotify popup to the PRESSING PEER when units were block-protected.
+-- Not affected by the victim opt-out toggle or its cooldown.
+--
+-- Player-name resolution mirrors the Convert toast path:
+--   1) _devmenu_resolve_player_info_by_pid iterates World_GetPlayerAt + falls
+--      back to a synthetic "Player <pid>" info struct so the toast never
+--      surfaces raw "Unknown"/"that player" defaults.
+--   2) _devmenu_team_label provides the team subtext (matches Convert).
+-- Both helpers are globals in devmenu_actions.scar; we still wrap in `type()`
+-- checks for hot-reload safety (mp_gate loads FIRST, before actions.scar).
+local function _devmenu_pressing_notify_blocked(blocked_pids)
+	if next(blocked_pids) == nil then return end
+	-- Pick the lowest-pid blocked owner deterministically (table iteration
+	-- order is otherwise unstable, which would diverge toast text per peer).
+	local first_pid = nil
+	for bpid in pairs(blocked_pids) do
+		if first_pid == nil or bpid < first_pid then first_pid = bpid end
+	end
+	local info
+	if type(_devmenu_resolve_player_info_by_pid) == "function" then
+		info = _devmenu_resolve_player_info_by_pid(first_pid)
+	else
+		-- Hot-reload fallback (actions.scar not yet loaded).
+		info = {
+			display_name = (first_pid ~= nil) and ("Player " .. tostring(first_pid)) or "that player",
+			civ_icon = nil, team_id = nil, is_self = false, is_ally = false,
+		}
+	end
+	local blocked_name = info.display_name or ("Player " .. tostring(first_pid or "?"))
+	local subtext = (type(_devmenu_team_label) == "function") and _devmenu_team_label(info) or nil
+	if type(DevMenu_ShowToast) == "function" then
+		DevMenu_ShowToast({
+			prefix     = "Action blocked — ",
+			state_word = "Block Actions enabled",
+			state_on   = false,
+			suffix     = " by " .. blocked_name,
+			flag       = info.civ_icon,
+			name       = blocked_name,
+			subtext    = subtext,
+		})
+	end
+end
+
+-- After an action completes on the pressing peer, show the correct outcome summary:
+--   success_n > 0, blocked_n == 0   -> "%d destroyed" (or whatever `past` is)
+--   success_n > 0, blocked_n > 0    -> "%d destroyed, %d blocked"
+--   success_n == 0, blocked_n > 0   -> delegate to _devmenu_pressing_notify_blocked
+--   success_n == 0, blocked_n == 0  -> no-op
+local function _devmenu_pressing_notify_result(past, success_n, blocked_n, blocked_pids)
+	if type(DevMenu_ShowToast) ~= "function" then return end
+	if success_n > 0 and blocked_n == 0 then
+		DevMenu_ShowToast(string.format("%d %s", success_n, past))
+	elseif success_n > 0 and blocked_n > 0 then
+		DevMenu_ShowToast(string.format("%d %s, %d blocked", success_n, past, blocked_n))
+	elseif success_n == 0 and blocked_n > 0 then
+		_devmenu_pressing_notify_blocked(blocked_pids)
+	end
+	-- success_n == 0 and blocked_n == 0: no-op
+end
+
+-- Show a contextual victim toast to the LOCAL PLAYER.
+--   pressing_p  : player object of the peer who pressed the cheat button.
+--   action_verb : present-tense verb used in all-blocked message ("destroy").
+--   action_past : past-tense form used in allowed message ("destroyed").
+--   allowed     : local player's units the action succeeded on.
+--   blocked     : local player's units stopped by Block Actions.
+-- Respects _DEVMENU_BLOCK_VICTIM_NOTIFY_ENABLED (per-client opt-out).
+-- Enforces a 10-second per-attacker cooldown to prevent toast spam.
+-- Uses _devmenu_player_info / _devmenu_team_label from devmenu_actions.scar.
+local function _devmenu_victim_notify(pressing_p, action_verb, action_past, allowed, blocked)
+	if not _DEVMENU_BLOCK_VICTIM_NOTIFY_ENABLED then return end
+	if allowed <= 0 and blocked <= 0 then return end
+	-- 10-second per-attacker cooldown.
+	local pressing_pid = (pressing_p ~= nil and type(Player_GetID) == "function")
+		and Player_GetID(pressing_p) or nil
+	if pressing_pid ~= nil and type(World_GetGameTime) == "function" then
+		local ok_t, now = pcall(World_GetGameTime)
+		if ok_t then
+			local last = _DEVMENU_BLOCK_VICTIM_NOTIFY_LAST_TIME[pressing_pid]
+			if last ~= nil and (now - last) < 10.0 then return end
+			_DEVMENU_BLOCK_VICTIM_NOTIFY_LAST_TIME[pressing_pid] = now
+		end
+	end
+	if type(DevMenu_ShowToast) ~= "function" then return end
+	local info = (pressing_p ~= nil and type(_devmenu_player_info) == "function")
+		and _devmenu_player_info(pressing_p)
+		or { display_name = "A player", civ_icon = nil }
+	local pname   = info.display_name
+	local subtext = type(_devmenu_team_label) == "function" and _devmenu_team_label(info) or nil
+	if allowed > 0 and blocked > 0 then
+		DevMenu_ShowToast({
+			prefix     = pname .. " " .. action_past .. " " .. tostring(allowed) .. " of your units, ",
+			state_word = tostring(blocked) .. " blocked",
+			state_on   = false,
+			flag       = info.civ_icon,
+			name       = info.display_name,
+			subtext    = subtext,
+		})
+	elseif blocked > 0 then
+		DevMenu_ShowToast({
+			prefix     = pname .. " tried to " .. action_verb .. " your units, ",
+			state_word = "all " .. tostring(blocked) .. " blocked",
+			state_on   = false,
+			flag       = info.civ_icon,
+			name       = info.display_name,
+			subtext    = subtext,
+		})
+	else
+		DevMenu_ShowToast({
+			prefix  = pname .. " " .. action_past .. " " .. tostring(allowed) .. " of your units",
+			flag    = info.civ_icon,
+			name    = info.display_name,
+			subtext = subtext,
+		})
+	end
+end
+
+-- Show the interactive victim prompt to the LOCAL PLAYER if they had units
+-- targeted by pressing_p's cheat action.
+-- local_total_count : affected + blocked (combined) for local player.
+-- Respects _DEVMENU_VICTIM_PROMPT_ENABLED (per-client opt-out).
+-- Enforces a 10-second per-attacker cooldown to prevent prompt spam.
+local function _devmenu_maybe_show_victim_prompt(pressing_p, action_verb, local_total_count)
+	if not _DEVMENU_VICTIM_PROMPT_ENABLED then return end
+	-- 30-second Close cooldown: suppresses new prompts after the victim clicks [Close].
+	if type(World_GetGameTime) == "function" then
+		local ok_ct, ct = pcall(World_GetGameTime)
+		if ok_ct and ct < (_DEVMENU_VICTIM_PROMPT_CLOSE_UNTIL or 0) then return end
+	end
+	if local_total_count == nil or local_total_count < 1 then return end
+	local pressing_pid = (pressing_p ~= nil and type(Player_GetID) == "function")
+		and Player_GetID(pressing_p) or nil
+	if pressing_pid == nil then return end
+	if type(World_GetGameTime) == "function" then
+		local ok_t, now = pcall(World_GetGameTime)
+		if ok_t then
+			local last = _DEVMENU_VICTIM_PROMPT_LAST_TIME[pressing_pid]
+			if last ~= nil and (now - last) < 10.0 then return end
+			_DEVMENU_VICTIM_PROMPT_LAST_TIME[pressing_pid] = now
+		end
+	end
+	local attacker_name = "Unknown"
+	if type(_devmenu_player_info) == "function" then
+		local ok_n, info = pcall(_devmenu_player_info, pressing_p)
+		if ok_n and info ~= nil and info.display_name ~= nil then
+			attacker_name = tostring(info.display_name)
+		end
+	end
+	if type(DevMenu_ShowVictimPrompt) == "function" then
+		DevMenu_ShowVictimPrompt(attacker_name, action_verb)
+	end
+end
+
+-- Test-only gate wrapper used by CDBG T11 S5b to verify that
+-- _DEVMENU_VICTIM_PROMPT_ENABLED actually blocks VP creation.
+-- Mirrors the flag guard in _devmenu_maybe_show_victim_prompt without
+-- requiring a live player object.  CDBG degrades to SKIP when absent.
+function DevMenu_TestVictimPromptGate(attacker_name, action_verb)
+	if not _DEVMENU_VICTIM_PROMPT_ENABLED then return end
+	-- Mirror the Close cooldown so CDBG S5b gate test stays accurate.
+	if type(World_GetGameTime) == "function" then
+		local ok_ct, ct = pcall(World_GetGameTime)
+		if ok_ct and ct < (_DEVMENU_VICTIM_PROMPT_CLOSE_UNTIL or 0) then return end
+	end
+	if type(DevMenu_ShowVictimPrompt) == "function" then
+		DevMenu_ShowVictimPrompt(attacker_name, action_verb)
+	end
+end
+
+-- Test-only gate wrapper used by CDBG to verify that _DEVMENU_BLOCK_VICTIM_NOTIFY_ENABLED
+-- and the 10s cooldown actually gate victim notify toasts.
+-- Uses attacker_name as the cooldown key; bypasses real player object requirement.
+-- CDBG degrades to SKIP when absent.
+function DevMenu_TestVictimNotifyGate(attacker_name, verb, past, allowed, blocked)
+	if not _DEVMENU_BLOCK_VICTIM_NOTIFY_ENABLED then return end
+	if (allowed or 0) <= 0 and (blocked or 0) <= 0 then return end
+	if type(World_GetGameTime) == "function" then
+		local ok_t, now = pcall(World_GetGameTime)
+		if ok_t then
+			local last = _DEVMENU_BLOCK_VICTIM_NOTIFY_LAST_TIME[attacker_name]
+			if last ~= nil and (now - last) < 10.0 then return end
+			_DEVMENU_BLOCK_VICTIM_NOTIFY_LAST_TIME[attacker_name] = now
+		end
+	end
+	if type(DevMenu_ShowToast) ~= "function" then return end
+	local pname = attacker_name or "A player"
+	if (allowed or 0) > 0 and (blocked or 0) > 0 then
+		DevMenu_ShowToast({
+			prefix     = pname .. " " .. (past or verb or "affected") .. " " .. tostring(allowed) .. " of your units, ",
+			state_word = tostring(blocked) .. " blocked",
+			state_on   = false,
+		})
+	elseif (blocked or 0) > 0 then
+		DevMenu_ShowToast({
+			prefix     = pname .. " tried to " .. (verb or "affect") .. " your units, ",
+			state_word = "all " .. tostring(blocked) .. " blocked",
+			state_on   = false,
+		})
+	else
+		DevMenu_ShowToast({
+			prefix = pname .. " " .. (past or verb or "affected") .. " " .. tostring(allowed) .. " of your units",
+		})
+	end
+end
+
+_DEVMENU_NET_ACTIONS = _DEVMENU_NET_ACTIONS or {
+	-- Economy: delegates to CheatEconomy (+1000 of all resources).
+	-- Equivalent to RESOURCES_ALL but keeps toggle state consistent with
+	-- DevMenu_DoEconomy's classification entry.
+	ECONOMY = function(pid)
+		if type(CheatEconomy) == "function" then CheatEconomy(pid) end
+	end,
+	-- Resources: Player_AddResource is safe in lockstep callback context.
+	-- (Used by cheat.scar's CheatEconomy; not in Essence_ScarFunctions.api
+	-- but confirmed available as engine-internal function.)
+	-- Fallback to Player_GiftResource (documented API) when unavailable.
+	RESOURCES_FOOD  = function(pid)
+		if type(Player_AddResource) == "function" then Player_AddResource(pid, RT_Food, 999999)
+		elseif type(Player_GiftResource) == "function" then Player_GiftResource(pid, RT_Food, 999999) end
+	end,
+	RESOURCES_WOOD  = function(pid)
+		if type(Player_AddResource) == "function" then Player_AddResource(pid, RT_Wood, 999999)
+		elseif type(Player_GiftResource) == "function" then Player_GiftResource(pid, RT_Wood, 999999) end
+	end,
+	RESOURCES_GOLD  = function(pid)
+		if type(Player_AddResource) == "function" then Player_AddResource(pid, RT_Gold, 999999)
+		elseif type(Player_GiftResource) == "function" then Player_GiftResource(pid, RT_Gold, 999999) end
+	end,
+	RESOURCES_STONE = function(pid)
+		if type(Player_AddResource) == "function" then Player_AddResource(pid, RT_Stone, 999999)
+		elseif type(Player_GiftResource) == "function" then Player_GiftResource(pid, RT_Stone, 999999) end
+	end,
+	RESOURCES_OIL   = function(pid)
+		-- RT_Merc_Byz is the Byzantine mercenary / "oil" resource (confirmed chatcheats.scar:154).
+		if type(Player_AddResource) == "function" then Player_AddResource(pid, RT_Merc_Byz, 999999)
+		elseif type(Player_GiftResource) == "function" then Player_GiftResource(pid, RT_Merc_Byz, 999999) end
+	end,
+	RESOURCES_ALL   = function(pid)
+		local add = type(Player_AddResource) == "function" and Player_AddResource
+		         or (type(Player_GiftResource) == "function" and Player_GiftResource)
+		if add == nil then return end
+		add(pid, RT_Food,     1000)
+		add(pid, RT_Wood,     1000)
+		add(pid, RT_Gold,     1000)
+		add(pid, RT_Stone,    1000)
+		add(pid, RT_Merc_Byz, 1000)
+	end,
+	-- Pop cap
+	POP_CAP_MAX = function(pid)
+		if type(Player_SetPopCapOverride) == "function"
+			and type(Player_GetMaxPopulationCapOverride) == "function" then
+			local max = Player_GetMaxPopulationCapOverride(pid, CT_Personnel)
+			Player_SetPopCapOverride(pid, max)
+		end
+	end,
+	-- Exploration: Game_SetMapExplored is safe in lockstep context.
+	-- (CheatExploredAll also adds ghost-reveal UI tiles with a local-player guard;
+	--  we skip that here since it's presentation-only.)
+	EXPLORE_ALL = function(pid)
+		if type(Game_SetMapExplored) == "function" then Game_SetMapExplored(pid) end
+	end,
+	-- Invulnerable: delegate to ChatCheatInvulnerable (chatcheats.scar).
+	-- This maintains gInvulnerableCheat[playerIndex] toggle state so
+	-- DevMenu_GetInvulnerableEnabled() continues to report correctly.
+	INVULNERABLE = function(pid)
+		if type(ChatCheatInvulnerable) == "function" then ChatCheatInvulnerable(pid) end
+		-- Toast on the pressing peer only (ChatCheatInvulnerable updates gInvulnerableCheat
+		-- synchronously, so DevMenu_GetInvulnerableEnabled() returns the new state immediately).
+		local _inv_local_p   = type(Game_GetLocalPlayer) == "function" and Game_GetLocalPlayer() or nil
+		local _inv_local_pid = (_inv_local_p ~= nil and type(Player_GetID) == "function") and Player_GetID(_inv_local_p) or nil
+		local _inv_press_pid = (pid ~= nil and type(Player_GetID) == "function") and Player_GetID(pid) or nil
+		if _inv_local_pid ~= nil and _inv_press_pid ~= nil and _inv_local_pid == _inv_press_pid then
+			if type(DevMenu_ShowToast) == "function" then
+				local on = (type(DevMenu_GetInvulnerableEnabled) == "function") and DevMenu_GetInvulnerableEnabled() or false
+				DevMenu_ShowToast({ prefix = "Invulnerability ", state_word = on and "ENABLED" or "DISABLED", state_on = on })
+			end
+		end
+	end,
+	-- Instant build: delegate to ChatCheatInstantBuildAndGather.
+	-- Maintains gInstantBuildCheat[playerIndex] and gModifierList toggle state.
+	INSTANT_BUILD = function(pid)
+		if type(ChatCheatInstantBuildAndGather) == "function" then
+			ChatCheatInstantBuildAndGather(pid)
+		end
+	end,
+	-- Sim rate: args[2] = target rate as a decimal string.
+	-- Sent by pressing peer after computing the toggle target locally.
+	SIM_RATE = function(pid, args)
+		local rate = args and args[2] and tonumber(args[2])
+		if rate ~= nil and type(Misc_SetSimRate) == "function" then
+			Misc_SetSimRate(rate)
+		end
+	end,
+	-- Gaia / world mutations (no selection IDs needed).
+	KILL_GAIA    = function(pid)
+		if type(CheatKillAllGaia) == "function" then CheatKillAllGaia(pid) end
+	end,
+	SHEEP_WOLVES = function(pid)
+		if type(CheatReplaceSheepWithWolves) == "function" then
+			CheatReplaceSheepWithWolves(pid)
+		end
+	end,
+	-- Lose: fires for the sender's playerID on all peers.
+	LOSE_INSTANTLY = function(pid)
+		if type(CheatLoseInstantly) == "function" then CheatLoseInstantly(pid) end
+	end,
+	-- FoW toggle: delegate to ChatCheatFOW which manages gFoWCheat toggle state.
+	-- Same pattern as INVULNERABLE → ChatCheatInvulnerable; safe in lockstep callback.
+	FOW_TOGGLE = function(pid)
+		if type(ChatCheatFOW) == "function" then
+			ChatCheatFOW(pid)
+		elseif type(CheatFoW) == "function" then
+			CheatFoW(pid, nil)
+		end
+	end,
+	-- Age up: two-step approach matching the AutoAge timer pattern (CBA_Auto_Age_1/2/3).
+	-- Step 1: CBA_Auto_Age_AgeUp handles menu unlock + special-civ upgrades (Templar commandery,
+	--         Horde tent, Abbasid wing picks). Safe to call from all peers at same sim tick.
+	-- Step 2: Player_CompleteUpgrade grants the age-up upgrade for landmark civs that CBA_Auto_Age_AgeUp
+	--         only menu-unlocks (does not force-advance). Idempotent - applying twice is a no-op.
+	-- Both steps use direct sim mutations (not LocalCommand_*) so they are safe to call from
+	-- all peers simultaneously inside this GE_BroadcastMessage callback.
+	AGE_UP = function(pid)
+		-- Read age BEFORE advancement (determines which upgrade to grant in step 2).
+		local ok_age, age_before = pcall(Player_GetCurrentAge, pid)
+		if not ok_age or age_before == nil then return end
+
+		-- Step 1: AutoAge-style processing (menu unlock + special-civ handling).
+		if type(CBA_Auto_Age_AgeUp) == "function" and type(Core_GetPlayersTableEntry) == "function" then
+			local player = Core_GetPlayersTableEntry(pid)
+			if player ~= nil then
+				local ok_up, err_up = pcall(CBA_Auto_Age_AgeUp, player)
+				if not ok_up then
+					print("[DEVMENU-NET] AGE_UP: CBA_Auto_Age_AgeUp failed: " .. tostring(err_up))
+				end
+			end
+		end
+
+		-- Step 2: Grant age-up upgrade for landmark/non-force civs.
+		if type(Player_CompleteUpgrade) ~= "function" or type(BP_GetUpgradeBlueprint) ~= "function" then
+			return
+		end
+		local age_bp_name = nil
+		if     age_before < 2 then age_bp_name = "feudal_age"
+		elseif age_before < 3 then age_bp_name = "castle_age"
+		elseif age_before < 4 then age_bp_name = "imperial_age"
+		end
+		if age_bp_name == nil then return end  -- already at imperial
+		local ok_bp, bp = pcall(BP_GetUpgradeBlueprint, age_bp_name)
+		if ok_bp and bp ~= nil then
+			local ok_u, err_u = pcall(Player_CompleteUpgrade, pid, bp)
+			if not ok_u then
+				print("[DEVMENU-NET] AGE_UP: Player_CompleteUpgrade failed bp=" .. age_bp_name .. ": " .. tostring(err_u))
+			end
+		end
+	end,
+}
+
+-- -----------------------------------------------------------------------
+-- Phase 6: selection-based and spawn actions (entity/squad ID serialization)
+-- Message format key: "DEVMENU_XXX arg1 arg2 ..."
+-- args[1] = action key, args[2..] = payload serialized by pressing peer.
+-- Running in GE_BroadcastMessage callback → lockstep-safe on all peers.
+-- -----------------------------------------------------------------------
+
+-- Destroy: DEVMENU_DESTROY eid1 eid2 ...
+-- Keep guard (defense-in-depth) and notification for the affected human player.
+_DEVMENU_NET_ACTIONS.DEVMENU_DESTROY = function(pid, args)
+	local local_player = nil
+	if type(Game_GetLocalPlayer) == "function" then
+		local ok, p = pcall(Game_GetLocalPlayer); if ok then local_player = p end
+	end
+	local pressing_pid = (type(Player_GetID) == "function" and pid ~= nil) and Player_GetID(pid) or nil
+	local local_pid    = (local_player ~= nil and type(Player_GetID) == "function") and Player_GetID(local_player) or nil
+	local is_pressing  = pressing_pid ~= nil and local_pid ~= nil and pressing_pid == local_pid
+	local affected_count         = 0  -- local player's units destroyed by another peer
+	local local_blocked_count    = 0  -- local player's units blocked by Block Actions
+	local pressing_success_count = 0  -- units successfully destroyed by pressing peer
+	local pressing_blocked_count = 0  -- units blocked by Block Actions for pressing peer
+	local blocked_pids           = {}
+	for i = 2, #args do
+		local eid = tonumber(args[i])
+		if eid ~= nil and type(Entity_FromID) == "function" and type(Entity_Kill) == "function" then
+			local e = Entity_FromID(eid)
+			if e ~= nil then
+				local owner     = type(Entity_GetPlayerOwner) == "function"
+						and Entity_GetPlayerOwner(e) or nil
+				local owner_pid = owner ~= nil and type(Player_GetID) == "function" and Player_GetID(owner) or nil
+				-- Keep guard: never destroy a human player's starter keep on any peer.
+				-- Primary: _mod.castles registry (cba.scar Mod_FindKeep). Fallback: type strings.
+				local _dk_n = type(Entity_GetID) == "function" and Entity_GetID(e) or -1
+				local _dk_is_keep = (_mod ~= nil and type(_mod.castles) == "table" and _mod.castles[_dk_n] ~= nil)
+					or (type(Entity_IsOfType) == "function" and (Entity_IsOfType(e, "castle") or Entity_IsOfType(e, "scar_keep")))
+				if owner ~= nil and _dk_is_keep
+					and type(Player_IsHuman) == "function" and Player_IsHuman(owner) == true then
+					print("[DEVMENU-NET] DEVMENU_DESTROY: keep guard blocked eid=" .. tostring(eid))
+				-- Block-actions guard: respect the owner's protection preference.
+				elseif owner_pid ~= nil and (_DEVMENU_BLOCK_ACTIONS_MAP or {})[owner_pid] == true then
+					print("[DEVMENU-NET] DEVMENU_DESTROY: block-actions blocked eid=" .. tostring(eid) .. " owner=" .. tostring(owner_pid))
+					blocked_pids[owner_pid] = true
+					if not is_pressing and owner_pid ~= nil and local_pid ~= nil
+						and owner_pid == local_pid then
+						local_blocked_count = local_blocked_count + 1
+					end
+					if is_pressing then pressing_blocked_count = pressing_blocked_count + 1 end
+				else
+					-- Track if local player's units are being destroyed by another peer.
+					if not is_pressing and owner_pid ~= nil and local_pid ~= nil
+						and owner_pid == local_pid then
+						affected_count = affected_count + 1
+					end
+					if is_pressing then pressing_success_count = pressing_success_count + 1 end
+					local ok, err = pcall(Entity_Kill, e)
+					if not ok then
+						print("[DEVMENU-NET] DEVMENU_DESTROY: Entity_Kill failed eid=" .. tostring(eid) .. ": " .. tostring(err))
+					end
+				end
+			end
+		end
+	end
+	-- Pressing peer: show result notification.
+	if is_pressing then _devmenu_pressing_notify_result("destroyed", pressing_success_count, pressing_blocked_count, blocked_pids) end
+	-- Victim peer: contextual toast if local player's units were affected.
+	_devmenu_victim_notify(pid, "destroy", "destroyed", affected_count, local_blocked_count)
+	if not is_pressing then _devmenu_maybe_show_victim_prompt(pid, "destroy", affected_count + local_blocked_count) end
+end
+
+-- Teleport: DEVMENU_TELEPORT x y z sqid1 sqid2 ...  (position first, then squad IDs)
+-- Block-actions guard: skip squads owned by a player with Block Actions enabled.
+-- Same structural shape as DEVMENU_DESTROY above (verb/past = "teleport"/"teleported").
+_DEVMENU_NET_ACTIONS.DEVMENU_TELEPORT = function(pid, args)
+	if #args < 5 then return end  -- key + x y z + at least 1 squad
+	local x = tonumber(args[2])
+	local y = tonumber(args[3])
+	local z = tonumber(args[4])
+	if x == nil or y == nil or z == nil then return end
+	if type(World_Pos) ~= "function" then return end
+	local pos = World_Pos(x, y, z)
+	local local_player = nil
+	if type(Game_GetLocalPlayer) == "function" then
+		local ok, p = pcall(Game_GetLocalPlayer); if ok then local_player = p end
+	end
+	local pressing_pid = (type(Player_GetID) == "function" and pid ~= nil) and Player_GetID(pid) or nil
+	local local_pid    = (local_player ~= nil and type(Player_GetID) == "function") and Player_GetID(local_player) or nil
+	local is_pressing  = pressing_pid ~= nil and local_pid ~= nil and pressing_pid == local_pid
+	local affected_count         = 0  -- local player's squads teleported by another peer
+	local local_blocked_count    = 0  -- local player's squads blocked by Block Actions
+	local pressing_success_count = 0  -- squads successfully teleported by pressing peer
+	local pressing_blocked_count = 0  -- squads blocked by Block Actions for pressing peer
+	local blocked_pids           = {}
+	for i = 5, #args do
+		local sqid = tonumber(args[i])
+		if sqid ~= nil and type(Squad_FromID) == "function" and type(Squad_SetPosition) == "function" then
+			local sq = Squad_FromID(sqid)
+			if sq ~= nil then
+				local sq_eid       = type(Squad_GetFirstEntity) == "function" and Squad_GetFirstEntity(sq) or nil
+				local sq_owner     = sq_eid ~= nil and type(Entity_GetPlayerOwner) == "function"
+					and Entity_GetPlayerOwner(sq_eid) or nil
+				local sq_owner_pid = sq_owner ~= nil and type(Player_GetID) == "function" and Player_GetID(sq_owner) or nil
+				if sq_owner_pid ~= nil and (_DEVMENU_BLOCK_ACTIONS_MAP or {})[sq_owner_pid] == true then
+					print("[DEVMENU-NET] DEVMENU_TELEPORT: block-actions blocked sqid=" .. tostring(sqid) .. " owner=" .. tostring(sq_owner_pid))
+					blocked_pids[sq_owner_pid] = true
+					if not is_pressing and sq_owner_pid ~= nil and local_pid ~= nil
+						and sq_owner_pid == local_pid then
+						local_blocked_count = local_blocked_count + 1
+					end
+					if is_pressing then pressing_blocked_count = pressing_blocked_count + 1 end
+				else
+					-- Track if local player's squads are being teleported by another peer.
+					if not is_pressing and sq_owner_pid ~= nil and local_pid ~= nil
+						and sq_owner_pid == local_pid then
+						affected_count = affected_count + 1
+					end
+					if is_pressing then pressing_success_count = pressing_success_count + 1 end
+					local ok, err = pcall(Squad_SetPosition, sq, pos, pos)
+					if not ok then
+						print("[DEVMENU-NET] DEVMENU_TELEPORT: Squad_SetPosition failed sqid=" .. tostring(sqid) .. ": " .. tostring(err))
+					end
+				end
+			end
+		end
+	end
+	-- Pressing peer: show result notification.
+	if is_pressing then _devmenu_pressing_notify_result("teleported", pressing_success_count, pressing_blocked_count, blocked_pids) end
+	-- Victim peer: contextual toast if local player's squads were affected.
+	_devmenu_victim_notify(pid, "teleport", "teleported", affected_count, local_blocked_count)
+	if not is_pressing then _devmenu_maybe_show_victim_prompt(pid, "teleport", affected_count + local_blocked_count) end
+end
+
+-- Convert: DEVMENU_CONVERT target_pid nsquads sqid1 ... sqidN eid1 ... eidM
+-- target_pid = Player_GetID of the target player
+-- nsquads = number of squad IDs that follow; remaining args are entity IDs
+-- Keep guard (defense-in-depth) and notification for the affected human player.
+_DEVMENU_NET_ACTIONS.DEVMENU_CONVERT = function(pid, args)
+	if #args < 3 then return end
+	local target_pid = tonumber(args[2])
+	local nsquads    = tonumber(args[3])
+	if target_pid == nil or nsquads == nil then return end
+	-- Resolve target player by iterating the world player list (deterministic on all peers).
+	local target_player = nil
+	if type(World_GetPlayerCount) == "function" and type(World_GetPlayerAt) == "function" then
+		for i = 1, World_GetPlayerCount() do
+			local p = World_GetPlayerAt(i)
+			if p ~= nil and type(Player_GetID) == "function" and Player_GetID(p) == target_pid then
+				target_player = p
+				break
+			end
+		end
+	end
+	if target_player == nil then
+		print("[DEVMENU-NET] DEVMENU_CONVERT: target player not found (pid=" .. tostring(target_pid) .. ")")
+		return
+	end
+	-- Local player identification for notification.
+	local local_player = nil
+	if type(Game_GetLocalPlayer) == "function" then
+		local ok, p = pcall(Game_GetLocalPlayer); if ok then local_player = p end
+	end
+	local pressing_pid = (type(Player_GetID) == "function" and pid ~= nil) and Player_GetID(pid) or nil
+	local local_pid    = (local_player ~= nil and type(Player_GetID) == "function") and Player_GetID(local_player) or nil
+	local is_pressing  = pressing_pid ~= nil and local_pid ~= nil and pressing_pid == local_pid
+	local lost_units             = 0  -- local player's units converted away by another player
+	local local_blocked_count    = 0  -- local player's units blocked by Block Actions
+	local pressing_success_count = 0  -- units successfully converted by pressing peer
+	local pressing_blocked_count = 0  -- units blocked by Block Actions for pressing peer
+	local base = 4
+	-- Resolve pressing player display name (shared by the notification blocks below).
+	local function _get_pname()
+		local pname = nil
+		if pid ~= nil and type(Player_GetDisplayName) == "function" then
+			local ok, n = pcall(Player_GetDisplayName, pid)
+			if ok and n ~= nil then local ns = tostring(n); if ns ~= "" and not ns:match("^%w+_mt:") then pname = ns end end
+		end
+		return pname or (pressing_pid ~= nil and ("Player " .. tostring(pressing_pid)) or "A player")
+	end
+	local blocked_pids = {}  -- owner pids whose block-actions flag blocked the action
+	-- Squad path
+	if type(Squad_SetPlayerOwner) == "function" and type(Squad_FromID) == "function" then
+		for i = base, base + nsquads - 1 do
+			local sqid = tonumber(args[i])
+			if sqid ~= nil then
+				local sq = Squad_FromID(sqid)
+				if sq ~= nil then
+					local sq_eid      = type(Squad_GetFirstEntity) == "function" and Squad_GetFirstEntity(sq) or nil
+					local sq_owner    = sq_eid ~= nil and type(Entity_GetPlayerOwner) == "function"
+							and Entity_GetPlayerOwner(sq_eid) or nil
+					local sq_owner_pid = sq_owner ~= nil and type(Player_GetID) == "function" and Player_GetID(sq_owner) or nil
+					-- Keep guard: skip keeps that may register as squads.
+					-- Primary: _mod.castles registry (cba.scar Mod_FindKeep). Fallback: type strings.
+					local _cvsq_n = sq_eid ~= nil and type(Entity_GetID) == "function" and Entity_GetID(sq_eid) or -1
+					local _cvsq_is_keep = (_mod ~= nil and type(_mod.castles) == "table" and _mod.castles[_cvsq_n] ~= nil)
+						or (sq_eid ~= nil and type(Entity_IsOfType) == "function" and (Entity_IsOfType(sq_eid, "castle") or Entity_IsOfType(sq_eid, "scar_keep")))
+					if sq_eid ~= nil and _cvsq_is_keep and sq_owner ~= nil
+						and type(Player_IsHuman) == "function" and Player_IsHuman(sq_owner) == true then
+						print("[DEVMENU-NET] DEVMENU_CONVERT: keep guard blocked sqid=" .. tostring(sqid))
+					-- Block-actions guard.
+					elseif sq_owner_pid ~= nil and (_DEVMENU_BLOCK_ACTIONS_MAP or {})[sq_owner_pid] == true then
+						print("[DEVMENU-NET] DEVMENU_CONVERT: block-actions blocked sqid=" .. tostring(sqid) .. " owner=" .. tostring(sq_owner_pid))
+						blocked_pids[sq_owner_pid] = true
+						if not is_pressing and sq_owner_pid ~= nil and local_pid ~= nil
+							and sq_owner_pid == local_pid then
+							local_blocked_count = local_blocked_count + 1
+						end
+						if is_pressing then pressing_blocked_count = pressing_blocked_count + 1 end
+					else
+						if not is_pressing and local_pid ~= nil
+							and type(Squad_GetPlayerOwner) == "function" then
+							local sq_prev_owner = Squad_GetPlayerOwner(sq)
+							if sq_prev_owner ~= nil and type(Player_GetID) == "function"
+								and Player_GetID(sq_prev_owner) == local_pid then
+								lost_units = lost_units + 1
+							end
+						end
+						if is_pressing then pressing_success_count = pressing_success_count + 1 end
+						local ok, err = pcall(Squad_SetPlayerOwner, sq, target_player)
+						if not ok then
+							print("[DEVMENU-NET] DEVMENU_CONVERT: Squad_SetPlayerOwner failed sqid=" .. tostring(sqid) .. ": " .. tostring(err))
+						end
+					end
+				end
+			end
+		end
+	end
+	-- Entity path (buildings)
+	if type(Entity_SetPlayerOwner) == "function" and type(Entity_FromID) == "function" then
+		for i = base + nsquads, #args do
+			local eid = tonumber(args[i])
+			if eid ~= nil then
+				local e = Entity_FromID(eid)
+				if e ~= nil then
+					local owner     = type(Entity_GetPlayerOwner) == "function"
+							and Entity_GetPlayerOwner(e) or nil
+					local owner_pid = owner ~= nil and type(Player_GetID) == "function" and Player_GetID(owner) or nil
+					-- Keep guard: never convert a human player's starter keep on any peer.
+					-- Primary: _mod.castles registry (cba.scar Mod_FindKeep). Fallback: type strings.
+					local _cve_n = type(Entity_GetID) == "function" and Entity_GetID(e) or -1
+					local _cve_is_keep = (_mod ~= nil and type(_mod.castles) == "table" and _mod.castles[_cve_n] ~= nil)
+						or (type(Entity_IsOfType) == "function" and (Entity_IsOfType(e, "castle") or Entity_IsOfType(e, "scar_keep")))
+					if owner ~= nil and _cve_is_keep
+						and type(Player_IsHuman) == "function" and Player_IsHuman(owner) == true then
+						print("[DEVMENU-NET] DEVMENU_CONVERT: keep guard blocked eid=" .. tostring(eid))
+					-- Block-actions guard.
+					elseif owner_pid ~= nil and (_DEVMENU_BLOCK_ACTIONS_MAP or {})[owner_pid] == true then
+						print("[DEVMENU-NET] DEVMENU_CONVERT: block-actions blocked eid=" .. tostring(eid) .. " owner=" .. tostring(owner_pid))
+						blocked_pids[owner_pid] = true
+						if not is_pressing and owner_pid ~= nil and local_pid ~= nil
+							and owner_pid == local_pid then
+							local_blocked_count = local_blocked_count + 1
+						end
+						if is_pressing then pressing_blocked_count = pressing_blocked_count + 1 end
+					else
+						if not is_pressing and owner_pid ~= nil and local_pid ~= nil
+							and owner_pid == local_pid then
+							lost_units = lost_units + 1
+						end
+						if is_pressing then pressing_success_count = pressing_success_count + 1 end
+						local ok, err = pcall(Entity_SetPlayerOwner, e, target_player)
+						if not ok then
+							print("[DEVMENU-NET] DEVMENU_CONVERT: Entity_SetPlayerOwner failed eid=" .. tostring(eid) .. ": " .. tostring(err))
+						end
+					end
+				end
+			end
+		end
+	end
+	-- Pressing peer: show result notification.
+	if is_pressing then _devmenu_pressing_notify_result("converted", pressing_success_count, pressing_blocked_count, blocked_pids) end
+	-- Victim peer: contextual toast if local player's units were affected.
+	_devmenu_victim_notify(pid, "convert", "converted", lost_units, local_blocked_count)
+	if not is_pressing then _devmenu_maybe_show_victim_prompt(pid, "convert", lost_units + local_blocked_count) end
+end
+
+-- Block actions: DEVMENU_BLOCK_ACTIONS_SET target_pid 1|0
+-- Replicates the protection flag to ALL peers via lockstep bus.
+_DEVMENU_NET_ACTIONS.DEVMENU_BLOCK_ACTIONS_SET = function(pid, args)
+	if #args < 3 then return end
+	local target_pid = tonumber(args[2])
+	local val        = (args[3] == "1")
+	if target_pid == nil then return end
+	_DEVMENU_BLOCK_ACTIONS_MAP[target_pid] = val
+	print("[DEVMENU-NET] DEVMENU_BLOCK_ACTIONS_SET: pid=" .. tostring(target_pid) .. " blocked=" .. tostring(val))
+	-- Bug F1 fix: confirm the toggle to the LOCAL player whose units are now (un)protected.
+	-- Local-only path; not subject to the 90-second attacker cooldown.
+	local _bas_local_p = (type(Game_GetLocalPlayer) == "function") and Game_GetLocalPlayer() or nil
+	local _bas_local_pid = (_bas_local_p ~= nil and type(Player_GetID) == "function") and Player_GetID(_bas_local_p) or nil
+	if _bas_local_pid == target_pid and type(DevMenu_ShowToast) == "function" then
+	        DevMenu_ShowToast({
+	                prefix     = "Block Actions ",
+	                state_word = val and "ENABLED" or "DISABLED",
+	                state_on   = val,
+	                suffix     = val and " - cheat actions targeting your units will be blocked"
+	                                 or  " - your units are no longer protected",
+	        })
+	end
+	-- Refresh the toggle button UI on ALL peers so every client reflects the new state.
+	if type(DevMenu_RefreshToggleStates) == "function" then
+		DevMenu_RefreshToggleStates()
+	end
+end
+
+-- Burn: DEVMENU_BURN eid1 eid2 ...
+-- Applies on-fire-threshold modifier then ignites on all peers.
+-- Block-actions guard and cross-player notification mirror DEVMENU_DESTROY.
+_DEVMENU_NET_ACTIONS.DEVMENU_BURN = function(pid, args)
+	local local_player = nil
+	if type(Game_GetLocalPlayer) == "function" then
+		local ok, p = pcall(Game_GetLocalPlayer); if ok then local_player = p end
+	end
+	local pressing_pid = (type(Player_GetID) == "function" and pid ~= nil) and Player_GetID(pid) or nil
+	local local_pid    = (local_player ~= nil and type(Player_GetID) == "function") and Player_GetID(local_player) or nil
+	local is_pressing  = pressing_pid ~= nil and local_pid ~= nil and pressing_pid == local_pid
+	local affected_count         = 0  -- local player's buildings burned by another peer
+	local local_blocked_count    = 0  -- local player's buildings blocked by Block Actions
+	local pressing_success_count = 0  -- buildings successfully burned by pressing peer
+	local pressing_blocked_count = 0  -- buildings blocked by Block Actions for pressing peer
+	local blocked_pids           = {}
+	for i = 2, #args do
+		local eid = tonumber(args[i])
+		if eid ~= nil and type(Entity_FromID) == "function" then
+			local e = Entity_FromID(eid)
+			if e ~= nil and type(Entity_SetOnFire) == "function" then
+				local owner     = type(Entity_GetPlayerOwner) == "function"
+						and Entity_GetPlayerOwner(e) or nil
+				local owner_pid = owner ~= nil and type(Player_GetID) == "function" and Player_GetID(owner) or nil
+				-- Keep guard: never burn a human player's starter keep or town centre.
+				local _bk_n = type(Entity_GetID) == "function" and Entity_GetID(e) or -1
+				local _bk_is_keep = (_mod ~= nil and type(_mod.castles) == "table" and _mod.castles[_bk_n] ~= nil)
+					or (type(Entity_IsOfType) == "function" and (Entity_IsOfType(e, "castle") or Entity_IsOfType(e, "scar_keep") or Entity_IsOfType(e, "town_center")))
+				if owner ~= nil and _bk_is_keep
+					and type(Player_IsHuman) == "function" and Player_IsHuman(owner) == true then
+					print("[DEVMENU-NET] DEVMENU_BURN: keep guard blocked eid=" .. tostring(eid))
+				-- Block-actions guard: respect the owner's protection preference.
+				elseif owner_pid ~= nil and (_DEVMENU_BLOCK_ACTIONS_MAP or {})[owner_pid] == true then
+					print("[DEVMENU-NET] DEVMENU_BURN: block-actions blocked eid=" .. tostring(eid) .. " owner=" .. tostring(owner_pid))
+					blocked_pids[owner_pid] = true
+					if not is_pressing and owner_pid ~= nil and local_pid ~= nil
+						and owner_pid == local_pid then
+						local_blocked_count = local_blocked_count + 1
+					end
+					if is_pressing then pressing_blocked_count = pressing_blocked_count + 1 end
+				else
+					-- Track if local player's buildings are being burned by another peer.
+					if not is_pressing and owner_pid ~= nil and local_pid ~= nil
+						and owner_pid == local_pid then
+						affected_count = affected_count + 1
+					end
+					if is_pressing then pressing_success_count = pressing_success_count + 1 end
+					-- Lift the fire-threshold modifier (same logic as local DoBurnSelected path).
+					if type(Entity_GetOnFireHealthPercentThreshold) == "function"
+					   and type(Modifier_Create) == "function"
+					   and type(Modifier_ApplyToEntity) == "function" then
+						local ok_t, threshold = pcall(Entity_GetOnFireHealthPercentThreshold, e)
+						if ok_t and type(threshold) == "number" and threshold > 0.0 then
+							local increase = math.floor((1.0 / threshold) + 0.5)
+							local mod = Modifier_Create(MAT_Entity, "on_fire_health_percentage_modifier", MUT_Multiplication, false, increase, "")
+							local mod_id = Modifier_ApplyToEntity(mod, e, 0)
+							-- Store per-client for removal on DEVMENU_UNBURN.
+							if _devmenu_burn_modifier_table == nil then _devmenu_burn_modifier_table = {} end
+							_devmenu_burn_modifier_table[eid] = mod_id
+						end
+					end
+					local ok, err = pcall(Entity_SetOnFire, e)
+					if not ok then
+						print("[DEVMENU-NET] DEVMENU_BURN: Entity_SetOnFire failed eid=" .. tostring(eid) .. ": " .. tostring(err))
+					end
+				end
+			end
+		end
+	end
+	-- Resolve pressing player display name (shared by the notification blocks below).
+	local function _get_pname()
+		local pname = nil
+		if pid ~= nil and type(Player_GetDisplayName) == "function" then
+			local ok, n = pcall(Player_GetDisplayName, pid)
+			if ok and n ~= nil then local ns = tostring(n); if ns ~= "" and not ns:match("^%w+_mt:") then pname = ns end end
+		end
+		return pname or (pressing_pid ~= nil and ("Player " .. tostring(pressing_pid)) or "A player")
+	end
+	-- Pressing peer: show result notification.
+	if is_pressing then _devmenu_pressing_notify_result("ignited", pressing_success_count, pressing_blocked_count, blocked_pids) end
+	-- Victim peer: contextual toast if local player's buildings were affected.
+	_devmenu_victim_notify(pid, "burn", "burned", affected_count, local_blocked_count)
+	if not is_pressing then _devmenu_maybe_show_victim_prompt(pid, "burn", affected_count + local_blocked_count) end
+end
+
+-- Unburn: DEVMENU_UNBURN eid1 eid2 ...
+-- Removes threshold modifier then extinguishes on all peers.
+-- Block-actions guard and cross-player notification mirror DEVMENU_BURN.
+_DEVMENU_NET_ACTIONS.DEVMENU_UNBURN = function(pid, args)
+	local local_player = nil
+	if type(Game_GetLocalPlayer) == "function" then
+		local ok, p = pcall(Game_GetLocalPlayer); if ok then local_player = p end
+	end
+	local pressing_pid = (type(Player_GetID) == "function" and pid ~= nil) and Player_GetID(pid) or nil
+	local local_pid    = (local_player ~= nil and type(Player_GetID) == "function") and Player_GetID(local_player) or nil
+	local is_pressing  = pressing_pid ~= nil and local_pid ~= nil and pressing_pid == local_pid
+	local affected_count         = 0  -- local player's buildings extinguished by another peer
+	local local_blocked_count    = 0  -- local player's buildings blocked by Block Actions
+	local pressing_success_count = 0  -- buildings successfully extinguished by pressing peer
+	local pressing_blocked_count = 0  -- buildings blocked by Block Actions for pressing peer
+	local blocked_pids           = {}
+	for i = 2, #args do
+		local eid = tonumber(args[i])
+		if eid ~= nil and type(Entity_FromID) == "function" then
+			local e = Entity_FromID(eid)
+			if e ~= nil then
+				local owner     = type(Entity_GetPlayerOwner) == "function"
+						and Entity_GetPlayerOwner(e) or nil
+				local owner_pid = owner ~= nil and type(Player_GetID) == "function" and Player_GetID(owner) or nil
+				-- Block-actions guard: respect the owner's protection preference.
+				if owner_pid ~= nil and (_DEVMENU_BLOCK_ACTIONS_MAP or {})[owner_pid] == true then
+					print("[DEVMENU-NET] DEVMENU_UNBURN: block-actions blocked eid=" .. tostring(eid) .. " owner=" .. tostring(owner_pid))
+					blocked_pids[owner_pid] = true
+					if not is_pressing and owner_pid ~= nil and local_pid ~= nil
+						and owner_pid == local_pid then
+						local_blocked_count = local_blocked_count + 1
+					end
+					if is_pressing then pressing_blocked_count = pressing_blocked_count + 1 end
+				else
+					-- Track if local player's buildings are being extinguished by another peer.
+					if not is_pressing and owner_pid ~= nil and local_pid ~= nil
+						and owner_pid == local_pid then
+						affected_count = affected_count + 1
+					end
+					if is_pressing then pressing_success_count = pressing_success_count + 1 end
+					if _devmenu_burn_modifier_table ~= nil and _devmenu_burn_modifier_table[eid] ~= nil then
+						if type(Modifier_Remove) == "function" then
+							pcall(Modifier_Remove, _devmenu_burn_modifier_table[eid])
+							_devmenu_burn_modifier_table[eid] = nil
+						end
+					end
+					if type(Entity_StopFire) == "function" then
+						local ok, err = pcall(Entity_StopFire, e)
+						if not ok then
+							print("[DEVMENU-NET] DEVMENU_UNBURN: Entity_StopFire failed eid=" .. tostring(eid) .. ": " .. tostring(err))
+						end
+					end
+				end
+			end
+		end
+	end
+	-- Pressing peer: show result notification.
+	if is_pressing then _devmenu_pressing_notify_result("extinguished", pressing_success_count, pressing_blocked_count, blocked_pids) end
+	-- Victim peer: contextual toast if local player's buildings were affected.
+	_devmenu_victim_notify(pid, "unburn", "extinguished", affected_count, local_blocked_count)
+	if not is_pressing then _devmenu_maybe_show_victim_prompt(pid, "unburn", affected_count + local_blocked_count) end
+end
+
+-- Invuln selected: DEVMENU_INVULN_SEL dir nsquads sqid1 ... sqidN eid1 ... eidM
+-- dir=1=apply, dir=0=remove. Health cap is read live (deterministic on all peers).
+-- Block-actions guard: skip squads/entities owned by a Block Actions player.
+_DEVMENU_NET_ACTIONS.DEVMENU_INVULN_SEL = function(pid, args)
+	if #args < 3 then return end
+	local dir     = tonumber(args[2])   -- 1=apply, 0=remove
+	local nsquads = tonumber(args[3])
+	if dir == nil or nsquads == nil then return end
+	local apply = (dir == 1)
+	local base  = 4
+	local local_player = nil
+	if type(Game_GetLocalPlayer) == "function" then
+		local ok, p = pcall(Game_GetLocalPlayer); if ok then local_player = p end
+	end
+	local pressing_pid = (type(Player_GetID) == "function" and pid ~= nil) and Player_GetID(pid) or nil
+	local local_pid    = (local_player ~= nil and type(Player_GetID) == "function") and Player_GetID(local_player) or nil
+	local is_pressing  = pressing_pid ~= nil and local_pid ~= nil and pressing_pid == local_pid
+	        	local affected_count         = 0
+		local local_blocked_count    = 0
+	        	local pressing_success_count = 0  -- units/buildings successfully processed by pressing peer
+	        	local pressing_blocked_count = 0  -- units/buildings blocked by Block Actions for pressing peer
+	local action_verb = apply and "invulnerable applied to" or "invulnerability removed from"
+	local action_past = apply and "applied invulnerability to" or "removed invulnerability from"
+	local blocked_pids = {}  -- pids blocked by Block Actions or keep guard
+	-- Squad path (unit squads + building squads bridged via Entity_GetSquad)
+	if type(Squad_SetInvulnerableMinCap) == "function" and type(Squad_FromID) == "function" then
+		for i = base, base + nsquads - 1 do
+			local sqid = tonumber(args[i])
+			if sqid ~= nil then
+				local sq = Squad_FromID(sqid)
+				if sq ~= nil then
+					local sq_eid       = type(Squad_GetFirstEntity) == "function" and Squad_GetFirstEntity(sq) or nil
+					local sq_owner     = sq_eid ~= nil and type(Entity_GetPlayerOwner) == "function"
+							and Entity_GetPlayerOwner(sq_eid) or nil
+					local sq_owner_pid = sq_owner ~= nil and type(Player_GetID) == "function" and Player_GetID(sq_owner) or nil
+					-- Keep guard: never invuln-toggle a human player's starter keep.
+					-- Primary: _mod.castles registry. Fallback: type strings.
+					local _ivsq_n      = sq_eid ~= nil and type(Entity_GetID) == "function" and Entity_GetID(sq_eid) or -1
+					local _ivsq_is_keep = (_mod ~= nil and type(_mod.castles) == "table" and _mod.castles[_ivsq_n] ~= nil)
+						or (sq_eid ~= nil and type(Entity_IsOfType) == "function" and (Entity_IsOfType(sq_eid, "castle") or Entity_IsOfType(sq_eid, "scar_keep")))
+					if sq_eid ~= nil and _ivsq_is_keep and sq_owner ~= nil
+						and type(Player_IsHuman) == "function" and Player_IsHuman(sq_owner) == true then
+						print("[DEVMENU-NET] DEVMENU_INVULN_SEL: keep guard blocked sqid=" .. tostring(sqid))
+					-- Block-actions guard.
+					elseif sq_owner_pid ~= nil and (_DEVMENU_BLOCK_ACTIONS_MAP or {})[sq_owner_pid] == true then
+                                                blocked_pids[sq_owner_pid] = true
+                                                if not is_pressing and sq_owner_pid ~= nil and local_pid ~= nil
+                                                        and sq_owner_pid == local_pid then
+                                                        local_blocked_count = local_blocked_count + 1
+                                                end
+                                                if is_pressing then pressing_blocked_count = pressing_blocked_count + 1 end
+                                        else
+                                                if not is_pressing and sq_owner_pid ~= nil and local_pid ~= nil
+                                                        and sq_owner_pid == local_pid then
+                                                        affected_count = affected_count + 1
+                                                end
+                                                if is_pressing then pressing_success_count = pressing_success_count + 1 end
+                                                if apply then
+							local cap = (type(Squad_GetHealthPercentage) == "function")
+								and Squad_GetHealthPercentage(sq, false) or 1.0
+							pcall(Squad_SetInvulnerableMinCap, sq, cap, -1)
+						else
+							pcall(Squad_SetInvulnerableMinCap, sq, 0, -1)
+						end
+					end
+				end
+			end
+		end
+	end
+	-- Entity path (buildings without a resolvable squad)
+	if type(Entity_SetInvulnerableMinCap) == "function" and type(Entity_FromID) == "function" then
+		for i = base + nsquads, #args do
+			local eid = tonumber(args[i])
+			if eid ~= nil then
+				local e = Entity_FromID(eid)
+				if e ~= nil then
+					local owner     = type(Entity_GetPlayerOwner) == "function"
+							and Entity_GetPlayerOwner(e) or nil
+					local owner_pid = owner ~= nil and type(Player_GetID) == "function" and Player_GetID(owner) or nil
+					-- Keep guard: never invuln-toggle a human player's starter keep.
+					-- Primary: _mod.castles registry. Fallback: type strings.
+					local _ive_n      = type(Entity_GetID) == "function" and Entity_GetID(e) or -1
+					local _ive_is_keep = (_mod ~= nil and type(_mod.castles) == "table" and _mod.castles[_ive_n] ~= nil)
+						or (type(Entity_IsOfType) == "function" and (Entity_IsOfType(e, "castle") or Entity_IsOfType(e, "scar_keep")))
+					if owner ~= nil and _ive_is_keep
+						and type(Player_IsHuman) == "function" and Player_IsHuman(owner) == true then
+						print("[DEVMENU-NET] DEVMENU_INVULN_SEL: keep guard blocked eid=" .. tostring(eid))
+					-- Block-actions guard.
+					elseif owner_pid ~= nil and (_DEVMENU_BLOCK_ACTIONS_MAP or {})[owner_pid] == true then
+                                                blocked_pids[owner_pid] = true
+                                                if not is_pressing and owner_pid ~= nil and local_pid ~= nil
+                                                        and owner_pid == local_pid then
+                                                        local_blocked_count = local_blocked_count + 1
+                                                end
+                                                if is_pressing then pressing_blocked_count = pressing_blocked_count + 1 end
+                                        else
+                                                if not is_pressing and owner_pid ~= nil and local_pid ~= nil
+                                                        and owner_pid == local_pid then
+                                                        affected_count = affected_count + 1
+                                                end
+                                                if is_pressing then pressing_success_count = pressing_success_count + 1 end
+                                                if apply then
+							local cap = (type(Entity_GetHealthPercentage) == "function")
+								and Entity_GetHealthPercentage(e) or 1.0
+							pcall(Entity_SetInvulnerableMinCap, e, cap, -1)
+						else
+							pcall(Entity_SetInvulnerableMinCap, e, 0, -1)
+						end
+					end
+				end
+			end
+		end
+	end
+	if is_pressing then _devmenu_pressing_notify_result(action_past, pressing_success_count, pressing_blocked_count, blocked_pids) end
+        _devmenu_victim_notify(pid, action_verb, action_past, affected_count, local_blocked_count)
+        if not is_pressing then _devmenu_maybe_show_victim_prompt(pid, action_verb, affected_count + local_blocked_count) end
+end
+
+-- Spawn army: SpawnCheatArmy finds the player's Keep position internally.
+-- All peers receive the same playerID → same Keep → same spawn. Message: "DEVMENU_SPAWN_ARMY"
+_DEVMENU_NET_ACTIONS.DEVMENU_SPAWN_ARMY = function(pid)
+	if type(SpawnCheatArmy) == "function" then
+		local ok, err = pcall(SpawnCheatArmy, pid)
+		if not ok then print("[DEVMENU-NET] DEVMENU_SPAWN_ARMY: SpawnCheatArmy failed: " .. tostring(err)) end
+	elseif type(CheatSpawnCoreUnits) == "function" and type(GetTownCentrePosition) == "function" then
+		local pos = GetTownCentrePosition(pid)
+		if pos ~= nil then pcall(CheatSpawnCoreUnits, pid, pos) end
+	else
+		print("[DEVMENU-NET] DEVMENU_SPAWN_ARMY: neither SpawnCheatArmy nor CheatSpawnCoreUnits available")
+	end
+end
+
+-- Spawn army at camera position (serialized by pressing peer).
+-- Message: "DEVMENU_SPAWN_ARMY_CAM x y z"
+_DEVMENU_NET_ACTIONS.DEVMENU_SPAWN_ARMY_CAM = function(pid, args)
+	if #args < 4 then return end
+	local x = tonumber(args[2])
+	local y = tonumber(args[3])
+	local z = tonumber(args[4])
+	if x == nil or y == nil or z == nil then return end
+	if type(World_Pos) ~= "function" then return end
+	local pos = World_Pos(x, y, z)
+	if type(CheatSpawnCoreUnits) == "function" then
+		local ok, err = pcall(CheatSpawnCoreUnits, pid, pos)
+		if not ok then print("[DEVMENU-NET] DEVMENU_SPAWN_ARMY_CAM: CheatSpawnCoreUnits failed: " .. tostring(err)) end
+	elseif type(SpawnCheatArmy) == "function" then
+		-- Fallback: SpawnCheatArmy ignores the position and uses the Keep, but is better than nothing.
+		local ok, err = pcall(SpawnCheatArmy, pid)
+		if not ok then print("[DEVMENU-NET] DEVMENU_SPAWN_ARMY_CAM: SpawnCheatArmy fallback failed: " .. tostring(err)) end
+	end
+end
+
+-- Spawn photon man: SpawnCheatPhotonMan finds the player's Keep position.
+-- Message: "DEVMENU_SPAWN_PHOTON"
+_DEVMENU_NET_ACTIONS.DEVMENU_SPAWN_PHOTON = function(pid)
+	if type(SpawnCheatPhotonMan) == "function" then
+		local ok, err = pcall(SpawnCheatPhotonMan, pid)
+		if not ok then print("[DEVMENU-NET] DEVMENU_SPAWN_PHOTON: SpawnCheatPhotonMan failed: " .. tostring(err)) end
+	else
+		print("[DEVMENU-NET] DEVMENU_SPAWN_PHOTON: SpawnCheatPhotonMan unavailable")
+	end
+end
+
+-- Unit Spawner Menu: spawn one unit by SBP name at the player's Keep on every peer.
+-- Message: "DEVMENU_SPAWN_UNIT <sbp_name> [count]"
+-- The pressing peer's pid is passed by the lockstep bus; the Keep is deterministic
+-- sim state on every peer, so the spawn position is identical without serialization.
+-- count (optional, default 1) is the spawn_group_count embedded by the caller so
+-- all peers spawn the same number of units deterministically.
+_DEVMENU_NET_ACTIONS.DEVMENU_SPAWN_UNIT = function(pid, args)
+	if #args < 2 then
+		print("[DEVMENU-NET] DEVMENU_SPAWN_UNIT: missing sbp arg")
+		return
+	end
+	local sbp_name = args[2]
+	if sbp_name == nil or sbp_name == "" then return end
+	local count = (args[3] and tonumber(args[3])) or 1
+	if count < 1 then count = 1 elseif count > 8 then count = 8 end
+	if type(GetTownCentrePosition) ~= "function" then
+		print("[DEVMENU-NET] DEVMENU_SPAWN_UNIT: GetTownCentrePosition unavailable")
+		return
+	end
+	local pos = GetTownCentrePosition(pid)
+	if pos == nil then
+		print("[DEVMENU-NET] DEVMENU_SPAWN_UNIT: no town centre for player")
+		return
+	end
+	if type(SpawnUnitBPForPlayer) ~= "function" then
+		print("[DEVMENU-NET] DEVMENU_SPAWN_UNIT: SpawnUnitBPForPlayer unavailable")
+		return
+	end
+	-- needsLoad=true: SpawnUnitBPForPlayer will Squad_SlowLoadResources on first hit
+	-- per civ to avoid placeholder assets. Subsequent calls reuse loaded resources.
+	for i = 1, count do
+		local ok, err = pcall(SpawnUnitBPForPlayer, sbp_name, pid, pos, true)
+		if not ok then
+			print("[DEVMENU-NET] DEVMENU_SPAWN_UNIT: SpawnUnitBPForPlayer failed sbp=" .. tostring(sbp_name) .. " err=" .. tostring(err))
+			break
+		end
+	end
+end
+
+-- Spawn unit at a serialized camera position on all peers.
+-- Message: "DEVMENU_SPAWN_UNIT_CAM <sbp_name> <count> <x> <y> <z>"
+-- The pressing peer reads Camera_GetCurrentTargetPos, serializes x/y/z into the
+-- lockstep message. All peers reconstruct the position via World_Pos - identical
+-- on every peer because it came from the lockstep bus, not local camera state.
+_DEVMENU_NET_ACTIONS.DEVMENU_SPAWN_UNIT_CAM = function(pid, args)
+	if #args < 6 then
+		print("[DEVMENU-NET] DEVMENU_SPAWN_UNIT_CAM: missing args (need sbp count x y z)")
+		return
+	end
+	local sbp_name = args[2]
+	if sbp_name == nil or sbp_name == "" then return end
+	local count = (args[3] and tonumber(args[3])) or 1
+	if count < 1 then count = 1 elseif count > 8 then count = 8 end
+	local x = tonumber(args[4])
+	local y = tonumber(args[5])
+	local z = tonumber(args[6])
+	if x == nil or y == nil or z == nil then
+		print("[DEVMENU-NET] DEVMENU_SPAWN_UNIT_CAM: invalid coordinates")
+		return
+	end
+	if type(World_Pos) ~= "function" then
+		print("[DEVMENU-NET] DEVMENU_SPAWN_UNIT_CAM: World_Pos unavailable")
+		return
+	end
+	local pos = World_Pos(x, y, z)
+	if type(SpawnUnitBPForPlayer) ~= "function" then
+		print("[DEVMENU-NET] DEVMENU_SPAWN_UNIT_CAM: SpawnUnitBPForPlayer unavailable")
+		return
+	end
+	for i = 1, count do
+		local ok, err = pcall(SpawnUnitBPForPlayer, sbp_name, pid, pos, true)
+		if not ok then
+			print("[DEVMENU-NET] DEVMENU_SPAWN_UNIT_CAM: SpawnUnitBPForPlayer failed sbp=" .. tostring(sbp_name) .. " err=" .. tostring(err))
+			break
+		end
+	end
+end
+
+-- Network callback: fires on ALL peers when a DevMenu_NetworkDispatch message
+-- arrives via the GE_BroadcastMessage event.
+-- MUST be a named global (not local) - Network_Callback calls _G[func_name].
+function DevMenu_NetworkDispatch(playerID, message)
+	-- Security: only process in -dev builds.
+	if type(Misc_IsCommandLineOptionSet) == "function"
+		and Misc_IsCommandLineOptionSet("dev") == false then
+		return
+	end
+	-- Parse: "ACTION_KEY arg1 arg2 ..."
+	local parts = {}
+	if type(string.split) == "function" then
+		parts = string.split(message, " ")
+	else
+		for w in string.gmatch(message or "", "[^ ]+") do
+			table.insert(parts, w)
+		end
+	end
+	if #parts == 0 then return end
+	local action_key = parts[1]
+	local fn = _DEVMENU_NET_ACTIONS[action_key]
+	if fn ~= nil then
+		print(string.format("[DEVMENU-NET] dispatch %s (pid=%s)",
+			tostring(action_key),
+			type(Player_GetID) == "function" and tostring(Player_GetID(playerID)) or "?"))
+		local ok, err = pcall(fn, playerID, parts)
+		if not ok then
+			print("[DEVMENU-NET] dispatch error for " .. tostring(action_key) .. ": " .. tostring(err))
+		end
+	else
+		print("[DEVMENU-NET] unknown action_key: " .. tostring(action_key))
+	end
+end
+
+-- Register DevMenu_NetworkDispatch as a Network event at SCAR init.
+-- Network_RegisterEvent is available via cardinal.scar → GameScarUtil.scar → network.scar.
+-- network.scar's Scar_AddInit(Network_Init) runs first, so network_events is ready.
+local function _devmenu_net_register()
+	if type(Network_RegisterEvent) == "function" then
+		Network_RegisterEvent("DevMenu_NetworkDispatch")
+		print("[DEVMENU-NET] DevMenu_NetworkDispatch registered")
+	else
+		print("[DEVMENU-NET] WARNING: Network_RegisterEvent unavailable - MP net routing disabled")
+	end
+end
+Scar_AddInit(_devmenu_net_register)
+
+-- Route a DevMenu action through the lockstep DevMenu network dispatch.
+-- Returns true when dispatched (in MP with network available); false in SP.
+-- Callers should `return` after true - the actual execution happens in the
+-- GE_BroadcastMessage callback on all peers at the next synchronization point.
+function _devmenu_mp_net_action(player, action_key, extra_arg)
+	if not _devmenu_is_multiplayer() then return false end
+	if type(Network_CallEvent) ~= "function" then return false end
+	if player == nil then return false end
+	local msg = action_key
+	if extra_arg ~= nil then msg = msg .. " " .. tostring(extra_arg) end
+	Network_CallEvent("DevMenu_NetworkDispatch", msg)
+	print("[DEVMENU-NET] queued: " .. tostring(msg))
+	return true
+end
+
+-- Route an action through cheat.scar's existing type-0 broadcast
+-- (handled by Cheat_Callback, which calls the cheat.scar cheat functions).
+-- Valid cheat_key values: ECONOMY, INVULNERABLE, INSTANTBUILD, FOW,
+--                          DESTROYHOVERED, TELEPORTSELECTED, AGEUP.
+-- Returns true when dispatched (in MP); false in SP.
+function _devmenu_mp_cheat_broadcast(player, cheat_key, extra_args)
+	if not _devmenu_is_multiplayer() then return false end
+	if type(Command_PlayerBroadcastMessage) ~= "function" then return false end
+	if player == nil then return false end
+	local msg = cheat_key
+	if extra_args ~= nil and extra_args ~= "" then msg = msg .. " " .. tostring(extra_args) end
+	Command_PlayerBroadcastMessage(player, player, 0, msg)
+	print("[DEVMENU-NET] cheat_broadcast: " .. tostring(msg))
+	return true
+end
+
+
+-- Returns whether the Block Actions victim-notify toasts are currently enabled.
+-- Used by the Block Notify toggle button to read the initial state.
+function DevMenu_GetBlockVictimNotifyEnabled()
+	return _DEVMENU_BLOCK_VICTIM_NOTIFY_ENABLED == true
+end
+
+-- Toggles the Block Actions victim-notify opt-out on the local client.
+-- Fires a toast confirming the new state and refreshes the toggle button.
+function DevMenu_ToggleBlockVictimNotify()
+	_DEVMENU_BLOCK_VICTIM_NOTIFY_ENABLED = not (_DEVMENU_BLOCK_VICTIM_NOTIFY_ENABLED == true)
+	if type(DevMenu_ShowToast) == "function" then
+		DevMenu_ShowToast(_DEVMENU_BLOCK_VICTIM_NOTIFY_ENABLED
+			and "Block Notify: ON - you will be told when cheat actions target your units"
+			or  "Block Notify: OFF - victim notifications suppressed")
+	end
+	if type(DevMenu_RefreshToggleStates) == "function" then
+		DevMenu_RefreshToggleStates()
+	end
+end
+
+
+-----------------------------------------------------------------------
+-- Diagnostic shims (devmenu_diag.scar consumes these).
+-- The notify helpers above are file-locals, so the diag harness cannot
+-- invoke them directly. These thin globals expose the same call sites
+-- without altering any existing behavior. Safe in MP - they don't touch
+-- the network bus, only the local notify path.
+-----------------------------------------------------------------------
+function DevMenu_DiagInvokeVictimNotify(pressing_p, action_verb, action_past, allowed, blocked)
+return _devmenu_victim_notify(pressing_p, action_verb, action_past, allowed, blocked)
+end
+
+function DevMenu_DiagInvokePressingNotify(blocked_pids)
+return _devmenu_pressing_notify_blocked(blocked_pids)
+end

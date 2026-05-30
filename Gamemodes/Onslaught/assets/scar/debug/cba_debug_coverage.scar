@@ -1,0 +1,452 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — Coverage Test (10 Batches)
+-- Invokes gameplay functions via pcall to verify they exist and don't crash.
+--
+-- Branch: onslaught-v3.3
+-- Source: rewards/cba_rewards.scar, cba_annihilation.scar, cba_religious.scar, wonder.scar,
+--   cba_options.scar, cba_auto_age.scar, ags_global_settings.scar, gameplay/cba_economy.scar
+-- Console: Debug_CoverageTest()    (~40s)
+--          Debug_CoverageBatch(n)  (individual batch 1-10)
+---------------------------------------------------------------------------------------------------
+
+_cba_coverage = {
+	results = {},
+	batch_results = {},
+	untested = {},
+	batch_delay = 4,
+}
+
+function _Cov_RunTest(name, test_fn)
+	local ok, result_or_err = pcall(function()
+		local p, d = test_fn()
+		return {pass = p, detail = d or ""}
+	end)
+	if not ok then
+		table.insert(_cba_coverage.results, {name = name, pass = false, detail = "CRASH: " .. tostring(result_or_err)})
+		print(string.format("    [COV] %s — CRASH: %s", name, tostring(result_or_err)))
+	else
+		local r = result_or_err
+		table.insert(_cba_coverage.results, {name = name, pass = r.pass, detail = r.detail})
+		print(string.format("    [COV] %s — %s: %s", name, r.pass and "PASS" or "FAIL", r.detail))
+	end
+end
+
+function _Cov_BatchHeader(num, name)
+	print("")
+	print(string.format("  ---- COVERAGE BATCH %d: %s ----", num, string.upper(name)))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Batch 1: Engine API
+---------------------------------------------------------------------------------------------------
+
+function _Cov_Batch1_EngineAPI()
+	_Cov_BatchHeader(1, "Engine API")
+
+	_Cov_RunTest("1.1 World_GetPlayerCount", function()
+		local ok, c = pcall(World_GetPlayerCount)
+		if not ok then return false, "call failed" end
+		return true, c .. " players"
+	end)
+
+	_Cov_RunTest("1.2 Game_GetLocalPlayer", function()
+		local ok, lp = pcall(Game_GetLocalPlayer)
+		return ok, ok and "resolved" or "failed"
+	end)
+
+	_Cov_RunTest("1.3 World_GetGameTime", function()
+		local ok, t = pcall(World_GetGameTime)
+		if not ok then return false, "call failed" end
+		return true, string.format("%.1fs", t)
+	end)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Batch 2: Blueprint Resolution
+---------------------------------------------------------------------------------------------------
+
+function _Cov_Batch2_BlueprintResolution()
+	_Cov_BatchHeader(2, "Blueprint Resolution")
+
+	_Cov_RunTest("2.1 BP_GetEntityBlueprint basic", function()
+		local probe = "building_defense_keep_eng"
+		if AGS_ENTITY_TABLE and AGS_ENTITY_TABLE["english"] and AGS_ENTITY_TABLE["english"].castle then
+			probe = AGS_ENTITY_TABLE["english"].castle
+		end
+		local ok, bp = pcall(BP_GetEntityBlueprint, probe)
+		return ok and bp ~= nil, (ok and bp ~= nil) and ("resolved: " .. tostring(probe)) or ("failed: " .. tostring(probe))
+	end)
+
+	_Cov_RunTest("2.2 BP_GetSquadBlueprint basic", function()
+		local ok, bp = pcall(BP_GetSquadBlueprint, "unit_spearman_1_abb")
+		return ok and bp ~= nil, ok and "resolved" or "failed"
+	end)
+
+	_Cov_RunTest("2.3 AGS_ENTITY_TABLE lookup", function()
+		if AGS_ENTITY_TABLE == nil then return false, "nil" end
+		local eng = AGS_ENTITY_TABLE["english"]
+		if eng == nil then return false, "english entry nil" end
+		return true, "english.castle=" .. tostring(eng.castle)
+	end)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Batch 3: Economy (gameplay/cba_economy.scar)
+---------------------------------------------------------------------------------------------------
+
+function _Cov_Batch3_Economy()
+	_Cov_BatchHeader(3, "Economy")
+
+	_Cov_RunTest("3.1 Player_GetResource", function()
+		local p = PLAYERS[1]
+		if p == nil then return false, "no players" end
+		local ok, food = pcall(Player_GetResource, p.id, RT_Food)
+		return ok, ok and ("food=" .. tostring(food)) or "failed"
+	end)
+
+	_Cov_RunTest("3.2 Auto-resource function", function()
+		return _Debug_FunctionExists("AGS_AutoResources")
+	end)
+
+	_Cov_RunTest("3.3 Auto-population function", function()
+		return _Debug_FunctionExists("AGS_IncreasePopulation")
+	end)
+
+	_Cov_RunTest("3.4 CBA_Economy functions (gameplay/cba_economy.scar)", function()
+		local fns = {"CBA_Economy_ParseOptions", "CBA_Economy_SetStartingResources",
+			"CBA_Economy_RemoveGaia", "CBA_Economy_SetFOW"}
+		local found = 0
+		for _, fn in ipairs(fns) do
+			if type(_G[fn]) == "function" then found = found + 1 end
+		end
+		return found == #fns, found .. "/" .. #fns
+	end)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Batch 4: Team & Player
+---------------------------------------------------------------------------------------------------
+
+function _Cov_Batch4_TeamPlayer()
+	_Cov_BatchHeader(4, "Team & Player")
+
+	_Cov_RunTest("4.1 Player_GetRaceName", function()
+		local p = PLAYERS[1]
+		if p == nil then return false, "no players" end
+		local ok, civ = pcall(Player_GetRaceName, p.id)
+		return ok, ok and civ or "failed"
+	end)
+
+	_Cov_RunTest("4.2 Core_IsPlayerEliminated", function()
+		local p = PLAYERS[1]
+		if p == nil then return false, "no players" end
+		local ok, elim = pcall(Core_IsPlayerEliminated, p.id)
+		return ok, ok and tostring(elim) or "failed"
+	end)
+
+	_Cov_RunTest("4.3 Player_ObserveRelationship", function()
+		if #PLAYERS < 2 then return true, "< 2 players, skip" end
+		local ok, rel = pcall(Player_ObserveRelationship, PLAYERS[1].id, PLAYERS[2].id)
+		return ok, ok and tostring(rel) or "failed"
+	end)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Batch 5: Options System (cba_options.scar)
+---------------------------------------------------------------------------------------------------
+
+function _Cov_Batch5_Options()
+	_Cov_BatchHeader(5, "Options (cba_options.scar)")
+
+	_Cov_RunTest("5.1 CBA_Options functions exist", function()
+		local fns = {
+			"CBA_Options_BuildingLimit_SetupObjective",
+			"CBA_Options_BuildingLimit_ConstructionStart",
+			"CBA_Options_SiegeLimit_Disable",
+			"CBA_Options_SiegeLimit_Cancel_filter",
+			"CBA_Options_SiegeLimit_Recount",
+			"CBA_Options_SiegeLimit_ApplyThreshold",
+		}
+		local found = 0
+		for _, fn in ipairs(fns) do
+			if type(_G[fn]) == "function" then found = found + 1 end
+		end
+		return found == #fns, found .. "/" .. #fns .. " found"
+	end)
+
+	_Cov_RunTest("5.2 _buildingLimit module", function()
+		return _buildingLimit ~= nil, type(_buildingLimit)
+	end)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Batch 6: Rewards System (rewards.scar)
+---------------------------------------------------------------------------------------------------
+
+function _Cov_Batch6_Rewards()
+	_Cov_BatchHeader(6, "Rewards (rewards.scar)")
+
+	_Cov_RunTest("6.1 CBA_Rewards_nextRequirement callable", function()
+		if type(CBA_Rewards_nextRequirement) ~= "function" then return false, "not a function" end
+		local p = PLAYERS[1]
+		if p == nil then return false, "no players" end
+		local ok, req = pcall(CBA_Rewards_nextRequirement, p)
+		return ok, ok and ("next=" .. tostring(req)) or "call failed"
+	end)
+
+	_Cov_RunTest("6.2 Reward tables per civ type", function()
+		if _CBA == nil or _CBA.rewards == nil then return false, "no rewards" end
+		local count = _Debug_CountKeys(_CBA.rewards)
+		return count > 0, count .. " reward groups"
+	end)
+
+	_Cov_RunTest("6.3 CBA_Rewards spawn functions", function()
+		local fns = {"CBA_Rewards_SpawnUnits", "CBA_Rewards_SpawnAndMove", "CBA_Rewards_StartingUnits"}
+		local found = 0
+		for _, fn in ipairs(fns) do
+			if type(_G[fn]) == "function" then found = found + 1 end
+		end
+		return found == #fns, found .. "/" .. #fns
+	end)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Batch 7: Objectives System
+---------------------------------------------------------------------------------------------------
+
+function _Cov_Batch7_Objectives()
+	_Cov_BatchHeader(7, "Objectives")
+
+	_Cov_RunTest("7.1 _mod.objective exists", function()
+		return _mod.objective ~= nil, type(_mod.objective)
+	end)
+
+	_Cov_RunTest("7.2 Objective counter state", function()
+		return true, string.format("met=%s req=%s",
+			tostring(_mod.objective_meet), tostring(_mod.objective_requirement))
+	end)
+
+	_Cov_RunTest("7.3 Building limit objective", function()
+		if _buildingLimit == nil then return true, "module not loaded" end
+		return _buildingLimit.objective_buildingLimit ~= nil, type(_buildingLimit.objective_buildingLimit)
+	end)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Batch 8: Win Conditions
+---------------------------------------------------------------------------------------------------
+
+function _Cov_Batch8_WinConditions()
+	_Cov_BatchHeader(8, "Win Conditions")
+
+	_Cov_RunTest("8.1 Annihilation functions (cba_annihilation.scar)", function()
+		local fns = {"Annihilation_CheckAnnihilationCondition", "Annihilation_CheckVictory",
+			"Annihilation_OnEntityKilled", "Annihilation_OnLandmarkDestroyed"}
+		local found = 0
+		for _, fn in ipairs(fns) do
+			if type(_G[fn]) == "function" then found = found + 1 end
+		end
+		return found == #fns, found .. "/" .. #fns
+	end)
+
+	_Cov_RunTest("8.2 Religious functions (cba_religious.scar)", function()
+		local fns = {"Religious_Update", "Religious_OnHolySiteChange", "Religious_SitesOwnedByPlayer"}
+		local found = 0
+		for _, fn in ipairs(fns) do
+			if type(_G[fn]) == "function" then found = found + 1 end
+		end
+		return found == #fns, found .. "/" .. #fns
+	end)
+
+	_Cov_RunTest("8.3 Wonder functions (wonder.scar)", function()
+		if _wonder == nil then
+			return true, "legacy wonder module inactive (OK)"
+		end
+		local fns = {"Wonder_Update", "Wonder_CheckVictory", "Wonder_OnConstructionComplete"}
+		local found = 0
+		for _, fn in ipairs(fns) do
+			if type(_G[fn]) == "function" then found = found + 1 end
+		end
+		return found == #fns, found .. "/" .. #fns
+	end)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Batch 9: Auto Systems (cba_auto_age.scar)
+---------------------------------------------------------------------------------------------------
+
+function _Cov_Batch9_AutoSystems()
+	_Cov_BatchHeader(9, "Auto Systems (cba_auto_age.scar)")
+
+	_Cov_RunTest("9.1 Auto-population function", function()
+		return _Debug_FunctionExists("AGS_IncreasePopulation")
+	end)
+
+	_Cov_RunTest("9.2 Auto-age functions", function()
+		local fns = {"CBA_Auto_Age", "CBA_Auto_Age_1", "CBA_Auto_Age_2", "CBA_Auto_Age_3"}
+		local found = 0
+		for _, fn in ipairs(fns) do
+			if type(_G[fn]) == "function" then found = found + 1 end
+		end
+		return found == #fns, found .. "/" .. #fns
+	end)
+
+	_Cov_RunTest("9.3 CBA_AutoAge_SetMaxAge", function()
+		return _Debug_FunctionExists("CBA_AutoAge_SetMaxAge")
+	end)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Batch 10: Debug Self-Test
+---------------------------------------------------------------------------------------------------
+
+function _Cov_Batch10_DebugSelfTest()
+	_Cov_BatchHeader(10, "Debug Self-Test")
+
+	_Cov_RunTest("10.1 _cba_debug table", function()
+		return _cba_debug ~= nil and _cba_debug.enabled, "enabled=" .. tostring(_cba_debug.enabled)
+	end)
+
+	_Cov_RunTest("10.2 Debug entry points", function()
+		local fns = {
+			"Debug_FullValidation", "Debug_LimitEnforcementValidator",
+			"Debug_StressTest", "Debug_SiegeLimitStressTest",
+			"Debug_RunSmokeTests", "Debug_SetBaseline",
+			"Debug_CoverageTest", "Debug_EventProbes",
+			"Debug_Scenario", "Debug_GetBuildingLimitState",
+			"Debug_GetWorkshopIndependenceState", "Debug_GetQueuePreservationState",
+		}
+		local found = 0
+		for _, fn in ipairs(fns) do
+			if type(_G[fn]) == "function" then found = found + 1 end
+		end
+		return found == #fns, found .. "/" .. #fns
+	end)
+
+	_Cov_RunTest("10.3 DebugLog function", function()
+		local ok, _ = pcall(DebugLog, "selftest", "coverage probe")
+		return ok, "DebugLog callable"
+	end)
+
+	_Cov_RunTest("10.4 Module registry", function()
+		if _cba_debug.modules == nil then return false, "no module list" end
+		return true, #_cba_debug.modules .. " modules registered"
+	end)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Coverage Final Report
+---------------------------------------------------------------------------------------------------
+
+function _Cov_FinalReport()
+	print("")
+	local total = #_cba_coverage.results
+	local fails = 0
+	for _, r in ipairs(_cba_coverage.results) do
+		if not r.pass then fails = fails + 1 end
+	end
+	print(string.format("  TOTAL: %d/%d passed", total - fails, total))
+	if fails > 0 then
+		print("  FAILURES:")
+		for _, r in ipairs(_cba_coverage.results) do
+			if not r.pass then
+				print(string.format("    [FAIL] %s — %s", r.name, r.detail))
+			end
+		end
+	end
+
+	local ok, gt = pcall(World_GetGameTime)
+	local elapsed = (ok and _cba_coverage.start_time) and (gt - _cba_coverage.start_time) or 0
+	_Debug_EndMarker("Coverage", total - fails, total, elapsed)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Public Entry Points
+---------------------------------------------------------------------------------------------------
+
+function Debug_CoverageTest()
+	_cba_coverage.results = {}
+	_cba_coverage.batch_results = {}
+	_cba_coverage.untested = {}
+	_cba_debug.enabled = true
+
+	local ok, gt = pcall(World_GetGameTime)
+	_cba_coverage.start_time = ok and gt or 0
+
+	print("")
+	print("============================================")
+	print("  CBA DEBUG — COVERAGE TEST (10 batches)")
+	print("  Branch: onslaught-v3.3")
+	print("============================================")
+
+	_Cov_Batch1_EngineAPI()
+	_Debug_ScheduleNextPhase(_Cov_Run2, _cba_coverage.batch_delay, "Batch 2: BlueprintResolution", "Coverage")
+end
+
+function _Cov_Run2()
+	_Cov_Batch2_BlueprintResolution()
+	_Debug_ScheduleNextPhase(_Cov_Run3, _cba_coverage.batch_delay, "Batch 3: Economy", "Coverage")
+end
+function _Cov_Run3()
+	_Cov_Batch3_Economy()
+	_Debug_ScheduleNextPhase(_Cov_Run4, _cba_coverage.batch_delay, "Batch 4: TeamPlayer", "Coverage")
+end
+function _Cov_Run4()
+	_Cov_Batch4_TeamPlayer()
+	_Debug_ScheduleNextPhase(_Cov_Run5, _cba_coverage.batch_delay, "Batch 5: Options", "Coverage")
+end
+function _Cov_Run5()
+	_Cov_Batch5_Options()
+	_Debug_ScheduleNextPhase(_Cov_Run6, _cba_coverage.batch_delay, "Batch 6: Rewards", "Coverage")
+end
+function _Cov_Run6()
+	_Cov_Batch6_Rewards()
+	_Debug_ScheduleNextPhase(_Cov_Run7, _cba_coverage.batch_delay, "Batch 7: Objectives", "Coverage")
+end
+function _Cov_Run7()
+	_Cov_Batch7_Objectives()
+	_Debug_ScheduleNextPhase(_Cov_Run8, _cba_coverage.batch_delay, "Batch 8: WinConditions", "Coverage")
+end
+function _Cov_Run8()
+	_Cov_Batch8_WinConditions()
+	_Debug_ScheduleNextPhase(_Cov_Run9, _cba_coverage.batch_delay, "Batch 9: AutoSystems", "Coverage")
+end
+function _Cov_Run9()
+	_Cov_Batch9_AutoSystems()
+	_Debug_ScheduleNextPhase(_Cov_Run10, _cba_coverage.batch_delay, "Batch 10: DebugSelfTest", "Coverage")
+end
+function _Cov_Run10()
+	_Cov_Batch10_DebugSelfTest()
+	_Debug_ScheduleNextPhase(_Cov_FinalReport, _cba_coverage.batch_delay, "Final Report", "Coverage")
+end
+
+function Debug_CoverageBatch(n)
+	_cba_debug.enabled = true
+	local batches = {
+		_Cov_Batch1_EngineAPI,
+		_Cov_Batch2_BlueprintResolution,
+		_Cov_Batch3_Economy,
+		_Cov_Batch4_TeamPlayer,
+		_Cov_Batch5_Options,
+		_Cov_Batch6_Rewards,
+		_Cov_Batch7_Objectives,
+		_Cov_Batch8_WinConditions,
+		_Cov_Batch9_AutoSystems,
+		_Cov_Batch10_DebugSelfTest,
+	}
+	if n < 1 or n > #batches then
+		print("[CBA_DEBUG] Batch must be 1-10")
+		return
+	end
+	_cba_coverage.results = {}
+	batches[n]()
+end
+
+---------------------------------------------------------------------------------------------------
+-- Namespace Registration
+---------------------------------------------------------------------------------------------------
+if debug then
+	debug.validation.coverage = Debug_CoverageTest
+	debug.validation.coverageBatch = Debug_CoverageBatch
+	debug._register("coverage", Debug_CoverageTest, "10-batch API coverage (engine, BPs, civs, rewards, economy) (~40s)", 2)
+end

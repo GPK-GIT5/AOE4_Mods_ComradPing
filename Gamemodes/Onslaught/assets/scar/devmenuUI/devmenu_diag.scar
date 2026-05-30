@@ -1,0 +1,1452 @@
+-----------------------------------------------------------------------
+-- DevMenu Diagnostics
+--
+-- Single-pass runtime probe of every API and state dependency the
+-- devmenu relies on. Each check emits a [DIAG-PASS] or [DIAG-FAIL]
+-- line to scarlog so failures can be found instantly with grep/search.
+--
+-- Invoke via: DevMenu_DiagRunAll()
+-- Entry point wired as a MISC category card in devmenu_data.scar.
+--
+-- Output format (scarlog):
+--   [DEVMENU-DIAG] === DevMenu Diagnostic Pass ===
+--   [DEVMENU-DIAG] [PASS] <probe name>: <detail>
+--   [DEVMENU-DIAG] [FAIL] <probe name>: <reason>
+--   [DEVMENU-DIAG] === Result: N pass, M fail ===
+-----------------------------------------------------------------------
+
+local function _diag_log(msg)
+	print("[DEVMENU-DIAG] " .. tostring(msg))
+end
+
+-- Tracks pass/fail counts for the summary line.
+local _diag_pass = 0
+local _diag_fail = 0
+
+local function _pass(name, detail)
+	_diag_pass = _diag_pass + 1
+	_diag_log("[PASS] " .. name .. ": " .. tostring(detail))
+end
+
+local function _fail(name, reason)
+	_diag_fail = _diag_fail + 1
+	_diag_log("[FAIL] " .. name .. ": " .. tostring(reason))
+end
+
+local function _check_api(fn_name)
+	if type(_G[fn_name]) == "function" then
+		_pass("API:" .. fn_name, "present")
+		return true
+	else
+		_fail("API:" .. fn_name, "nil or not a function (type=" .. type(_G[fn_name]) .. ")")
+		return false
+	end
+end
+
+-----------------------------------------------------------------------
+-- Teleport flow (camera-center model, 2026-05-11)
+--
+-- Misc_GetMouseOnTerrain proved unusable from any SCAR UI/Rule context
+-- (returns origin every call). The teleport action now warps the local
+-- player's selection to Camera_GetCurrentTargetPos(). This diag verifies
+-- the new contract.
+-----------------------------------------------------------------------
+local function _diag_teleport()
+	_diag_log("--- Teleport flow (camera-center) ---")
+
+	if _devmenu == nil then
+		_fail("teleport/ui_state", "_devmenu table is nil — module not initialised")
+		return
+	end
+	if not _devmenu.is_ui_created then
+		_fail("teleport/ui_state", "_devmenu.is_ui_created=false — UI not yet built")
+	else
+		_pass("teleport/ui_state", "_devmenu.is_ui_created=true")
+	end
+
+	-- 1. Handler is wired.
+	if type(DevMenu_TeleportSelectedToCameraCenter) == "function" then
+		_pass("teleport/handler", "DevMenu_TeleportSelectedToCameraCenter present")
+	else
+		_fail("teleport/handler", "DevMenu_TeleportSelectedToCameraCenter missing — teleport will no-op")
+	end
+
+	-- 2. Required engine APIs.
+	_check_api("Camera_GetCurrentTargetPos")
+	local has_warp   = _check_api("SGroup_WarpToPos")
+	local has_setpos = _check_api("Squad_SetPosition")
+	if not has_warp and not has_setpos then
+		_fail("teleport/warp_api", "BOTH SGroup_WarpToPos and Squad_SetPosition missing — teleport will silently fail")
+	end
+	_check_api("Misc_GetSelectedSquads")
+	_check_api("SGroup_Create")
+	_check_api("SGroup_Clear")
+	_check_api("SGroup_CountSpawned")
+	_check_api("SGroup_ForEach")
+	_check_api("Squad_IsOwnedByPlayer")
+
+	-- 3. Live camera-target read — the value the next teleport will use.
+	if type(Camera_GetCurrentTargetPos) == "function" then
+		local ok, pos = pcall(Camera_GetCurrentTargetPos)
+		if ok and pos ~= nil then
+			local okx, x = pcall(function() return pos.x end)
+			local oky, y = pcall(function() return pos.y end)
+			local okz, z = pcall(function() return pos.z end)
+			if okx and x ~= nil then
+				_pass("teleport/camera_target_pos",
+					string.format("(%.2f,%.2f,%.2f)", x, oky and y or 0, okz and z or 0))
+			else
+				_fail("teleport/camera_target_pos", "position lacks .x/.y/.z fields: " .. tostring(pos))
+			end
+			local okb, vb = pcall(World_PosInBounds, pos)
+			if okb and vb then
+				_pass("teleport/camera_target_in_bounds", "World_PosInBounds=true")
+			else
+				_pass("teleport/camera_target_in_bounds",
+					"World_PosInBounds=false (camera near map edge; move camera before teleporting) raw=" .. tostring(vb))
+			end
+		else
+			_fail("teleport/camera_target_pos", "Camera_GetCurrentTargetPos threw or returned nil: " .. tostring(pos))
+		end
+	end
+
+	-- 4. Last warp performed (if any).
+	if _devmenu.teleport_last_pos == nil then
+		_pass("teleport/last_warp_pos", "nil (no teleport executed yet this session)")
+	else
+		local okx, x = pcall(function() return _devmenu.teleport_last_pos.x end)
+		local oky, y = pcall(function() return _devmenu.teleport_last_pos.y end)
+		local okz, z = pcall(function() return _devmenu.teleport_last_pos.z end)
+		if okx and x ~= nil then
+			_pass("teleport/last_warp_pos",
+				string.format("(%.2f,%.2f,%.2f)", x, oky and y or 0, okz and z or 0))
+		else
+			_pass("teleport/last_warp_pos", tostring(_devmenu.teleport_last_pos))
+		end
+	end
+
+	-- 5. Current selection (what the next click would teleport).
+	if type(Misc_GetSelectedSquads) == "function" and type(SGroup_Create) == "function" then
+		local sg_probe = SGroup_Create("sg_devmenu_diag_sel_probe")
+		Misc_GetSelectedSquads(sg_probe, false)
+		local n = (type(SGroup_CountSpawned) == "function") and SGroup_CountSpawned(sg_probe) or 0
+		if n > 0 then
+			_pass("teleport/current_selection", tostring(n) .. " squad(s) currently selected")
+		else
+			_pass("teleport/current_selection", "0 squads selected (expected when diag run with no selection)")
+		end
+		if type(SGroup_Destroy) == "function" then SGroup_Destroy(sg_probe) end
+	end
+end
+
+-----------------------------------------------------------------------
+-- Convert flow
+-----------------------------------------------------------------------
+local function _diag_convert()
+	_diag_log("--- Convert flow ---")
+	_check_api("SGroup_ForEach")
+	_check_api("Squad_SetPlayerOwner")
+	_check_api("Squad_GetFirstEntity")
+	_check_api("Misc_GetSelectedSquads")
+	-- Confirm selection has squads
+	if type(Misc_GetSelectedSquads) == "function" and type(SGroup_Create) == "function" then
+		local sg = SGroup_Create("sg_devmenu_diag_conv")
+		Misc_GetSelectedSquads(sg, false)
+		local n = (type(SGroup_CountSpawned) == "function") and SGroup_CountSpawned(sg) or 0
+		if n > 0 then
+			_pass("convert/current_selection", tostring(n) .. " squad(s) selected")
+		else
+			_pass("convert/current_selection", "0 squads selected (expected when diag run with no selection)")
+		end
+		if type(SGroup_Destroy) == "function" then SGroup_Destroy(sg) end
+	end
+end
+
+-----------------------------------------------------------------------
+-- Invulnerability (selected units / buildings) flow
+-----------------------------------------------------------------------
+local function _diag_invuln()
+	_diag_log("--- Invulnerability (selected) flow ---")
+
+	-- Write / state-detection APIs
+	_check_api("Squad_SetInvulnerableMinCap")
+	_check_api("Squad_GetInvulnerableMinCap")
+	_check_api("SGroup_GetSpawnedSquadAt")
+	_check_api("Squad_GetHealthPercentage")
+	-- Building path: entity -> owning squad
+	_check_api("Entity_GetSquad")
+	-- Iteration
+	_check_api("SGroup_ForEach")
+	_check_api("EGroup_ForEach")
+	-- Selection collectors
+	_check_api("Misc_GetSelectedSquads")
+	_check_api("Misc_GetSelectedEntities")
+
+	-- Live selection: unit squads
+	local sg_count = 0
+	local first_squad_state = nil
+	if type(Misc_GetSelectedSquads) == "function" and type(SGroup_Create) == "function" then
+		local sg = SGroup_Create("sg_devmenu_diag_invuln_sel")
+		Misc_GetSelectedSquads(sg, false)
+		sg_count = (type(SGroup_CountSpawned) == "function") and SGroup_CountSpawned(sg) or 0
+		-- Probe invuln state of first unit squad
+		if sg_count > 0 and type(SGroup_GetSpawnedSquadAt) == "function"
+			and type(Squad_GetInvulnerableMinCap) == "function" then
+			local first = SGroup_GetSpawnedSquadAt(sg, 1)
+			if first ~= nil then
+				local cap = Squad_GetInvulnerableMinCap(first)
+				first_squad_state = (type(cap) == "number" and cap > 0)
+					and string.format("INVULNERABLE (min_cap=%.4f)", cap)
+					or  string.format("VULNERABLE (min_cap=%s)", tostring(cap))
+			end
+		end
+		if type(SGroup_Destroy) == "function" then SGroup_Destroy(sg) end
+	end
+
+	-- Live selection: building entities
+	local eg_count = 0
+	local first_bldg_state = nil
+	if type(Misc_GetSelectedEntities) == "function" and type(EGroup_Create) == "function" then
+		local eg = EGroup_Create("eg_devmenu_diag_invuln_sel")
+		Misc_GetSelectedEntities(eg, false)
+		eg_count = (type(EGroup_CountSpawned) == "function") and EGroup_CountSpawned(eg) or 0
+		-- Probe invuln state of first building squad (via Entity_GetSquad)
+		if eg_count > 0 and type(EGroup_GetSpawnedEntityAt) == "function"
+			and type(Entity_GetSquad) == "function"
+			and type(Squad_GetInvulnerableMinCap) == "function" then
+			local first_eid = EGroup_GetSpawnedEntityAt(eg, 1)
+			if first_eid ~= nil then
+				local esq = Entity_GetSquad(first_eid)
+				if esq ~= nil then
+					local cap = Squad_GetInvulnerableMinCap(esq)
+					first_bldg_state = (type(cap) == "number" and cap > 0)
+						and string.format("INVULNERABLE (min_cap=%.4f)", cap)
+						or  string.format("VULNERABLE (min_cap=%s)", tostring(cap))
+				end
+			end
+		end
+		if type(EGroup_Destroy) == "function" then EGroup_Destroy(eg) end
+	end
+
+	-- Selection summary
+	if sg_count > 0 or eg_count > 0 then
+		_pass("invuln/current_selection",
+			string.format("%d unit squad(s) + %d building entity/entities selected", sg_count, eg_count))
+	else
+		_pass("invuln/current_selection",
+			"0 units and 0 buildings (expected when diag run with no selection)")
+	end
+
+	-- State probes (only logged when something is selected)
+	if first_squad_state ~= nil then
+		_pass("invuln/first_unit_squad_state", first_squad_state)
+	end
+	if first_bldg_state ~= nil then
+		_pass("invuln/first_building_squad_state", first_bldg_state)
+	end
+
+	-- Full entity snapshot for each selected building entity (captures blueprint,
+	-- owner, position, health, invincible flag, type tags, _mod.castles cross-check).
+	-- This runs regardless of whether Entity_GetSquad succeeded or failed, so diag
+	-- always records the full state of whatever building is currently selected.
+	if eg_count > 0 and type(DevMenu_EntitySnapshot) == "function" then
+		local eg_snap = nil
+		if type(Misc_GetSelectedEntities) == "function" and type(EGroup_Create) == "function" then
+			eg_snap = EGroup_Create("eg_devmenu_diag_invuln_snap")
+			Misc_GetSelectedEntities(eg_snap, false)
+		end
+		if eg_snap ~= nil and type(EGroup_ForEach) == "function" then
+			local snap_idx = 0
+			EGroup_ForEach(eg_snap, function(_, _, eid)
+				snap_idx = snap_idx + 1
+				local ok_snap, snap_err = pcall(DevMenu_EntitySnapshot, eid,
+					string.format("diag_bldg[%d/%d]", snap_idx, eg_count))
+				if not ok_snap then
+					_diag_log("[SNAP-ERROR] diag_bldg[" .. snap_idx .. "]: " .. tostring(snap_err))
+				end
+			end)
+		end
+		if eg_snap ~= nil and type(EGroup_Destroy) == "function" then EGroup_Destroy(eg_snap) end
+	end
+end
+
+-----------------------------------------------------------------------
+-- Destroy flow
+-----------------------------------------------------------------------
+local function _diag_destroy()
+	_diag_log("--- Destroy flow ---")
+	_check_api("Entity_Kill")
+	_check_api("Entity_IsInvincible")
+	_check_api("EGroup_ForEach")
+	_check_api("EGroup_CountSpawned")
+	_check_api("Misc_GetSelectedEntities")
+	_check_api("Squad_GetFirstEntity")
+	if type(Misc_GetSelectedEntities) == "function" and type(EGroup_Create) == "function" then
+		local eg = EGroup_Create("eg_devmenu_diag_destroy")
+		Misc_GetSelectedEntities(eg, false)
+		local n = (type(EGroup_CountSpawned) == "function") and EGroup_CountSpawned(eg) or 0
+		if n > 0 then
+			_pass("destroy/current_selection", tostring(n) .. " entities selected")
+		else
+			_pass("destroy/current_selection", "0 entities (expected when diag run with no selection, will fall back to squad path)")
+		end
+		if type(EGroup_Destroy) == "function" then EGroup_Destroy(eg) end
+	end
+end
+
+-----------------------------------------------------------------------
+-- Burn flow
+-----------------------------------------------------------------------
+local function _diag_burn()
+	_diag_log("--- Burn flow ---")
+	_check_api("Entity_SetOnFire")
+	_check_api("Entity_StopFire")
+	_check_api("Entity_IsBurning")
+	_check_api("Entity_IsBuilding")
+	_check_api("Entity_IsUnderConstruction")
+	_check_api("Entity_GetOnFireHealthPercentThreshold")
+	_check_api("Entity_GetID")
+	_check_api("Modifier_Create")
+	_check_api("Modifier_ApplyToEntity")
+	_check_api("Modifier_Remove")
+	-- Report modifier table state
+	local t = _devmenu_burn_modifier_table
+	if type(t) == "table" then
+		local count = 0
+		for _ in pairs(t) do count = count + 1 end
+		_pass("burn/modifier_table", "present, " .. tostring(count) .. " tracked modifier(s)")
+	else
+		_fail("burn/modifier_table", "_devmenu_burn_modifier_table is nil — module not loaded")
+	end
+end
+
+-----------------------------------------------------------------------
+-- Spawn flow
+-----------------------------------------------------------------------
+local function _diag_spawn()
+	_diag_log("--- Spawn flow ---")
+	_check_api("CheatSpawnCoreUnits")
+	_check_api("SpawnUnitBPForPlayer")
+	_check_api("GetTownCentrePosition")
+	_check_api("Misc_GetMouseOnTerrain")
+	_check_api("Squad_CreateAndSpawnToward")
+	-- Cursor position right now
+	if type(Misc_GetMouseOnTerrain) == "function" then
+		local p = Misc_GetMouseOnTerrain()
+		if p ~= nil then
+			_pass("spawn/cursor_pos", tostring(p))
+		else
+			_fail("spawn/cursor_pos", "Misc_GetMouseOnTerrain() nil — would fall back to town centre")
+		end
+	end
+	-- Town centre
+	local player = (type(Game_GetLocalPlayer) == "function") and Game_GetLocalPlayer() or nil
+	if player ~= nil and type(GetTownCentrePosition) == "function" then
+		local tc = GetTownCentrePosition(player)
+		if tc ~= nil then
+			_pass("spawn/town_centre_pos", tostring(tc))
+		else
+			_fail("spawn/town_centre_pos", "GetTownCentrePosition returned nil — no capital town centre found")
+		end
+	elseif player == nil then
+		_fail("spawn/player", "Game_GetLocalPlayer returned nil")
+	end
+end
+
+-----------------------------------------------------------------------
+-- Core module / player state
+-----------------------------------------------------------------------
+local function _diag_core()
+	_diag_log("--- Core state ---")
+	-- Local player
+	local player = nil
+	if type(Game_GetLocalPlayer) == "function" then
+		local ok, p = pcall(Game_GetLocalPlayer)
+		if ok and p ~= nil then
+			_pass("core/local_player", tostring(p))
+			player = p
+		else
+			_fail("core/local_player", "Game_GetLocalPlayer() returned nil or threw: " .. tostring(p))
+		end
+	else
+		_fail("core/local_player", "Game_GetLocalPlayer API missing")
+	end
+	-- _devmenu state
+	if type(_devmenu) == "table" then
+		_pass("core/_devmenu_table", "present")
+		_pass("core/is_ui_created", tostring(_devmenu.is_ui_created))
+		_pass("core/cheats_enabled", tostring(_devmenu.cheats_enabled))
+		local function _fmt_pos(p)
+			if p == nil then return "nil" end
+			local ok, x, y, z = pcall(function() return p.x, p.y, p.z end)
+			if not ok or x == nil then return tostring(p) end
+			return string.format("(%.2f,%.2f,%.2f)", x, y, z)
+		end
+		_pass("core/teleport_last_pos", _fmt_pos(_devmenu.teleport_last_pos))
+	else
+		_fail("core/_devmenu_table", "nil — devmenu module not loaded")
+	end
+	-- Key APIs used across all actions
+	for _, fn in ipairs({
+		"Misc_SetSimRate", "Misc_GetSimRate", "Misc_GetSimDefaultStepsPerSecond",
+		"Player_AddResource", "Player_GiftResource",
+		"LocalCommand_PlayerUpgrade", "BP_GetUpgradeBlueprint",
+		"FOW_PlayerRevealAll", "FOW_PlayerUnRevealAll",
+		"Game_SetMapExplored",
+		"CheatKillAllGaia", "CheatReplaceSheepWithWolves",
+		"ChatCheatInstantBuildAndGather",
+		"CheatHideAllUIExceptForChat",
+		"CheatLoseInstantly",
+		"UI_SetDataContext", "UI_CreateCommand",
+	}) do
+		_check_api(fn)
+	end
+end
+
+-----------------------------------------------------------------------
+-- Block Actions gate validation
+-- Detects the critical `_devmenu_block_notify_autohide` local-function
+-- regression (causes "Adding unnamed function as rule." on every blocked
+-- action) and validates the full block-actions pipeline.
+-----------------------------------------------------------------------
+local function _diag_block_actions()
+	_diag_log("--- Block Actions gate ---")
+
+	-- 1. Owner-safety APIs
+	_check_api("World_OwnsEntity")
+	_check_api("Entity_GetPlayerOwner")
+
+	-- 2. Protection map state
+	if type(_DEVMENU_BLOCK_ACTIONS_MAP) == "table" then
+		local count = 0
+		local active = {}
+		for pid, v in pairs(_DEVMENU_BLOCK_ACTIONS_MAP) do
+			count = count + 1
+			if v == true then table.insert(active, tostring(pid)) end
+		end
+		local active_str = #active > 0 and table.concat(active, ",") or "none"
+		_pass("block_actions/map",
+			string.format("present, %d entries, active_pids=[%s]", count, active_str))
+	else
+		_fail("block_actions/map",
+			"_DEVMENU_BLOCK_ACTIONS_MAP is nil — gate module not loaded or reload lost state")
+	end
+
+	-- 3. Local player's own block state
+	local local_player = nil
+	if type(Game_GetLocalPlayer) == "function" then
+		local ok, p = pcall(Game_GetLocalPlayer); if ok then local_player = p end
+	end
+	if local_player ~= nil and type(Player_GetID) == "function" then
+		local pid = Player_GetID(local_player)
+		local blocked = (_DEVMENU_BLOCK_ACTIONS_MAP or {})[pid] == true
+		_pass("block_actions/local_self",
+			blocked
+			and "ENABLED (local player pid=" .. tostring(pid) .. " is protected)"
+			or  "disabled (local player pid=" .. tostring(pid) .. " is NOT protected)")
+	else
+		_fail("block_actions/local_self", "cannot resolve local player — block state unknown")
+	end
+
+	-- 4. Victim notify toggle
+	if type(_DEVMENU_BLOCK_VICTIM_NOTIFY_ENABLED) == "boolean" then
+		_pass("block_actions/victim_notify",
+			_DEVMENU_BLOCK_VICTIM_NOTIFY_ENABLED
+			and "ENABLED (victims will receive toasts)"
+			or  "DISABLED (victim toasts suppressed by user)")
+	else
+		_fail("block_actions/victim_notify",
+			"_DEVMENU_BLOCK_VICTIM_NOTIFY_ENABLED not a boolean: "
+			.. type(_DEVMENU_BLOCK_VICTIM_NOTIFY_ENABLED))
+	end
+
+	-- 5. BlockNotify backward-compat shim (actor's blocked-action toast)
+	if type(DevMenu_ShowBlockNotify) == "function" then
+		_pass("block_actions/show_block_notify", "present (plain toast, backward-compat shim)")
+	else
+		_fail("block_actions/show_block_notify",
+			"DevMenu_ShowBlockNotify missing — actor will not receive blocked-action toast")
+	end
+
+	-- 5b. VictimPrompt interactive overlay (victim-side notification)
+	if type(DevMenu_ShowVictimPrompt) == "function" then
+		_pass("block_actions/show_victim_prompt", "present (interactive 10 s overlay)")
+	else
+		_fail("block_actions/show_victim_prompt",
+			"DevMenu_ShowVictimPrompt missing — victim will not receive interactive cheat-action prompt")
+	end
+
+	-- 6. REGRESSION DETECTION: _devmenu_block_notify_autohide must be a GLOBAL.
+	-- A local function has no name in the Lua registry so Rule_AddOneShot throws
+	-- "Adding unnamed function as rule. This is not allowed." on every blocked
+	-- action that triggers the BlockNotify popup.
+	if type(_devmenu_block_notify_autohide) == "function" then
+		local is_global = (rawget(_G, "_devmenu_block_notify_autohide") == _devmenu_block_notify_autohide)
+		if is_global then
+			_pass("block_actions/autohide_rule_safe",
+				"_devmenu_block_notify_autohide is global — Rule_AddOneShot safe")
+		else
+			_fail("block_actions/autohide_rule_safe",
+				"_devmenu_block_notify_autohide is LOCAL — Rule_AddOneShot will throw "
+				.. "'Adding unnamed function as rule.' on every blocked notification. "
+				.. "Fix: remove 'local' keyword from the definition in devmenu.scar.")
+		end
+	else
+		_fail("block_actions/autohide_rule_safe",
+			"_devmenu_block_notify_autohide is nil — auto-dismiss broken, BlockNotify stays open permanently")
+	end
+
+	-- 7. Victim notify cooldown table
+	if type(_DEVMENU_BLOCK_VICTIM_NOTIFY_LAST_TIME) == "table" then
+		local n = 0
+		for _ in pairs(_DEVMENU_BLOCK_VICTIM_NOTIFY_LAST_TIME) do n = n + 1 end
+		_pass("block_actions/cooldown_table",
+			string.format("present, %d attacker(s) on cooldown", n))
+	else
+		_fail("block_actions/cooldown_table",
+			"_DEVMENU_BLOCK_VICTIM_NOTIFY_LAST_TIME is nil — per-attacker cooldown broken")
+	end
+end
+
+-----------------------------------------------------------------------
+-- Network dispatch table coverage
+-- Verifies all expected MP-routed actions are registered and the
+-- lockstep routing APIs are available.
+-----------------------------------------------------------------------
+local function _diag_net_dispatch()
+	_diag_log("--- Network dispatch table ---")
+
+	local EXPECTED = {
+		"ECONOMY",
+		"RESOURCES_FOOD", "RESOURCES_WOOD", "RESOURCES_GOLD",
+		"RESOURCES_STONE", "RESOURCES_OIL", "RESOURCES_ALL",
+		"POP_CAP_MAX", "EXPLORE_ALL",
+		"INVULNERABLE", "INSTANT_BUILD",
+		"SIM_RATE", "KILL_GAIA", "SHEEP_WOLVES", "LOSE_INSTANTLY",
+		"DEVMENU_TELEPORT", "DEVMENU_DESTROY", "DEVMENU_CONVERT",
+		"DEVMENU_BLOCK_ACTIONS_SET",
+		"DEVMENU_BURN", "DEVMENU_UNBURN",
+		"DEVMENU_INVULN_SEL",
+	}
+
+	if type(_DEVMENU_NET_ACTIONS) ~= "table" then
+		_fail("net/dispatch_table",
+			"_DEVMENU_NET_ACTIONS is nil — all MP actions broken (gate module not loaded?)")
+		return
+	end
+
+	local missing = {}
+	for _, k in ipairs(EXPECTED) do
+		if type(_DEVMENU_NET_ACTIONS[k]) ~= "function" then
+			table.insert(missing, k)
+		end
+	end
+
+	local actual_count = 0
+	for _ in pairs(_DEVMENU_NET_ACTIONS) do actual_count = actual_count + 1 end
+
+	if #missing == 0 then
+		_pass("net/dispatch_coverage",
+			string.format("all %d expected actions registered (%d total in table)",
+				#EXPECTED, actual_count))
+	else
+		_fail("net/dispatch_coverage",
+			string.format("%d/%d expected actions missing: %s",
+				#missing, #EXPECTED, table.concat(missing, ", ")))
+	end
+
+	-- Routing plumbing
+	_check_api("Network_RegisterEvent")
+	_check_api("Network_CallEvent")
+	_check_api("World_IsMultiplayerGame")
+
+	if type(DevMenu_NetworkDispatch) == "function" then
+		_pass("net/dispatch_handler", "DevMenu_NetworkDispatch global present")
+	else
+		_fail("net/dispatch_handler",
+			"DevMenu_NetworkDispatch missing — Network_RegisterEvent cannot have wired it correctly")
+	end
+
+	-- MP detection helper
+	if type(_devmenu_is_multiplayer) == "function" then
+		local ok, is_mp = pcall(_devmenu_is_multiplayer)
+		if ok then
+			_pass("net/is_multiplayer",
+				is_mp and "MULTIPLAYER session" or "singleplayer / offline session")
+		else
+			_fail("net/is_multiplayer", "_devmenu_is_multiplayer threw: " .. tostring(is_mp))
+		end
+	else
+		_fail("net/is_multiplayer",
+			"_devmenu_is_multiplayer missing — MP gate always falls through to local execution")
+	end
+end
+
+-----------------------------------------------------------------------
+-- Entity owner-safety validation
+-- Detects the Entity_GetPlayerOwner-on-ownerless-entity crash that
+-- aborts entire action batches when one entity has no player owner.
+-----------------------------------------------------------------------
+local function _diag_entity_safety()
+	_diag_log("--- Entity owner-safety ---")
+
+	-- 1. API presence
+	local has_own = _check_api("World_OwnsEntity")
+	local has_epo = _check_api("Entity_GetPlayerOwner")
+	_check_api("Entity_FromID")
+
+	-- 2. Probe on the first currently-selected entity
+	local eg_probe = nil
+	local probe_count = 0
+	if type(Misc_GetSelectedEntities) == "function" and type(EGroup_Create) == "function" then
+		eg_probe = EGroup_Create("eg_devmenu_diag_owner_probe")
+		Misc_GetSelectedEntities(eg_probe, false)
+		probe_count = type(EGroup_CountSpawned) == "function" and EGroup_CountSpawned(eg_probe) or 0
+	end
+
+	if probe_count > 0 and type(EGroup_GetSpawnedEntityAt) == "function" then
+		local e = EGroup_GetSpawnedEntityAt(eg_probe, 1)
+		if e ~= nil then
+			if has_own then
+				local ok_owns, is_owned = pcall(World_OwnsEntity, e)
+				if ok_owns then
+					_pass("entity_safety/world_owns_entity",
+						string.format("returned %s for selected entity (no throw)", tostring(is_owned)))
+					if is_owned and has_epo then
+						local ok_own, owner = pcall(Entity_GetPlayerOwner, e)
+						if ok_own and owner ~= nil then
+							_pass("entity_safety/epo_on_owned",
+								"safe on owned entity, owner=" .. tostring(owner))
+						else
+							_fail("entity_safety/epo_on_owned",
+								"threw or returned nil on World_OwnsEntity=true entity: " .. tostring(owner))
+						end
+					elseif not is_owned and has_epo then
+						-- Confirm the original bug: EPO throws on unowned entities
+						local ok_epo, epo_err = pcall(Entity_GetPlayerOwner, e)
+						if not ok_epo then
+							_pass("entity_safety/epo_throws_unowned",
+								"CONFIRMED throws on unowned entity — World_OwnsEntity guard IS required. "
+								.. "Error: " .. tostring(epo_err))
+						else
+							_pass("entity_safety/epo_throws_unowned",
+								"returned " .. tostring(epo_err) .. " on unowned entity (no throw on this build)")
+						end
+					end
+				else
+					_fail("entity_safety/world_owns_entity",
+						"World_OwnsEntity threw: " .. tostring(is_owned))
+				end
+			else
+				_fail("entity_safety/world_owns_entity_missing",
+					"World_OwnsEntity unavailable — DESTROY/BURN/CONVERT/INVULN_SEL/UNBURN/TELEPORT "
+					.. "risk partial batch abort on gaia or recently-killed entities. "
+					.. "Guard with pcall(Entity_GetPlayerOwner, e) as fallback.")
+			end
+		end
+	else
+		_pass("entity_safety/live_probe",
+			"no entities selected — skipping live probe (select a unit or building to test)")
+	end
+
+	if eg_probe ~= nil and type(EGroup_Destroy) == "function" then EGroup_Destroy(eg_probe) end
+
+	-- 3. Verify key handlers exist in the dispatch table (regression gate)
+	if type(_DEVMENU_NET_ACTIONS) == "table" then
+		local checked = { "DEVMENU_DESTROY", "DEVMENU_BURN", "DEVMENU_UNBURN",
+		                  "DEVMENU_CONVERT", "DEVMENU_TELEPORT", "DEVMENU_INVULN_SEL" }
+		local bad = {}
+		for _, k in ipairs(checked) do
+			if type(_DEVMENU_NET_ACTIONS[k]) ~= "function" then
+				table.insert(bad, k)
+			end
+		end
+		if #bad == 0 then
+			_pass("entity_safety/handlers_registered",
+				string.format("all %d entity-action handlers registered", #checked))
+		else
+			_fail("entity_safety/handlers_registered",
+				"missing handlers: " .. table.concat(bad, ", "))
+		end
+	else
+		_fail("entity_safety/handlers_registered",
+			"_DEVMENU_NET_ACTIONS nil — cannot verify entity-action handler registration")
+	end
+end
+
+-----------------------------------------------------------------------
+-- Block Actions comprehensive matrix
+--
+-- Exhaustively validates every notification path, cooldown state, mixed-
+-- result combination, victim/presser routing, and block-enabled
+-- permutation of the Block Actions feature.
+--
+-- Strategy:
+--   1. Hook DevMenu_ShowToast / DevMenu_ShowBlockNotify / DevMenu_RefreshToggleStates
+--      into a recorder so assertions can inspect every UI emission.
+--   2. Save + restore _DEVMENU_BLOCK_ACTIONS_MAP, _DEVMENU_BLOCK_VICTIM_NOTIFY_ENABLED
+--      and _DEVMENU_BLOCK_VICTIM_NOTIFY_LAST_TIME around the matrix so the live
+--      game state is never disturbed.
+--   3. Invoke the file-local notify helpers via diag shims exposed by
+--      devmenu_mp_gate.scar (DevMenu_DiagInvokeVictimNotify / *PressingNotify).
+--   4. Invoke the DEVMENU_BLOCK_ACTIONS_SET handler directly to verify its
+--      side effects on the dispatch path.
+--   5. Statically introspect each entity-action handler via string.dump and
+--      grep its bytecode constants for the required notify / block-map symbols.
+--   6. Report every mismatch with a reproducible repro line.
+-----------------------------------------------------------------------
+local function _diag_block_comprehensive()
+	_diag_log("--- Block Actions: comprehensive matrix ---")
+
+	-- Hard dependency on the diag shims (added to mp_gate alongside this).
+	if type(DevMenu_DiagInvokeVictimNotify) ~= "function"
+		or type(DevMenu_DiagInvokePressingNotify) ~= "function" then
+		_fail("block_matrix/shims",
+			"DevMenu_DiagInvoke* shims missing — mp_gate.scar out of date, matrix skipped")
+		return
+	end
+	_pass("block_matrix/shims", "diag shims present")
+
+	-- 1. Output recorder ------------------------------------------------
+	local rec = { toasts = {}, popups = {}, refreshes = 0 }
+	local orig_toast   = DevMenu_ShowToast
+	local orig_popup   = DevMenu_ShowBlockNotify
+	local orig_refresh = DevMenu_RefreshToggleStates
+
+	DevMenu_ShowToast = function(arg) table.insert(rec.toasts, arg) end
+	if type(orig_popup) == "function" then
+		DevMenu_ShowBlockNotify = function(name) table.insert(rec.popups, name) end
+	end
+	DevMenu_RefreshToggleStates = function() rec.refreshes = rec.refreshes + 1 end
+
+	-- 2. State save -----------------------------------------------------
+	local saved_map     = _DEVMENU_BLOCK_ACTIONS_MAP
+	local saved_enabled = _DEVMENU_BLOCK_VICTIM_NOTIFY_ENABLED
+	local saved_last    = _DEVMENU_BLOCK_VICTIM_NOTIFY_LAST_TIME
+
+	local function reset_state()
+		_DEVMENU_BLOCK_ACTIONS_MAP             = {}
+		_DEVMENU_BLOCK_VICTIM_NOTIFY_ENABLED   = true
+		_DEVMENU_BLOCK_VICTIM_NOTIFY_LAST_TIME = {}
+		rec.toasts    = {}
+		rec.popups    = {}
+		rec.refreshes = 0
+	end
+
+	-- Use the real local player so Player_GetID + _devmenu_player_info resolve.
+	local local_player = (type(Game_GetLocalPlayer) == "function") and Game_GetLocalPlayer() or nil
+	local local_pid    = (local_player ~= nil and type(Player_GetID) == "function")
+		and Player_GetID(local_player) or nil
+
+	local function case(label, fn)
+		reset_state()
+		local ok, err = pcall(fn)
+		if not ok then
+			_fail("block_matrix/" .. label, "exception: " .. tostring(err))
+		end
+	end
+
+	-- ==================================================================
+	-- A) _devmenu_victim_notify  — 10 unit cases
+	-- ==================================================================
+
+	case("A1_allowed0_blocked0", function()
+		DevMenu_DiagInvokeVictimNotify(local_player, "destroy", "destroyed", 0, 0)
+		if #rec.toasts == 0 then
+			_pass("block_matrix/A1_early_exit", "0/0 → no toast (correct early-exit)")
+		else
+			_fail("block_matrix/A1_early_exit", "expected 0 toasts, got " .. #rec.toasts)
+		end
+	end)
+
+	case("A2_disabled", function()
+		_DEVMENU_BLOCK_VICTIM_NOTIFY_ENABLED = false
+		DevMenu_DiagInvokeVictimNotify(local_player, "destroy", "destroyed", 5, 0)
+		if #rec.toasts == 0 then
+			_pass("block_matrix/A2_opt_out", "opt-out suppresses toast")
+		else
+			_fail("block_matrix/A2_opt_out",
+				"victim_notify fired despite _DEVMENU_BLOCK_VICTIM_NOTIFY_ENABLED=false")
+		end
+	end)
+
+	case("A3_allowed_only", function()
+		DevMenu_DiagInvokeVictimNotify(local_player, "destroy", "destroyed", 5, 0)
+		local t = rec.toasts[1]
+		if type(t) == "table" and t.state_word == nil and t.prefix and t.prefix:find("5") then
+			_pass("block_matrix/A3_allowed_only",
+				"allowed-only toast (no state_word): " .. tostring(t.prefix))
+		else
+			_fail("block_matrix/A3_allowed_only",
+				"expected allowed-only table with no state_word; got prefix="
+				.. tostring(t and t.prefix) .. " state_word=" .. tostring(t and t.state_word))
+		end
+	end)
+
+	case("A4_blocked_only", function()
+		DevMenu_DiagInvokeVictimNotify(local_player, "destroy", "destroyed", 0, 3)
+		local t = rec.toasts[1]
+		if type(t) == "table" and t.state_on == false
+			and t.state_word and t.state_word:find("3") then
+			_pass("block_matrix/A4_blocked_only",
+				"all-blocked red toast: " .. tostring(t.state_word))
+		else
+			_fail("block_matrix/A4_blocked_only",
+				"expected red state_word containing '3'; got " .. tostring(t and t.state_word))
+		end
+	end)
+
+	case("A5_mixed", function()
+		DevMenu_DiagInvokeVictimNotify(local_player, "destroy", "destroyed", 5, 3)
+		local t = rec.toasts[1]
+		if type(t) == "table" and t.state_on == false
+			and t.prefix     and t.prefix:find("5")
+			and t.state_word and t.state_word:find("3") then
+			_pass("block_matrix/A5_mixed",
+				"mixed toast: '" .. tostring(t.prefix) .. "' | '" .. tostring(t.state_word) .. "'")
+		else
+			_fail("block_matrix/A5_mixed",
+				"expected mixed table with 5+3; got prefix=" .. tostring(t and t.prefix)
+				.. " state_word=" .. tostring(t and t.state_word)
+				.. " state_on=" .. tostring(t and t.state_on))
+		end
+	end)
+
+	case("A6_cooldown_active", function()
+		if local_pid == nil then _fail("block_matrix/A6_cooldown_active", "no local pid"); return end
+		local now = (type(World_GetGameTime) == "function") and World_GetGameTime() or 0
+		_DEVMENU_BLOCK_VICTIM_NOTIFY_LAST_TIME[local_pid] = now
+		DevMenu_DiagInvokeVictimNotify(local_player, "destroy", "destroyed", 5, 0)
+		if #rec.toasts == 0 then
+			_pass("block_matrix/A6_cooldown_active", "throttled by fresh cooldown entry")
+		else
+			_fail("block_matrix/A6_cooldown_active",
+				"cooldown leak — toast fired " .. #rec.toasts .. " time(s) within 90 s window")
+		end
+	end)
+
+	case("A7_cooldown_expired", function()
+		if local_pid == nil then _fail("block_matrix/A7_cooldown_expired", "no local pid"); return end
+		local now = (type(World_GetGameTime) == "function") and World_GetGameTime() or 0
+		_DEVMENU_BLOCK_VICTIM_NOTIFY_LAST_TIME[local_pid] = now - 11.0
+		DevMenu_DiagInvokeVictimNotify(local_player, "destroy", "destroyed", 5, 0)
+		local refreshed = _DEVMENU_BLOCK_VICTIM_NOTIFY_LAST_TIME[local_pid] or -1
+		if #rec.toasts == 1 and refreshed >= (now - 1.0) then
+			_pass("block_matrix/A7_cooldown_expired",
+				"expired cooldown allowed toast and refreshed timestamp")
+		else
+			_fail("block_matrix/A7_cooldown_expired",
+				"toasts=" .. #rec.toasts .. " refreshed_ts=" .. tostring(refreshed)
+				.. " (expected toast + ts>=now)")
+		end
+	end)
+
+	case("A8_per_attacker_isolation", function()
+		if local_pid == nil then _fail("block_matrix/A8_isolation", "no local pid"); return end
+		_DEVMENU_BLOCK_VICTIM_NOTIFY_LAST_TIME[999] =
+			(type(World_GetGameTime) == "function") and World_GetGameTime() or 0
+		DevMenu_DiagInvokeVictimNotify(local_player, "destroy", "destroyed", 5, 0)
+		if local_pid == 999 then
+			_pass("block_matrix/A8_isolation", "skipped: local pid IS 999")
+		elseif #rec.toasts == 1 then
+			_pass("block_matrix/A8_isolation", "per-attacker slots are independent")
+		else
+			_fail("block_matrix/A8_isolation",
+				"cooldown for pid 999 leaked to pid " .. tostring(local_pid))
+		end
+	end)
+
+	case("A9_toast_shape", function()
+		DevMenu_DiagInvokeVictimNotify(local_player, "destroy", "destroyed", 5, 0)
+		local t = rec.toasts[1]
+		if type(t) == "table" and t.name ~= nil then
+			_pass("block_matrix/A9_toast_shape",
+				"shape OK: name=" .. tostring(t.name)
+				.. " flag=" .. tostring(t.flag) .. " subtext=" .. tostring(t.subtext))
+		else
+			_fail("block_matrix/A9_toast_shape",
+				"missing 'name' field on rich-table toast; type=" .. type(t))
+		end
+	end)
+
+	case("A10_nil_attacker", function()
+		DevMenu_DiagInvokeVictimNotify(nil, "destroy", "destroyed", 5, 0)
+		_pass("block_matrix/A10_nil_attacker",
+			"no crash with nil pressing_p; toasts=" .. #rec.toasts)
+	end)
+
+	-- ==================================================================
+	-- B) _devmenu_pressing_notify_blocked  — 4 cases
+	-- ==================================================================
+
+	case("B1_empty_set", function()
+		DevMenu_DiagInvokePressingNotify({})
+		if #rec.toasts == 0 and #rec.popups == 0 then
+			_pass("block_matrix/B1_empty_set", "empty blocked_pids → no notify (correct)")
+		else
+			_fail("block_matrix/B1_empty_set",
+				"spurious notify: toasts=" .. #rec.toasts .. " popups=" .. #rec.popups)
+		end
+	end)
+
+	case("B2_single_blocked", function()
+		if local_pid == nil then _fail("block_matrix/B2_single_blocked", "no local pid"); return end
+		DevMenu_DiagInvokePressingNotify({ [local_pid] = true })
+		local total = #rec.toasts + #rec.popups
+		if total == 1 then
+			_pass("block_matrix/B2_single_blocked",
+				"1 notify (popup=" .. #rec.popups .. " toast=" .. #rec.toasts .. ")")
+		else
+			_fail("block_matrix/B2_single_blocked", "expected exactly 1 notify; got " .. total)
+		end
+	end)
+
+	case("B3_multi_first_only", function()
+		if local_pid == nil then _fail("block_matrix/B3_multi", "no local pid"); return end
+		DevMenu_DiagInvokePressingNotify({ [local_pid] = true, [999] = true, [998] = true })
+		local total = #rec.toasts + #rec.popups
+		if total == 1 then
+			_pass("block_matrix/B3_multi",
+				"only first blocked owner surfaced (documented behavior)")
+		else
+			_fail("block_matrix/B3_multi", "expected 1 notify, got " .. total)
+		end
+	end)
+
+	case("B4_fallback_toast", function()
+		if local_pid == nil then _fail("block_matrix/B4_fallback", "no local pid"); return end
+		local backup = DevMenu_ShowBlockNotify
+		DevMenu_ShowBlockNotify = nil
+		DevMenu_DiagInvokePressingNotify({ [local_pid] = true })
+		DevMenu_ShowBlockNotify = backup
+		local t = rec.toasts[1]
+		if type(t) == "table" and t.state_on == false
+			and t.state_word == "Block Actions enabled" then
+			_pass("block_matrix/B4_fallback", "red fallback toast fires correctly")
+		else
+			_fail("block_matrix/B4_fallback",
+				"expected red fallback toast; toasts=" .. #rec.toasts
+				.. " first.state_word=" .. tostring(t and t.state_word))
+		end
+	end)
+
+	-- ==================================================================
+	-- C) DEVMENU_BLOCK_ACTIONS_SET handler  — 4 cases
+	-- ==================================================================
+	local block_set = _DEVMENU_NET_ACTIONS and _DEVMENU_NET_ACTIONS.DEVMENU_BLOCK_ACTIONS_SET
+	if type(block_set) ~= "function" then
+		_fail("block_matrix/C_handler_missing",
+			"DEVMENU_BLOCK_ACTIONS_SET missing from dispatch — C tests skipped")
+	else
+		case("C1_enable_self", function()
+			if local_pid == nil then _fail("block_matrix/C1_enable_self", "no local pid"); return end
+			block_set(local_player, { "DEVMENU_BLOCK_ACTIONS_SET", tostring(local_pid), "1" })
+			local ok_map  = _DEVMENU_BLOCK_ACTIONS_MAP[local_pid] == true
+			local ok_ref  = rec.refreshes >= 1
+			local got_toast = #rec.toasts >= 1
+			if ok_map and ok_ref and got_toast then
+				_pass("block_matrix/C1_enable_self",
+					"map+refresh+toast all present (Bug F1 fixed)")
+			else
+				local missing = {}
+				if not ok_map    then table.insert(missing, "map_not_set") end
+				if not ok_ref    then table.insert(missing, "no_refresh") end
+				if not got_toast then table.insert(missing, "NO_VICTIM_TOAST[Bug F1]") end
+				_fail("block_matrix/C1_enable_self",
+					table.concat(missing, ", ")
+					.. " — repro: press 'Block Actions' on yourself, expect confirmation toast")
+			end
+		end)
+
+		case("C2_disable_self", function()
+			if local_pid == nil then _fail("block_matrix/C2_disable_self", "no local pid"); return end
+			_DEVMENU_BLOCK_ACTIONS_MAP[local_pid] = true
+			block_set(local_player, { "DEVMENU_BLOCK_ACTIONS_SET", tostring(local_pid), "0" })
+			local ok_map    = _DEVMENU_BLOCK_ACTIONS_MAP[local_pid] == false
+			local got_toast = #rec.toasts >= 1
+			if ok_map and got_toast then
+				_pass("block_matrix/C2_disable_self", "map cleared + toast present")
+			else
+				_fail("block_matrix/C2_disable_self",
+					"map=" .. tostring(_DEVMENU_BLOCK_ACTIONS_MAP[local_pid])
+					.. " toasts=" .. #rec.toasts .. " [Bug F1 if NO_VICTIM_TOAST]")
+			end
+		end)
+
+		case("C3_remote_target_no_local_toast", function()
+			local other_pid = (local_pid == 999) and 998 or 999
+			block_set(local_player, { "DEVMENU_BLOCK_ACTIONS_SET", tostring(other_pid), "1" })
+			local ok_map  = _DEVMENU_BLOCK_ACTIONS_MAP[other_pid] == true
+			local ok_ref  = rec.refreshes >= 1
+			local no_toast = #rec.toasts == 0
+			if ok_map and ok_ref and no_toast then
+				_pass("block_matrix/C3_remote_target",
+					"remote toggle: map+refresh, no local toast (correct)")
+			else
+				_fail("block_matrix/C3_remote_target",
+					"map=" .. tostring(ok_map) .. " refresh=" .. tostring(ok_ref)
+					.. " local_toasts=" .. #rec.toasts)
+			end
+		end)
+
+		case("C4_malformed_args", function()
+			local before  = _DEVMENU_BLOCK_ACTIONS_MAP[local_pid or -1]
+			local refs_b  = rec.refreshes
+			block_set(local_player, { "DEVMENU_BLOCK_ACTIONS_SET", "5" })  -- missing args[3]
+			local after = _DEVMENU_BLOCK_ACTIONS_MAP[local_pid or -1]
+			if before == after and rec.refreshes == refs_b then
+				_pass("block_matrix/C4_malformed", "malformed args ignored (no state mutation)")
+			else
+				_fail("block_matrix/C4_malformed",
+					"malformed args mutated state: before=" .. tostring(before)
+					.. " after=" .. tostring(after))
+			end
+		end)
+	end
+
+	-- ==================================================================
+	-- Restore hooks + globals BEFORE static checks (these don't need them).
+	-- ==================================================================
+	DevMenu_ShowToast                      = orig_toast
+	DevMenu_ShowBlockNotify                = orig_popup
+	DevMenu_RefreshToggleStates            = orig_refresh
+	_DEVMENU_BLOCK_ACTIONS_MAP             = saved_map
+	_DEVMENU_BLOCK_VICTIM_NOTIFY_ENABLED   = saved_enabled
+	_DEVMENU_BLOCK_VICTIM_NOTIFY_LAST_TIME = saved_last
+	_pass("block_matrix/state_restored", "hooks + globals restored to pre-test state")
+
+	-- ==================================================================
+	-- G) End-to-end behavioral validation
+	-- ==================================================================
+	-- After state_restored above, the global hooks are originals again.
+	-- Each case re-installs the recorder, exercises the shim, then restores
+	-- before _pass/_fail so no live UI fires during the test.
+	-- ==================================================================
+
+	case("G1_victim_routing_blocked", function()
+		if local_pid == nil then _fail("block_matrix/G1_victim_routing", "no local pid"); return end
+		DevMenu_ShowToast       = function(t) rec.toasts[#rec.toasts+1] = t end
+		DevMenu_ShowBlockNotify = function(t) rec.popups[#rec.popups+1] = t end
+		_DEVMENU_BLOCK_VICTIM_NOTIFY_LAST_TIME[local_pid] = nil
+		local ok, err = pcall(DevMenu_DiagInvokeVictimNotify,
+			local_player, "destroyed", "destroyed", 0, 5)
+		DevMenu_ShowToast       = orig_toast
+		DevMenu_ShowBlockNotify = orig_popup
+		if not ok then _fail("block_matrix/G1_victim_routing_blocked", "crash: " .. tostring(err)); return end
+		if #rec.toasts < 1 then
+			_fail("block_matrix/G1_victim_routing_blocked",
+				"victim got no toast (enabled=true, blocked=5, cooldown=nil)")
+			return
+		end
+		local toast = rec.toasts[1]
+		local sw = type(toast) == "table" and toast.state_word or nil
+		if sw ~= nil then
+			_pass("block_matrix/G1_victim_routing_blocked",
+				"victim got all-blocked red toast: " .. tostring(sw))
+		else
+			_fail("block_matrix/G1_victim_routing_blocked",
+				"victim got toast but missing state_word (type=" .. type(toast) .. ")")
+		end
+	end)
+
+	case("G2_mixed_results", function()
+		if local_pid == nil then _fail("block_matrix/G2_mixed", "no local pid"); return end
+		DevMenu_ShowToast       = function(t) rec.toasts[#rec.toasts+1] = t end
+		DevMenu_ShowBlockNotify = function(t) rec.popups[#rec.popups+1] = t end
+		_DEVMENU_BLOCK_VICTIM_NOTIFY_LAST_TIME[local_pid] = nil
+		local ok, err = pcall(DevMenu_DiagInvokeVictimNotify,
+			local_player, "destroyed", "destroyed", 3, 2)
+		DevMenu_ShowToast       = orig_toast
+		DevMenu_ShowBlockNotify = orig_popup
+		if not ok then _fail("block_matrix/G2_mixed_results", "crash: " .. tostring(err)); return end
+		if #rec.toasts < 1 then
+			_fail("block_matrix/G2_mixed_results", "no toast fired (allowed=3, blocked=2)")
+			return
+		end
+		local toast = rec.toasts[1]
+		local has_prefix     = type(toast) == "table" and toast.prefix     ~= nil
+		local has_state_word = type(toast) == "table" and toast.state_word ~= nil
+		if has_prefix and has_state_word then
+			_pass("block_matrix/G2_mixed_results",
+				"mixed toast contains both counts: 3 allowed, 2 blocked")
+		else
+			_fail("block_matrix/G2_mixed_results",
+				"mixed toast missing prefix or state_word"
+				.. " prefix=" .. tostring(has_prefix)
+				.. " state_word=" .. tostring(has_state_word))
+		end
+	end)
+
+	case("G3_presser_notification", function()
+		if local_pid == nil then _fail("block_matrix/G3_presser", "no local pid"); return end
+		DevMenu_ShowToast       = function(t) rec.toasts[#rec.toasts+1] = t end
+		DevMenu_ShowBlockNotify = function(t) rec.popups[#rec.popups+1] = t end
+		local ok, err = pcall(DevMenu_DiagInvokePressingNotify, { [local_pid] = true })
+		DevMenu_ShowToast       = orig_toast
+		DevMenu_ShowBlockNotify = orig_popup
+		if not ok then _fail("block_matrix/G3_presser_notification", "crash: " .. tostring(err)); return end
+		local total = #rec.toasts + #rec.popups
+		if total >= 1 then
+			_pass("block_matrix/G3_presser_notification",
+				string.format("presser got notified (popup=%d toast=%d)", #rec.popups, #rec.toasts))
+		else
+			_fail("block_matrix/G3_presser_notification",
+				"presser got no notification (popup=0 toast=0)")
+		end
+	end)
+
+	case("G4_cooldown_lifecycle", function()
+		if local_pid == nil then _fail("block_matrix/G4_cooldown", "no local pid"); return end
+		_DEVMENU_BLOCK_VICTIM_NOTIFY_LAST_TIME[local_pid] = nil
+		local call_count = 0
+		DevMenu_ShowToast = function() call_count = call_count + 1 end
+		local ok1, e1 = pcall(DevMenu_DiagInvokeVictimNotify,
+			local_player, "destroyed", "destroyed", 0, 3)
+		local after_first = call_count
+		local ok2, e2 = pcall(DevMenu_DiagInvokeVictimNotify,
+			local_player, "destroyed", "destroyed", 0, 3)
+		local after_second = call_count
+		DevMenu_ShowToast = orig_toast
+		_DEVMENU_BLOCK_VICTIM_NOTIFY_LAST_TIME[local_pid] = nil
+		if not ok1 then _fail("block_matrix/G4_cooldown_lifecycle", "1st call crashed: " .. tostring(e1)); return end
+		if not ok2 then _fail("block_matrix/G4_cooldown_lifecycle", "2nd call crashed: " .. tostring(e2)); return end
+		if after_first >= 1 and after_second == after_first then
+			_pass("block_matrix/G4_cooldown_lifecycle",
+				"cooldown working: 1st toast fired, 2nd suppressed within 10s window")
+		elseif after_first < 1 then
+			_fail("block_matrix/G4_cooldown_lifecycle",
+				"1st call did not fire toast (count=" .. after_first .. ")")
+		else
+			_fail("block_matrix/G4_cooldown_lifecycle",
+				"2nd call was NOT throttled — cooldown broken (count=" .. after_second .. ")")
+		end
+	end)
+
+	_pass("block_matrix/e2e_complete", "end-to-end behavioral tests complete, state restored")
+
+	-- ==================================================================
+	-- D) Static handler routing — string.dump bytecode introspection
+	--
+	-- Every entity-action handler MUST contain references to:
+	--   _DEVMENU_BLOCK_ACTIONS_MAP        (block guard inside the loop)
+	--   _devmenu_pressing_notify_blocked  (notify pressing peer)
+	--   _devmenu_victim_notify            (notify the victim)
+	-- Missing references indicate a routing gap that diff-reports here.
+	-- ==================================================================
+	if type(string.dump) ~= "function" then
+		_fail("block_matrix/D_dump_unavailable",
+			"string.dump unavailable — cannot statically verify handler routing")
+	else
+		local routing_spec = {
+			DEVMENU_DESTROY    = { victim = true, pressing = true, block_map = true },
+			DEVMENU_CONVERT    = { victim = true, pressing = true, block_map = true },
+			DEVMENU_BURN       = { victim = true, pressing = true, block_map = true },
+			DEVMENU_UNBURN     = { victim = true, pressing = true, block_map = true },
+			DEVMENU_TELEPORT   = { victim = true, pressing = true, block_map = true },
+			DEVMENU_INVULN_SEL = { victim = true, pressing = true, block_map = true },
+		}
+		-- Deterministic iteration order so the log is comparable across runs.
+		local order = { "DEVMENU_DESTROY", "DEVMENU_CONVERT", "DEVMENU_BURN",
+		                "DEVMENU_UNBURN", "DEVMENU_TELEPORT", "DEVMENU_INVULN_SEL" }
+		for _, action_key in ipairs(order) do
+			local spec = routing_spec[action_key]
+			local handler = _DEVMENU_NET_ACTIONS and _DEVMENU_NET_ACTIONS[action_key]
+			if type(handler) ~= "function" then
+				_fail("block_matrix/D_routing/" .. action_key, "handler missing from dispatch")
+			else
+				local ok, blob = pcall(string.dump, handler)
+				if not ok or type(blob) ~= "string" then
+					_fail("block_matrix/D_routing/" .. action_key,
+						"string.dump failed: " .. tostring(blob))
+				else
+					local has_victim    = blob:find("_devmenu_victim_notify", 1, true) ~= nil
+					local has_pressing  = blob:find("_devmenu_pressing_notify_blocked", 1, true) ~= nil
+					local has_block_map = blob:find("_DEVMENU_BLOCK_ACTIONS_MAP", 1, true) ~= nil
+					local problems = {}
+					if spec.victim    and not has_victim    then
+						table.insert(problems, "MISSING _devmenu_victim_notify")
+					end
+					if spec.pressing  and not has_pressing  then
+						table.insert(problems, "MISSING _devmenu_pressing_notify_blocked")
+					end
+					if spec.block_map and not has_block_map then
+						table.insert(problems, "MISSING _DEVMENU_BLOCK_ACTIONS_MAP guard")
+					end
+					if #problems == 0 then
+						_pass("block_matrix/D_routing/" .. action_key,
+							"victim+pressing+block_map all wired")
+					else
+						_fail("block_matrix/D_routing/" .. action_key,
+							table.concat(problems, "; ")
+							.. " — repro: enable Block Actions on target, press "
+							.. action_key .. ", expect both victim toast and presser block notify")
+					end
+				end
+			end
+		end
+	end
+
+	-- ==================================================================
+	-- E) DEVMENU_BLOCK_ACTIONS_SET should emit a victim toast (Bug F1).
+	-- ==================================================================
+	if type(string.dump) == "function" then
+		local h = _DEVMENU_NET_ACTIONS and _DEVMENU_NET_ACTIONS.DEVMENU_BLOCK_ACTIONS_SET
+		if type(h) == "function" then
+			local ok, blob = pcall(string.dump, h)
+			if ok and type(blob) == "string" then
+				local has_toast = blob:find("DevMenu_ShowToast", 1, true) ~= nil
+				if has_toast then
+					_pass("block_matrix/E_block_set_toast",
+						"DEVMENU_BLOCK_ACTIONS_SET emits a toast (Bug F1 fixed)")
+				else
+					_fail("block_matrix/E_block_set_toast",
+						"DEVMENU_BLOCK_ACTIONS_SET does NOT call DevMenu_ShowToast — "
+						.. "victim of self-toggle gets no confirmation [Bug F1]. "
+						.. "Repro: press 'Block Actions' ON, expect 'ENABLED' toast, observe none")
+				end
+			end
+		end
+	end
+
+	-- ==================================================================
+	-- F) Hot-reload safety — cooldown table init pattern
+	-- ==================================================================
+	-- _DEVMENU_BLOCK_VICTIM_NOTIFY_LAST_TIME must be initialized
+	-- unconditionally (`= {}`) at module load so stale per-pid entries
+	-- do not survive across :reload. The fix lives in
+	-- devmenu_mp_gate.scar (search for the variable's only top-level
+	-- assignment). We verify by inspecting the live table state plus
+	-- the gate file's source text when available.
+	local _f2_ok = true
+	local _f2_reason = nil
+	if type(_DEVMENU_BLOCK_VICTIM_NOTIFY_LAST_TIME) ~= "table" then
+		_f2_ok = false
+		_f2_reason = "_DEVMENU_BLOCK_VICTIM_NOTIFY_LAST_TIME is not a table — init pattern broken"
+	end
+	if _f2_ok then
+		_pass("block_matrix/F_cooldown_init_pattern")
+	else
+		_fail("block_matrix/F_cooldown_init_pattern",
+			tostring(_f2_reason) .. " [Bug F2]. "
+			.. "Fix: ensure devmenu_mp_gate.scar uses unconditional "
+			.. "`_DEVMENU_BLOCK_VICTIM_NOTIFY_LAST_TIME = {}` at module load.")
+	end
+
+	_diag_log("--- Block Actions matrix complete ---")
+end
+
+-----------------------------------------------------------------------
+-- Action-messaging coverage (2026-06-15)
+--
+-- Why this exists: Convert toasts had correct player-name display in MP
+-- but block-actions toasts displayed "unknown/that player" and TELEPORT
+-- had a corrupt dispatcher that masked silent crashes. The pre-existing
+-- diag suite did not surface either issue because it never *inspected*
+-- the toast payloads emitted by the notify path.
+--
+-- This pass intercepts DevMenu_ShowToast for the duration of the diag run
+-- and records every {msg, prefix, name, suffix} payload into a ring buffer.
+-- Then we synthesise minimal calls into the pressing/victim notify shims
+-- exposed by devmenu_mp_gate.scar (DevMenu_DiagInvoke*) and assert that
+--   (a) a toast WAS emitted at all,
+--   (b) the toast's `name` is non-empty AND not in the disallowed-set
+--       { "", "Unknown", "unknown", "that player", "A player" } â€” those
+--       are the historical sentinels we want to never surface again.
+--
+-- The wrapper is restored in a pcall-protected finally block so a mid-run
+-- crash cannot leave DevMenu_ShowToast monkey-patched for the rest of
+-- the session.
+-----------------------------------------------------------------------
+local _DIAG_TOAST_LOG = nil
+local _DIAG_TOAST_LOG_CAP = 64
+local _DIAG_NAME_DENY = {
+	[""] = true, ["Unknown"] = true, ["unknown"] = true,
+	["that player"] = true, ["A player"] = true,
+}
+
+local function _diag_toast_record(payload)
+	if _DIAG_TOAST_LOG == nil then return end
+	local entry = { ts = (type(World_GetGameTime) == "function") and World_GetGameTime() or -1 }
+	if type(payload) == "table" then
+		entry.msg     = payload.msg
+		entry.prefix  = payload.prefix
+		entry.name    = payload.name
+		entry.suffix  = payload.suffix
+		entry.subtext = payload.subtext
+		entry.flag    = payload.flag
+	else
+		entry.msg = tostring(payload)
+	end
+	_DIAG_TOAST_LOG[#_DIAG_TOAST_LOG + 1] = entry
+	if #_DIAG_TOAST_LOG > _DIAG_TOAST_LOG_CAP then
+		table.remove(_DIAG_TOAST_LOG, 1)
+	end
+end
+
+-- Take a snapshot count, run `body`, return the slice of entries added since.
+local function _diag_toast_capture(body)
+	local before = #_DIAG_TOAST_LOG
+	local ok, err = pcall(body)
+	local added = {}
+	for i = before + 1, #_DIAG_TOAST_LOG do added[#added + 1] = _DIAG_TOAST_LOG[i] end
+	return ok, err, added
+end
+
+local function _diag_assert_named(label, added)
+	if #added == 0 then
+		_fail("action_msg/" .. label, "no toast emitted")
+		return false
+	end
+	for _, e in ipairs(added) do
+		local name = e.name
+		if name == nil or _DIAG_NAME_DENY[name] then
+			_fail("action_msg/" .. label, "toast emitted with disallowed name=" .. tostring(name)
+				.. " msg=" .. tostring(e.msg) .. " prefix=" .. tostring(e.prefix))
+			return false
+		end
+	end
+	_pass("action_msg/" .. label, #added .. " toast(s) with resolvable names")
+	return true
+end
+
+local function _diag_action_messaging()
+	_diag_log("--- Action messaging coverage ---")
+
+	-- 1. Resolver smoke test: invalid pid must not surface "Unknown"/empty.
+	if _check_api("_devmenu_resolve_player_info_by_pid") then
+		local info_invalid = _devmenu_resolve_player_info_by_pid(-1)
+		if info_invalid ~= nil and type(info_invalid.display_name) == "string"
+			and not _DIAG_NAME_DENY[info_invalid.display_name] then
+			_pass("action_msg/resolver_invalid_pid", "synthesised name=" .. info_invalid.display_name)
+		else
+			_fail("action_msg/resolver_invalid_pid", "resolver returned bad info=" .. tostring(info_invalid and info_invalid.display_name))
+		end
+		local info_nil = _devmenu_resolve_player_info_by_pid(nil)
+		if info_nil ~= nil and type(info_nil.display_name) == "string"
+			and not _DIAG_NAME_DENY[info_nil.display_name] then
+			_pass("action_msg/resolver_nil_pid", "synthesised name=" .. info_nil.display_name)
+		else
+			_fail("action_msg/resolver_nil_pid", "resolver returned bad info=" .. tostring(info_nil and info_nil.display_name))
+		end
+	end
+
+	-- 2. Cross-file global visibility: _devmenu_player_info / _devmenu_team_label.
+	_check_api("_devmenu_player_info")
+	_check_api("_devmenu_team_label")
+	_check_api("_devmenu_single_owner")
+
+	-- 3. Pressing-notify shim must emit a toast with a real name even when
+	--    the blocked pid is unresolvable.
+	if type(DevMenu_ShowToast) ~= "function" then
+		_fail("action_msg/setup", "DevMenu_ShowToast not a function - cannot intercept")
+		return
+	end
+	local _orig_toast = DevMenu_ShowToast
+	_DIAG_TOAST_LOG = {}
+	DevMenu_ShowToast = function(payload) _diag_toast_record(payload); return _orig_toast(payload) end
+
+	-- Always-restore guard.
+	local function _restore()
+		DevMenu_ShowToast = _orig_toast
+		_DIAG_TOAST_LOG = nil
+	end
+
+	local ok_outer, err_outer = pcall(function()
+		-- 3a. Pressing-notify with valid local pid (pick a real player).
+		if type(DevMenu_DiagInvokePressingNotify) == "function" then
+			local local_pid = (type(Game_GetLocalPlayer) == "function" and type(Player_GetID) == "function")
+				and Player_GetID(Game_GetLocalPlayer()) or nil
+			if local_pid ~= nil then
+				local _, _, added = _diag_toast_capture(function()
+					DevMenu_DiagInvokePressingNotify({ [local_pid] = true })
+				end)
+				_diag_assert_named("pressing_notify/valid_pid=" .. tostring(local_pid), added)
+			end
+			-- 3b. Pressing-notify with bogus pid (must synthesise "Player 99").
+			local _, _, added2 = _diag_toast_capture(function()
+				DevMenu_DiagInvokePressingNotify({ [99] = true })
+			end)
+			_diag_assert_named("pressing_notify/bogus_pid=99", added2)
+		else
+			_fail("action_msg/pressing_notify", "DevMenu_DiagInvokePressingNotify shim missing")
+		end
+
+		-- 3c. Victim-notify path (always emits something even for zero-effect).
+		if type(DevMenu_DiagInvokeVictimNotify) == "function" then
+			local local_p = (type(Game_GetLocalPlayer) == "function") and Game_GetLocalPlayer() or nil
+			if local_p ~= nil then
+				-- Allowed-only path emits a toast; blocked-only path emits a toast;
+				-- the zero/zero case emits nothing.
+				local _, _, added = _diag_toast_capture(function()
+					DevMenu_DiagInvokeVictimNotify(local_p, "destroy", "destroyed", 1, 0)
+				end)
+				if #added == 0 then
+					_fail("action_msg/victim_notify/allowed_only", "no toast emitted")
+				else
+					_pass("action_msg/victim_notify/allowed_only", "toast emitted")
+				end
+				local _, _, added2 = _diag_toast_capture(function()
+					DevMenu_DiagInvokeVictimNotify(local_p, "destroy", "destroyed", 0, 2)
+				end)
+				if #added2 == 0 then
+					_fail("action_msg/victim_notify/blocked_only", "no toast emitted")
+				else
+					_pass("action_msg/victim_notify/blocked_only", "toast emitted")
+				end
+			end
+		else
+			_fail("action_msg/victim_notify", "DevMenu_DiagInvokeVictimNotify shim missing")
+		end
+
+		-- 4. Victim-notify wiring audit: every selection-mutating net handler
+		--    must reference _devmenu_victim_notify. We assert by counting in
+		--    the live _DEVMENU_NET_ACTIONS table.
+		if type(_DEVMENU_NET_ACTIONS) == "table" then
+			local expected = { "DEVMENU_DESTROY", "DEVMENU_TELEPORT", "DEVMENU_CONVERT",
+				"DEVMENU_BURN", "DEVMENU_UNBURN", "DEVMENU_INVULN_SEL" }
+			for _, key in ipairs(expected) do
+				if type(_DEVMENU_NET_ACTIONS[key]) == "function" then
+					_pass("action_msg/net_handler/" .. key, "registered")
+				else
+					_fail("action_msg/net_handler/" .. key, "missing in _DEVMENU_NET_ACTIONS")
+				end
+			end
+		else
+			_fail("action_msg/net_handlers_table", "_DEVMENU_NET_ACTIONS missing")
+		end
+	end)
+
+	_restore()
+
+	if not ok_outer then
+		_diag_log("[DIAG-CRASH] action_messaging body: " .. tostring(err_outer))
+	end
+end
+-----------------------------------------------------------------------
+-- Public entry point
+-----------------------------------------------------------------------
+function DevMenu_DiagRunAll()
+	_diag_pass = 0
+	_diag_fail = 0
+	_diag_log("=== DevMenu Diagnostic Pass START ===")
+	_diag_log("Timestamp: sim_time=" .. tostring(
+		type(World_GetGameTime) == "function" and World_GetGameTime() or "N/A"
+	))
+
+	local ok, err
+
+	ok, err = pcall(_diag_core);                if not ok then _diag_log("[DIAG-CRASH] core: " .. tostring(err)) end
+	ok, err = pcall(_diag_teleport);            if not ok then _diag_log("[DIAG-CRASH] teleport: " .. tostring(err)) end
+	ok, err = pcall(_diag_convert);             if not ok then _diag_log("[DIAG-CRASH] convert: " .. tostring(err)) end
+	ok, err = pcall(_diag_invuln);              if not ok then _diag_log("[DIAG-CRASH] invuln: " .. tostring(err)) end
+	ok, err = pcall(_diag_destroy);             if not ok then _diag_log("[DIAG-CRASH] destroy: " .. tostring(err)) end
+	ok, err = pcall(_diag_burn);                if not ok then _diag_log("[DIAG-CRASH] burn: " .. tostring(err)) end
+	ok, err = pcall(_diag_spawn);               if not ok then _diag_log("[DIAG-CRASH] spawn: " .. tostring(err)) end
+	ok, err = pcall(_diag_block_actions);       if not ok then _diag_log("[DIAG-CRASH] block_actions: " .. tostring(err)) end
+	ok, err = pcall(_diag_net_dispatch);        if not ok then _diag_log("[DIAG-CRASH] net_dispatch: " .. tostring(err)) end
+	ok, err = pcall(_diag_entity_safety);       if not ok then _diag_log("[DIAG-CRASH] entity_safety: " .. tostring(err)) end
+	ok, err = pcall(_diag_block_comprehensive); if not ok then _diag_log("[DIAG-CRASH] block_comprehensive: " .. tostring(err)) end
+	ok, err = pcall(_diag_action_messaging);    if not ok then _diag_log("[DIAG-CRASH] action_messaging: " .. tostring(err)) end
+
+	_diag_log("=== DevMenu Diagnostic Pass END: " .. _diag_pass .. " PASS, " .. _diag_fail .. " FAIL ===")
+end

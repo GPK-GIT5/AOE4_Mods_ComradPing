@@ -1,0 +1,417 @@
+---------------------------------------------------------------------------------------------------
+-- CBA AI Player — Lifecycle & Initialization
+-- Module registration, lifecycle hooks, per-player state initialization.
+-- This module MUST be imported LAST among non-debug modules because its
+-- PresetFinalize registers rules that reference functions in all other modules.
+-- Origin: cba_ai_player.scar lines 357–750
+---------------------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------
+-- Module Registration
+-----------------------------------------------------------------------
+
+Core_RegisterModule(_AI_MODULE)
+
+local function _AI_IsModuleEnabledFromSettings()
+	if AGS_GLOBAL_SETTINGS == nil then
+		return true
+	end
+	local raw = AGS_GLOBAL_SETTINGS.AIPlayers
+	if raw == nil then
+		return true
+	end
+	if type(raw) == "string" then
+		return string.lower(raw) ~= "disabled"
+	end
+	if type(raw) == "boolean" then
+		return raw
+	end
+	if type(raw) == "number" then
+		return raw ~= 0
+	end
+	return true
+end
+
+-----------------------------------------------------------------------
+-- Lifecycle: UpdateModuleSettings
+-----------------------------------------------------------------------
+
+function CBA_AIPlayer_UpdateModuleSettings()
+	AGS_Print("CBA_AIPlayer_UpdateModuleSettings")
+	if _AI_IsModuleEnabledFromSettings() then
+		print("[AI_PLAYER] Custom AI enabled (AGS_GLOBAL_SETTINGS.AIPlayers).")
+	else
+		print("[AI_PLAYER] Custom AI disabled by lobby setting.")
+	end
+end
+
+-----------------------------------------------------------------------
+-- Lifecycle: EarlyInitializations (after AGS_Teams)
+-----------------------------------------------------------------------
+
+function CBA_AIPlayer_EarlyInitializations()
+	AGS_Print("CBA_AIPlayer_EarlyInitializations")
+
+	if not _AI_IsModuleEnabledFromSettings() then
+		print("[AI_PLAYER] Module disabled by lobby setting (AIPlayers=disabled).")
+		-- Suppress native engine AI brain for any AI-slot players so they remain
+		-- fully inert with zero performance cost (matches co-op scenario pattern).
+		for i, player in ipairs(PLAYERS) do
+			if player ~= nil and player.id ~= nil then
+				local ok, is_ai = pcall(AI_IsAIPlayer, player.id)
+				if ok and is_ai then
+					local ok_disable = pcall(AI_Enable, player.id, false)
+					print(string.format("[AI_PLAYER] Native AI suppressed for P%s (ok=%s).",
+						tostring(player.id), tostring(ok_disable)))
+				end
+			end
+		end
+		Core_UnregisterModule(_AI_MODULE)
+		return
+	end
+
+	-- Detect AI-occupied slots
+	for i, player in ipairs(PLAYERS) do
+		if player ~= nil and player.id ~= nil then
+			local ok, is_ai = pcall(AI_IsAIPlayer, player.id)
+			if ok and is_ai then
+				table.insert(_ai_players, player)
+			end
+		end
+	end
+
+	-- No AI players -> nothing to do
+	if #_ai_players == 0 then
+		print("[AI_PLAYER] No AI players detected - module disabled.")
+		Core_UnregisterModule(_AI_MODULE)
+		return
+	end
+
+	print(string.format("[AI_PLAYER] Detected %d AI player(s).", #_ai_players))
+end
+
+-----------------------------------------------------------------------
+-- Lifecycle: PresetFinalize (economy, buildings, rules)
+-----------------------------------------------------------------------
+
+function CBA_AIPlayer_PresetFinalize()
+	AGS_Print("CBA_AIPlayer_PresetFinalize")
+
+	-- Discover sacred site positions for patrol waypoints
+	_AI_DiscoverSacredSites()
+
+	for _, player in ipairs(_ai_players) do
+		_AI_InitPlayerState(player)
+		_AI_EnsureNativeAIDisabled(player, "preset_finalize", true)
+		_AI_EnsureEconomySuppressed(player, "preset_finalize", true)
+		_AI_GrantResources(player)
+		_AI_ClaimStartingVillagers(player)
+		_AI_ClaimStartingMAA(player)
+	end
+
+	-- Register timed rules for AI behavior loops
+	Rule_AddInterval(_AI_Rule_BuildMilitaryBuildings, _AI_BUILDING_INTERVAL)
+	Rule_AddInterval(_AI_Rule_OutsideChain,           _AI_OUTSIDE_CHAIN_INTERVAL)
+	Rule_AddInterval(_AI_Rule_ProduceUnits,           _AI_PRODUCE_INTERVAL)
+	Rule_AddInterval(_AI_Rule_ManageArmies,           _AI_ARMY_INTERVAL)
+	Rule_AddInterval(_AI_Rule_AllySupport,            _AI_ALLY_SUPPORT_INTERVAL)
+	Rule_AddInterval(_AI_Rule_ScoutPatrol,            _AI_SCOUT_INTERVAL)
+	Rule_AddInterval(_AI_Rule_ResourceTopup,          _AI_RESOURCE_TOPUP_INTERVAL)
+	Rule_AddInterval(_AI_Rule_PatrolArmies,           _AI_PATROL_INTERVAL)
+	Rule_AddInterval(_AI_Rule_VillagerManagement,     _AI_CONSTRUCT_INTERVAL)
+	Rule_AddInterval(_AI_Rule_SanityCheck,             _AI_SANITY_CHECK_INTERVAL)
+
+	-- Optional outpost construction
+	if AGS_GLOBAL_SETTINGS.AIOutposts == nil or AGS_GLOBAL_SETTINGS.AIOutposts ~= false then
+		Rule_AddInterval(_AI_Rule_BuildOutposts, _AI_OUTPOST_INTERVAL)
+	end
+
+	-- Per-tick determinism heartbeat (auto-disables at configured max game-time).
+	-- Both peers MUST emit identical [AI_PLAYER][HB] lines until divergence.
+	if type(_AI_HeartbeatFingerprint) == "function" then
+		local hb_interval = _AI_HEARTBEAT_INTERVAL or 1.0
+		Rule_AddInterval(_AI_HeartbeatFingerprint, hb_interval)
+		print(string.format("[AI_PLAYER][HB] registered interval=%.3f", hb_interval))
+	else
+		print("[AI_PLAYER][HB] NOT_REGISTERED missing _AI_HeartbeatFingerprint")
+	end
+
+	-- Compact AI build-state heartbeat for queue/assignment/pending divergence.
+	if type(_AI_BuildStateHeartbeat) == "function" then
+		local hb_build_interval = _AI_BUILD_HEARTBEAT_INTERVAL or 1.0
+		Rule_AddInterval(_AI_BuildStateHeartbeat, hb_build_interval)
+		print(string.format("[AI_PLAYER][HB_BUILD] registered interval=%.3f", hb_build_interval))
+	else
+		print("[AI_PLAYER][HB_BUILD] NOT_REGISTERED missing _AI_BuildStateHeartbeat")
+	end
+
+	-- Listen for building destruction to trigger rebuild
+	Rule_AddGlobalEvent(_AI_OnEntityKilled, GE_EntityKilled)
+	-- Economy policy can be reset by upgrade transitions in long sessions.
+	Rule_AddGlobalEvent(_AI_OnUpgradeComplete, GE_UpgradeComplete)
+end
+
+-----------------------------------------------------------------------
+-- Lifecycle: OnPlay (after game starts — deploy scouts)
+-----------------------------------------------------------------------
+
+function CBA_AIPlayer_OnPlay()
+	for _, player in ipairs(_ai_players) do
+		_AI_EnsureNativeAIDisabled(player, "on_play", false)
+		_AI_EnsureEconomySuppressed(player, "on_play", true)
+		_AI_DeployScouts(player)
+	end
+	-- One-time wall detection at game start
+	_AI_DetectWalls()
+end
+
+-----------------------------------------------------------------------
+-- Lifecycle: OnGameOver
+-----------------------------------------------------------------------
+
+function CBA_AIPlayer_OnGameOver()
+	-- Remove all interval rules
+	if Rule_Exists(_AI_Rule_BuildMilitaryBuildings) then Rule_Remove(_AI_Rule_BuildMilitaryBuildings) end
+	if Rule_Exists(_AI_Rule_OutsideChain) then Rule_Remove(_AI_Rule_OutsideChain) end
+	if Rule_Exists(_AI_Rule_ProduceUnits) then Rule_Remove(_AI_Rule_ProduceUnits) end
+	if Rule_Exists(_AI_Rule_ManageArmies) then Rule_Remove(_AI_Rule_ManageArmies) end
+	if Rule_Exists(_AI_Rule_AllySupport) then Rule_Remove(_AI_Rule_AllySupport) end
+	if Rule_Exists(_AI_Rule_ScoutPatrol) then Rule_Remove(_AI_Rule_ScoutPatrol) end
+	if Rule_Exists(_AI_Rule_ResourceTopup) then Rule_Remove(_AI_Rule_ResourceTopup) end
+	if Rule_Exists(_AI_Rule_BuildOutposts) then Rule_Remove(_AI_Rule_BuildOutposts) end
+	if Rule_Exists(_AI_Rule_PatrolArmies) then Rule_Remove(_AI_Rule_PatrolArmies) end
+	if Rule_Exists(_AI_Rule_VillagerManagement) then Rule_Remove(_AI_Rule_VillagerManagement) end
+	if Rule_Exists(_AI_Rule_SanityCheck) then Rule_Remove(_AI_Rule_SanityCheck) end
+	if Rule_Exists(_AI_HeartbeatFingerprint) then Rule_Remove(_AI_HeartbeatFingerprint) end
+	if Rule_Exists(_AI_BuildStateHeartbeat) then Rule_Remove(_AI_BuildStateHeartbeat) end
+
+	-- Remove event listeners
+	if Rule_Exists(_AI_OnEntityKilled) then Rule_RemoveGlobalEvent(_AI_OnEntityKilled) end
+	if Rule_Exists(_AI_OnUpgradeComplete) then Rule_RemoveGlobalEvent(_AI_OnUpgradeComplete) end
+
+	print("[AI_PLAYER] Module cleaned up on game over.")
+end
+
+-----------------------------------------------------------------------
+-- Per-Player Initialization
+-----------------------------------------------------------------------
+
+function _AI_InitPlayerState(player)
+	local aggression = AGS_GLOBAL_SETTINGS.AIAggression or "medium"
+	local threshold = _AI_SQUAD_THRESHOLD_MED
+	if aggression == "low" then
+		threshold = _AI_SQUAD_THRESHOLD_HIGH
+	elseif aggression == "high" then
+		threshold = _AI_SQUAD_THRESHOLD_LOW
+	end
+
+	-- Determine player label
+	local p_label = "P?"
+	local ok_idx, p_idx = pcall(World_GetPlayerIndex, player.id)
+	if ok_idx and p_idx ~= nil then
+		p_label = "P" .. tostring(p_idx)
+	end
+
+	player.ai = {
+		label = p_label,
+
+		buildings = {
+			barracks     = { count = 0, entities = {} },
+			archery_range = { count = 0, entities = {} },
+			stable       = { count = 0, entities = {} },
+			siege_workshop = { count = 0, entities = {} },
+		},
+		total_buildings = 0,
+
+		staging_sg_name = "sg_ai_staging_" .. tostring(player.id),
+		staging_sg = nil,
+
+		armies = {},
+
+		patrol_sg_name = "sg_ai_patrol_" .. tostring(player.id),
+		patrol_sg = nil,
+		patrol_waypoint_idx = 1,
+		patrol_rallying = false,
+		patrol_rally_pos = nil,
+		patrol_rally_started = 0,
+		patrol_rally_timeouts = 0,
+		patrol_invalid_waypoints = 0,
+		patrol_last_threat_pos = nil,
+		patrol_order_hold_until = 0,
+		patrol_last_order_source = "none",
+		patrol_last_order_time = -9999,
+		patrol_last_order_target = nil,
+		patrol_command_seq = 0,
+		patrol_owner_tier = 0,
+		patrol_hold_last_source = "none",
+		patrol_hold_last_reason = "",
+		last_combat_response_at = -9999,
+
+		maa_state = MAA_STATE_IDLE,
+		maa_state_entered_at = 0,
+		maa_enemy_pos = nil,
+		maa_rally_pos = nil,
+		maa_engage_target = nil,
+		maa_state_history = {},
+		maa_transition_count = 0,
+
+		villager_sg_name = "sg_ai_villagers_" .. tostring(player.id),
+		villager_sg = nil,
+		villager_build_queue = {},
+		villager_claim_attempts = 0,
+		villager_claim_done = false,
+		startup_seed_done = false,
+
+		maa_claim_attempts = 0,
+		maa_claim_done = false,
+
+		base_pos_cached = nil,
+
+		scouts_deployed = false,
+		scout_sg_name = "sg_ai_scouts_" .. tostring(player.id),
+
+		outpost_count = 0,
+		outpost_positions = {},
+
+		squad_threshold = threshold,
+
+		spawned = { infantry = 0, ranged = 0, cavalry = 0, siege = 0 },
+
+		construction_queue = {},
+
+		production_egroups = {
+			barracks = {},
+			archery_range = {},
+			stable = {},
+			siege_workshop = {},
+		},
+
+		primary_zone_count = 0,
+		secondary_zone_count = 0,
+
+		villager_teams = {},
+		villager_teams_synced = false,
+
+		outside_chain = {
+			built   = { outpost = 0, barracks = 0, stable = 0, archery_range = 0 },
+			pending = { outpost = 0, barracks = 0, stable = 0, archery_range = 0 },
+		},
+
+		villager_stage = _AI_VILLAGER_STAGE_PRODUCTION,
+		vision_outpost_count = 0,
+
+		is_walled = false,
+		team_walled = false,
+		wall_scan_done = false,
+
+		secondary_zone_hostile = false,
+		secondary_zone_attack_target = nil,
+
+		telemetry = {
+			build_attempts   = 0,
+			build_successes  = 0,
+			build_failures   = 0,
+			build_abandoned  = 0,
+			build_forced     = 0,
+			build_blocked    = 0,
+			queue_entries_created = 0,
+			queue_terminal_completed = 0,
+			queue_terminal_abandoned = 0,
+			queue_terminal_destroyed = 0,
+			queue_sanity_drops = 0,
+			production_dead_skips = 0,
+			placement_blacklist_skips = 0,
+			placement_failures = 0,
+			placement_rejects_offmap = 0,
+			placement_rejects_calc = 0,
+			placement_rejects_pending = 0,
+			placement_rejects_blacklist = 0,
+			placement_clamped = 0,
+			placement_attempts = 0,
+			units_produced   = 0,
+			armies_dispatched = 0,
+			ally_redirects   = 0,
+			ally_support_sent = 0,
+			team_assignments = 0,
+			team_releases = 0,
+			team_release_to_assign_total = 0,
+			team_release_to_assign_samples = 0,
+			villager_park_orders = 0,
+			villager_park_suppressed = 0,
+			patrol_orders = 0,
+			patrol_orders_suppressed = 0,
+			patrol_assault_joins = 0,
+			patrol_owner_swaps = 0,
+			patrol_overwrites = 0,
+			patrol_hold_sets = 0,
+			patrol_hold_extensions = 0,
+			patrol_cmd_patrol = 0,
+			patrol_cmd_maa = 0,
+			patrol_cmd_dispatch = 0,
+			patrol_cmd_combat = 0,
+			patrol_cmd_stop = 0,
+			maa_transitions = 0,
+			maa_scout_timeouts = 0,
+			maa_regroup_timeouts = 0,
+			maa_engagements = 0,
+			maa_no_ally_fallbacks = 0,
+			maa_sequence_violations = 0,
+			maa_engage_extensions = 0,
+			maa_rally_from_dispatch = 0,
+		},
+
+		last_placed_at = {},
+		stale_pos_blacklist = {},
+
+		build_timeline = {},
+		build_timeline_idx = 0,
+
+		economy = {
+			suppressed = false,
+			apply_count = 0,
+			last_apply_at = -9999,
+			last_reason = "",
+			drift_alerts = 0,
+		},
+
+		native_ai = {
+			disabled = false,
+			apply_count = 0,
+			last_apply_at = -9999,
+			last_reason = "",
+		},
+	}
+
+	-- Resolve per-civ producer capabilities and create tracking structures
+	local player_civ = Player_GetRaceName(player.id)
+	player.ai.civ_name = player_civ
+	player.ai.building_priority = _AI_ResolveCivProducers(player_civ)
+
+	-- Build dynamic building/production tracking for all resolved producer types
+	player.ai.building_unit_map = {}
+	player.ai.ordered_building_type_keys = {}
+	for _, entry in ipairs(player.ai.building_priority) do
+		local ik = _AI_BPKeyToInternalKey(entry.key)
+		if player.ai.buildings[ik] == nil then
+			player.ai.buildings[ik] = { count = 0, entities = {} }
+		end
+		if player.ai.production_egroups[ik] == nil then
+			player.ai.production_egroups[ik] = {}
+		end
+		if player.ai.building_unit_map[ik] == nil then
+			table.insert(player.ai.ordered_building_type_keys, ik)
+		end
+		player.ai.building_unit_map[ik] = _AI_ROLE_UNIT_MAP[entry.role]
+	end
+
+	-- Startup diagnostic: log resolved producers
+	local producer_keys = {}
+	for _, entry in ipairs(player.ai.building_priority) do
+		table.insert(producer_keys, string.format("%s@%d(%s)", entry.key, entry.min_age, entry.role))
+	end
+	print(string.format("[AI_PLAYER] %s civ=%s resolved_producers=[%s]",
+		player.ai.label, player_civ, table.concat(producer_keys, ", ")))
+
+	-- Create the staging SGroup
+	player.ai.staging_sg = SGroup_CreateIfNotFound(player.ai.staging_sg_name)
+end

@@ -1,0 +1,42 @@
+-----------------------------------------------------------------------
+-- PlayerUI Tracking: Owned Squads
+-- Squad inventory by blueprint for visible players.
+-- Reference: observerui/tracking_ownedsquads.scar
+-----------------------------------------------------------------------
+
+PlayerUI_OwnedSquads = {}
+
+PlayerUiInitialization:AddInitializable(PlayerUI_OwnedSquads)
+
+function PlayerUI_OwnedSquads:Initialize()
+	local visiblePlayers = _PlayerUI_VisiblePlayers
+	if visiblePlayers == nil then
+		return
+	end
+	for i = 1, #visiblePlayers do
+		self:_Initialize(visiblePlayers[i].id)
+	end
+end
+
+function PlayerUI_OwnedSquads:GetForPlayer(player)
+	return self[player.PlayerID] or {}
+end
+
+function PlayerUI_OwnedSquads:_Initialize(player)
+	local resetRule = function()
+		self[player.PlayerID] = {}
+	end
+	PlayerUiRuleSystem:AddDataGatheringPreparationRule(player.PlayerID, resetRule)
+
+	local squad_GetBlueprint = Squad_GetBlueprint
+	local countRule = function(squad)
+		local ownedSquads = self[player.PlayerID]
+		local bp = squad_GetBlueprint(squad)
+		if ownedSquads[bp.PropertyBagGroupID] then
+			ownedSquads[bp.PropertyBagGroupID].Count = ownedSquads[bp.PropertyBagGroupID].Count + 1
+		else
+			ownedSquads[bp.PropertyBagGroupID] = { Count = 1, Bp = bp }
+		end
+	end
+	PlayerUiRuleSystem:AddSquadDataGatheringRule(player.PlayerID, "", countRule)
+end

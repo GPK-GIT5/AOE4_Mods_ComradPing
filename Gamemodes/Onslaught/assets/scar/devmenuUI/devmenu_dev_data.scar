@@ -1,0 +1,70 @@
+-----------------------------------------------------------------------
+-- DevMenu: Dev Debugger Commands
+--
+-- Flat list of debugger entries for the DEV menu. Grouped by category.
+-- Each entry specifies a label, description, icon, and the action handler.
+--
+-- The DEV menu provides access to all Onslaught debug utilities through
+-- a categorized UI, plus logger-toggle commands for producing clean logs.
+-----------------------------------------------------------------------
+
+_DEVMENU_ICON_DEFAULT = "pack://application:,,,/WPFGUI;component/images/fe/taskbar_settings.png"
+
+_DEVMENU_DEV_ENTRIES = {
+	-- ---------- Logging / Output Control ----------
+	{ label = "0x DEVMENU", desc = "Toggle CBA Debug logging (logging_enabled). When OFF the CHEAT menu is also hidden on next launch. Default: ON.", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_ToggleCBADebugLogging" },
+	{ label = "1x ALL", desc = "Master toggle for every logging entry below. Default: mixed (AI OFF; shared/debug-driven channels ON).", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_ToggleAllLogging" },
+	{ label = "2x SHARED", desc = "AGS / shared startup logging gate used by AGS output and shared startup prints. Default: ON.", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_ToggleSharedLogging" },
+	{ label = "3x AI", desc = "AI_PLAYER verbosity plus patrol ownership capture. Default: OFF.", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_ToggleAILogging" },
+	{ label = "4x AUTOAGE INFO", desc = "AUTOAGE info + trace lines. Default: ON in debug sessions.", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_ToggleAutoAgeInfoLogging" },
+	{ label = "5x AUTOAGE DIAG", desc = "AUTOAGE startup diagnostics. Default: ON at startup, then auto-disables after reapply.", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_ToggleAutoAgeDiagLogging" },
+	{ label = "6x TRACE", desc = "Onslaught TRACE channel. Default: ON in debug sessions.", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_ToggleTraceLogging" },
+	{ label = "7x KEEP_CAP", desc = "Onslaught KEEP_CAP channel. Default: ON in debug sessions.", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_ToggleKeepCapLogging" },
+	{ label = "8x FORCE_TEAM_POSITIONS", desc = "Onslaught FORCE_TEAM_POSITIONS channel. Default: ON in debug sessions when the feature is active.", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_ToggleForceTeamPositionsLogging" },
+
+	-- ---------- Validation ----------
+	{ label = "Full Validation",  desc = "6-phase boot/config/runtime/data/endstate/limits (~10s).", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_RunValidation" },
+	{ label = "Data Validation",  desc = "Data full pipeline: blueprint audit + civ overview.", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_RunDataValidation" },
+	{ label = "Faction Map Diag", desc = "Faction map + false-vs-nil + transfer-path audit.", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_RunFactionDiag" },
+
+	-- ---------- Stress Tests ----------
+	{ label = "Stress Test",      desc = "8-stage stress (tables, BPs, entities, limits, etc.) (~25s).", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_RunStressTest" },
+	{ label = "Advanced Stress",  desc = "Edge-case scenarios (siege cascade, rapid elimination).", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_RunAdvancedStress" },
+	{ label = "Battle Lag Test",  desc = "Long-match profiler: telemetry + production stress loop.", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_RunBattleLagTest" },
+
+	-- ---------- Combat / AI ----------
+	{ label = "AI Behavior",      desc = "8-scenario AI knowledge tests (threat, spending, pop).", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_RunAIBehavior" },
+	{ label = "AI Stress",        desc = "AI comprehensive stress test suite.", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_RunAIStress" },
+
+	-- ---------- Military / Leaver ----------
+	{ label = "Military Verify",  desc = "Military pipeline verification: routes/heroes/stats.", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_RunMilitaryVerify" },
+	{ label = "Leaver Test",      desc = "Leaver pipeline: 6-stage conversion, coverage, stress.", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_RunLeaverTest" },
+	{ label = "Leaver Matrix",    desc = "Directed all-player pair matrix with global coverage.", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_RunLeaverMatrix" },
+
+	-- ---------- Coverage ----------
+	{ label = "Coverage Test",    desc = "10-batch API coverage (engine, BPs, civs, rewards).", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_RunCoverageTest" },
+
+	-- ---------- Siege / Limits ----------
+	{ label = "Siege Test",       desc = "Siege unified test: blueprint audit + events + field.", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_RunSiegeTest" },
+	{ label = "Limits Inspect",   desc = "Building/siege limit UI diagnostics + desync detection.", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_RunLimitsInspect" },
+
+	-- ---------- PlayerUI / Rendering ----------
+	{ label = "PlayerUI Test",    desc = "PlayerUI full diagnostic: init + data + UI + ranking.", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_RunPlayerUITest" },
+
+	-- ---------- Determinism ----------
+	{ label = "Determinism",      desc = "Determinism probe: checksums, divergence detection.", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_RunDeterminismTest" },
+	{ label = "MP Safety Audit",  desc = "DevMenu MP-safety audit: modifier accountant + replication probe (safe in MP).", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_RunMPSafetyAudit" },
+	{ label = "MP Gate: Cycle",   desc = "Cycle the DevMenu MP gate: warn -> block -> allow -> warn. Default 'warn' lets actions run with risk-class warnings; 'block' fail-closes HIGH/CRIT handlers.", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_CycleMPGateMode" },
+
+	-- ---------- Interactive ----------
+	{ label = "Prompts",          desc = "Interactive XamlPresenter YES/NO + multi-choice tests.", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_RunPrompts" },
+
+	-- ---------- Unit Spawner ----------
+	{ label = "Spawner: Dump",       desc = "Dump full dispatch table to ScarLog (no spawning). Prefix [SPAWNER-DEBUG].",                                         icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_UnitSpawner_Dump" },
+	{ label = "Spawner: Run Debug",  desc = "Spawn-and-kill sweep of every dispatch entry. Logs PASS/SKIP/FAIL per SBP. Prefix [SPAWNER-DEBUG].",                 icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_UnitSpawner_RunDebug" },
+	{ label = "Spawner: Cancel",     desc = "Cancel an in-progress debug sweep.",                                                                                 icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_UnitSpawner_CancelDebug" },
+	{ label = "Spawner: Age Sel",    desc = "Validate age-selector tier groups: BP resolve, TierSel globals, DC state_ coherence. Prefix [SPAWNER-AGE-VALIDATE].", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_UnitSpawner_ValidateAgeSelectors" },
+	{ label = "Spawner: Full Diag",  desc = "4-phase full behavioral validation: structure, DC bindings, selector interactions + card ownership, BP resolve. Prefix [SPAWNER-FULL-DIAG].", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_UnitSpawner_FullDiag" },
+	{ label = "Spawner: Icon Audit", desc = "Full icon coverage audit: unit cards + civ flag icons. Prefix [ICON-AUDIT].",                                         icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_UnitSpawner_AuditIconCoverage" },
+	{ label = "Cheat Actions Verify", desc = "Structural verify: block-actions map/handlers, DEVMENU_BURN, spawn-cam routing, RefreshToggleStates (2026-05-16 fix checks). Read-only, MP-safe.", icon = _DEVMENU_ICON_DEFAULT, action = "DevMenu_RunCheatActionsVerify" },
+}

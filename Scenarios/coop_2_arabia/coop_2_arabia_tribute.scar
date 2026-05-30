@@ -1,0 +1,104 @@
+--[[
+	Filename: coop_2_arabia_tribute.scar
+	Description: Tribute system integration for Arabia co-op scenario.
+	             Imports the AGS diplomacy/tribute modules with thin shims
+	             so players can donate resources to their teammate.
+	Last Modified: 2026-03-07
+	
+	DEPENDENCIES
+	  - DC (Difficulty_Config) must be initialized before Tribute_Init()
+	  - PLAYERS table must be populated (post Mission_SetupPlayers)
+	  - player1, player2, player3 globals must exist
+	
+	TAX RATES (from coop_2_arabia_difficulty.scar)
+	  Easy         = 0%   (free transfers)
+	  Intermediate = 15%
+	  Hard+        = 30%
+]]
+
+-----------------------------------------------------------------------
+-- AGS Shims — globals/functions the diplomacy modules expect
+-- Define BEFORE the import so they exist when the module loads.
+-----------------------------------------------------------------------
+
+-- Settings table consumed by AGS_Diplomacy_EarlyInitializations / LateInitializations
+AGS_GLOBAL_SETTINGS = {
+	Diplomacy	= true,		-- Enable the diplomacy module
+	Tributes	= true,		-- Enable tribute sub-system
+	Relations	= false,	-- Disable relation changes (coop = fixed allies)
+	TeamVictory	= "standard",
+}
+
+-- Constant compared against AGS_GLOBAL_SETTINGS.TeamVictory
+AGS_GS_TEAM_VICTORY_STANDARD = "standard"
+
+-- Logging shim — diplomacy module calls AGS_Print() for trace output
+function AGS_Print(msg)
+	print("[AGS] " .. tostring(msg))
+end
+
+-- Name resolver shim — diplomacy module calls AGS_GetCurrentName(player)
+-- Returns table with .LocString matching what the data context expects
+function AGS_GetCurrentName(player)
+	return { LocString = Player_GetDisplayName(player.id) }
+end
+
+-----------------------------------------------------------------------
+-- Import the AGS diplomacy module chain (from gamemodes/)
+-----------------------------------------------------------------------
+-- AGS modules now imported directly from gamemodes/
+import("Coop_2_Arabia_diplomacy.scar")
+
+-- Unregister the AGS lifecycle module so Cardinal doesn't auto-call
+-- AGS_Diplomacy_* hooks; we invoke them manually in Tribute_Init().
+-- Keep "Diplomacy" registered — it drives Diplomacy_OnGameOver() cleanup.
+Core_UnregisterModule(AGS_DIPLOMACY_MODULE)
+
+-----------------------------------------------------------------------
+-- Tribute_Init
+-- Call from Mission_Start() after player ages are set.
+-----------------------------------------------------------------------
+function Tribute_Init()
+	-- Ensure every PLAYERS entry has an AGS_Team field
+	-- (diplomacy UI reads player.AGS_Team.index for the team column)
+	for _, player in pairs(PLAYERS) do
+		if player.AGS_Team == nil then
+			player.AGS_Team = player.team or { index = 1 }
+		end
+	end
+	
+	-- Phase 1: read global settings flags
+	AGS_Diplomacy_EarlyInitializations()
+	
+	-- Phase 2: create _diplomacy data structure, register network events, build UI
+	AGS_Diplomacy_LateInitializations()
+	
+	-- Phase 3: apply per-player overrides (tribute visible, relations hidden)
+	AGS_Diplomacy_PresetFinalize()
+	
+	-- Apply difficulty-scaled tax rate
+	if DC ~= nil and DC.tribute_tax_rate ~= nil then
+		Diplomacy_SetTaxRate(nil, DC.tribute_tax_rate)
+		Diplomacy_UpdateDataContext()  -- Refresh UI to recalculate tribute costs
+		print(string.format("[TRIBUTE] Tax rate set to %.0f%% (%s)", DC.tribute_tax_rate * 100, DC.label))
+	end
+	
+	-- Hide AI enemy (player3) from the tribute panel
+	Diplomacy_OverridePlayerSettings(player3, false, false, false, false, false, false)
+	
+	-- Hide team column and relation controls (irrelevant for 2-player coop)
+	Diplomacy_OverrideSettings(nil, nil, nil, false)
+	
+	print("[TRIBUTE] Initialized — tribute system active")
+end
+
+-----------------------------------------------------------------------
+-- Tribute_Cleanup
+-- Call on game over / defeat to remove events and UI.
+-----------------------------------------------------------------------
+function Tribute_Cleanup()
+	if _diplomacy ~= nil then
+		Diplomacy_OnGameOver()
+		print("[TRIBUTE] Cleaned up")
+	end
+end

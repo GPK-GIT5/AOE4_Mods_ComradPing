@@ -1,0 +1,1589 @@
+---------------------------------------------------------------------------------------------------
+-- Onslaught Reward Trees
+-- Per-civilization kill threshold reward data for Onslaught mode (300s spawner)
+-- 23 civs: 12 base + 4 Knights DLC + 6 Dynasties DLC + 1 Yue Fei's Legacy DLC (all explicit tables)
+-- Split from rewards.scar for maintainability
+---------------------------------------------------------------------------------------------------
+
+function CBA_Rewards_List_Onslaught()
+	
+	_CBA.rewards["english"]={} 
+	_CBA.rewards["chinese"]={} 
+	_CBA.rewards["french"]={} 
+	_CBA.rewards["hre"]={} 
+	_CBA.rewards["mongol"]={} 
+	_CBA.rewards["rus"]={} 
+	_CBA.rewards["sultanate"]={} 
+	_CBA.rewards["abbasid"]={} 
+	_CBA.rewards["malian"]={} 
+	_CBA.rewards["ottoman"]={} 
+	-- Expansion
+	_CBA.rewards["abbasid_ha_01"]={} 
+	_CBA.rewards["french_ha_01"]={} 
+	_CBA.rewards["chinese_ha_01"]={} 
+	_CBA.rewards["hre_ha_01"]={} 
+	_CBA.rewards["japanese"]={}
+	_CBA.rewards["byzantine"]={} 
+	-- Dynasties DLC
+	_CBA.rewards["mongol_ha_gol"]={}
+	_CBA.rewards["lancaster"]={}
+	_CBA.rewards["templar"]={}
+	_CBA.rewards["japanese_ha_sen"]={}
+	_CBA.rewards["byzantine_ha_mac"]={}
+	_CBA.rewards["sultanate_ha_tug"]={}
+	-- Yue Fei's Legacy DLC
+	_CBA.rewards["jin_dynasty"]={}
+
+
+	---------------
+	--- SHARED  ---
+	---------------
+
+
+	local function CBA_Rewards_Onslaught_ApplySharedThresholds(civ_name)
+		local rewards = _CBA.rewards[civ_name]
+		if rewards == nil then
+			return
+		end
+
+		rewards[100] = { title = "$1000893", upgrade = AGS_UP_SIEGE_ENGINEERS }
+		rewards[450] = { title = "$11143393", upgrade = AGS_UP_SIEGE_ROLLER_TRIGGER }
+		if AGS_GLOBAL_SETTINGS.Option_Reward_Age then
+			rewards[500] = { title = "$11149424", age = 2 }
+		end
+		rewards[600] = { title = "$11166508", upgrade = AGS_UP_D_RANGED_I }
+		rewards[700] = { title = "$11166450", upgrade = AGS_UP_D_MELEE_II }
+		rewards[800] = { title = "$11166532", upgrade = AGS_UP_A_RANGED_I }
+		rewards[900] = { title = "$11166393", upgrade = AGS_UP_A_MELEE_II }
+		if AGS_GLOBAL_SETTINGS.Option_Reward_Age then
+			rewards[1000] = { title = "$11149425", age = 3 }
+		end
+		rewards[1200] = { title = "$11166509", upgrade = AGS_UP_D_RANGED_II }
+		rewards[1300] = { title = "$11168127", upgrade = AGS_UP_SPEARMAN_ELITE }
+		rewards[1400] = { title = "$11166451", upgrade = AGS_UP_D_MELEE_III }
+		rewards[1600] = { title = "$11166539", upgrade = AGS_UP_A_RANGED_II }
+		rewards[1700] = { title = "$11168132", upgrade = AGS_UP_MANATARMS_ELITE }
+		rewards[1800] = { title = "$11166402", upgrade = AGS_UP_A_MELEE_III }
+		rewards[1900] = { title = "$11144582", upgrade = AGS_UP_SIEGE_ADJUSTABLE_CROSSBAR }
+		if AGS_GLOBAL_SETTINGS.Option_Reward_Age then
+			rewards[2000] = { title = "$11149426", age = 4 }
+		end
+		rewards[2200] = { title = "$11166540", upgrade = AGS_UP_A_RANGED_III }
+		rewards[2400] = { title = "$11155932", upgrade = AGS_UP_BIOLOGY }
+		rewards[3000] = { title = "$11143350", upgrade = AGS_UP_GRAPERED_LANCE }
+		rewards[3100] = { title = "$11143381", upgrade = AGS_UP_RANGED_INCENDIARY }
+		rewards[3250] = { title = "$11143314", upgrade = AGS_UP_MILITARY_ACADEMY }
+		rewards[4250] = { title = "$11155725", upgrade = AGS_UP_ARCHITECTURE }
+		rewards[4500] = { title = "$11143390", upgrade = AGS_UP_CHEMISTRY }
+		rewards[5000] = { title = "$11155930", upgrade = AGS_UP_SIEGE_WORKS }
+		rewards[5250] = { title = "$11168900", upgrade = AGS_UP_SIEGE_SPEED }
+		rewards[7500] = { title = "$11119564", restriction = AGS_BP_HOUSE }
+		rewards[10000] = { title = "$11144562", restriction = AGS_BP_WONDER }
+	end
+
+	---------------
+	--- English ---
+	---------------
+	--[[Disabled for balance
+	
+	_CBA.rewards["english"][550]={
+		title = "+30% Damage - Longbow",
+		upgradeBP = "upgrade_ranged_longbow_damage_eng",
+	}
+	_CBA.rewards["english"][750]={
+		title = "+3 Armor Penetration - Longbow",
+		upgradeBP = "upgrade_ranged_longbow_armor_pen_eng",
+	}
+	_CBA.rewards["english"][775]={
+		title = "+2 Range - Longbow",
+		upgradeBP = "upgrade_ranged_archer_silkstring",
+	}	
+	_CBA.rewards["english"][1500]={
+		title = "2x Bombards",
+		unit = BP_GetSquadBlueprint("unit_bombard_4_eng"),
+		num = 2,
+	}
+
+	]]
+
+	_CBA.rewards["english"][0]={ 
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_eng"),	
+		num_upgrade = 40,	
+	}
+	_CBA.rewards["english"][175]={
+		title = Loc_FormatText("$42764", "$11245756"),
+		upgradeBP = "upgrade_longbow_make_camp_eng",
+	}	
+	_CBA.rewards["english"][275]={
+		title = Loc_FormatText("$42764", "$11166275"),
+		upgrade = AGS_UP_A_MELEE_I,
+	}
+	_CBA.rewards["english"][300]={
+		title = Loc_FormatText("$42764", "$11245756"),
+		upgradeBP = "upgrade_ranged_palings_eng",
+	}
+	_CBA.rewards["english"][350]={
+		title = Loc_FormatText("$42764", "$11166446"),
+		upgrade = AGS_UP_D_MELEE_I,
+	}
+	_CBA.rewards["english"][400]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_eng"),	
+		num_upgrade = 50,	
+	}
+	_CBA.rewards["english"][650]={
+		title = Loc_FormatText("$42764", "$11159356"),
+		upgradeBP = "upgrade_ranged_longbow_arrow_volley_eng",
+	}
+	_CBA.rewards["english"][850]={
+		title = Loc_FormatText("$42764", "$11197956"),
+		upgradeBP = "upgrade_armor_clad_eng",
+	}	
+	_CBA.rewards["english"][1100]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_eng"),	
+		num_upgrade = 60,	
+	}	
+	_CBA.rewards["english"][2100]={
+		title = Loc_FormatText("$42764", "$11166510"),
+		upgrade = AGS_UP_D_RANGED_III,
+	}		
+	_CBA.rewards["english"][2300]={
+		title = Loc_FormatText("$42764", "$11143344"),
+		upgrade = AGS_UP_BARDING,
+	}
+	_CBA.rewards["english"][2500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 40)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_eng"),
+		num_upgrade = 40,
+	}
+	_CBA.rewards["english"][3300]={
+		title = Loc_FormatText("$42764", "$11143314"),
+		upgrade = AGS_UP_MILITARY_ACADEMY,
+	}
+	_CBA.rewards["english"][3400]={
+		title = Loc_FormatText("$42764", "$11185236"),
+		upgradeBP = "upgrade_trebuchet_aoe_eng",
+	}
+	_CBA.rewards["english"][3500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_eng"),
+		num_upgrade = 50,
+	}
+	_CBA.rewards["english"][4000]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_eng"),
+		num_upgrade = 60,
+	}
+	---------------
+	--- chinese ---
+	---------------
+	
+		--[[ Disabled / Unused
+	
+	_CBA.rewards["chinese"][50]={
+		title = "Stable",
+		restriction = AGS_BP_STABLE,
+	}
+	_CBA.rewards["chinese"][150]={
+		title = "3x Springalds",
+		unit = BP_GetSquadBlueprint("unit_springald_3_chi"),
+		num = 3,
+	}	
+
+	_CBA.rewards["chinese"][200]={
+		title = "2x Mangonels",
+		unit = BP_GetSquadBlueprint("unit_mangonel_3_chi"),
+		num = 2,
+	}
+	_CBA.rewards["chinese"][300]={
+		title = "Siege Workshop",
+		restriction = AGS_BP_WORKSHOP,
+	}
+		_CBA.rewards["chinese"][1500]={
+		title = "2x Bombards",
+		unit = BP_GetSquadBlueprint("unit_bombard_4_chi"),
+		num = 2,
+	}	
+	
+	]]
+	
+	_CBA.rewards["chinese"][0]={ 
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_chi"),	
+		num_upgrade = 40,	
+	}
+	_CBA.rewards["chinese"][250]={
+		title = "$11166275",
+		upgrade = AGS_UP_A_MELEE_I,
+	}
+	_CBA.rewards["chinese"][350]={
+		title = "$11166446",
+		upgrade = AGS_UP_D_MELEE_I,
+	}
+	_CBA.rewards["chinese"][400]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_chi"),	
+		num_upgrade = 50,	
+	}
+	_CBA.rewards["chinese"][750]={
+		title = Loc_FormatText("$42764", "$11162046"),
+		upgradeBP = "upgrade_manatarms_battle_hardened_chi",
+	}
+	_CBA.rewards["chinese"][1100]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_chi"),	
+		num_upgrade = 60,	
+	}	
+	_CBA.rewards["chinese"][1250]={
+		title = Loc_FormatText("$42764", "$11192809"),
+		upgradeBP = "upgrade_manatarms_aoe_chi",
+	}
+	_CBA.rewards["chinese"][1750]={
+		title = Loc_FormatText("$42764", "$11155730"),
+		upgradeBP = "upgrade_reload_drills_chi",
+	}
+	_CBA.rewards["chinese"][2100]={
+		title = "$11143344",
+		upgrade = AGS_UP_BARDING,
+	}
+	_CBA.rewards["chinese"][2250]={
+		title = Loc_FormatText("$42764", "$11192898"),
+		upgradeBP = "upgrade_gunpowder_damage_chi",
+	}
+	_CBA.rewards["chinese"][2500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 40)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_chi"),
+		num_upgrade = 40,
+	}
+	_CBA.rewards["chinese"][3500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_chi"),
+		num_upgrade = 50,
+	}
+	_CBA.rewards["chinese"][4000]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_chi"),
+		num_upgrade = 60,
+	}
+	---------------
+	--- french  ---
+	---------------
+	
+		--[[ Disabled / Unused
+	_CBA.rewards["french"][50]={
+		title = "Stable",
+		restriction = AGS_BP_STABLE,
+	}
+	_CBA.rewards["french"][150]={
+		title = "3x Springalds",
+		unit = BP_GetSquadBlueprint("unit_springald_3_fre"),
+		num = 3,
+	}	
+
+	_CBA.rewards["french"][200]={
+		title = "2x Mangonels",
+		unit = BP_GetSquadBlueprint("unit_mangonel_3_fre"),
+		num = 2,
+	}
+	_CBA.rewards["french"][250]={
+		title = "$11166275",
+		upgrade = AGS_UP_A_MELEE_I,
+	}
+	_CBA.rewards["french"][300]={
+		title = "Siege Workshop",
+		restriction = AGS_BP_WORKSHOP,
+	}
+		_CBA.rewards["french"][1500]={
+		title = "2x Bombards",
+		unit = BP_GetSquadBlueprint("unit_bombard_4_fre"),
+		num = 2,
+	}
+	]]
+	
+	_CBA.rewards["french"][0]={ 
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_fre"),	
+		num_upgrade = 40,	
+	}
+	_CBA.rewards["french"][350]={
+		title = "$11166446",
+		upgrade = AGS_UP_D_MELEE_I,
+	}
+	_CBA.rewards["french"][400]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_fre"),	
+		num_upgrade = 50,	
+	}
+	_CBA.rewards["french"][1100]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_fre"),	
+		num_upgrade = 60,	
+	}
+	_CBA.rewards["french"][1150]={
+		title = Loc_FormatText("$42764", "$11148011"),
+		upgradeBP = "upgrade_cavalry_chivalry_fre",
+	}	
+	_CBA.rewards["french"][1350]={
+		title = Loc_FormatText("$42764","$11154579"),
+		upgradeBP = "upgrade_ranged_crossbow_drills_fre",
+	}
+	_CBA.rewards["french"][1450]={
+		title = Loc_FormatText("$42764","$11154574"),
+		upgradeBP = "upgrade_ranged_crossbow_stirrups_fre",
+	}
+
+	_CBA.rewards["french"][1550]={
+		title = Loc_FormatText("$42764","$11143380"),
+		upgradeBP = "upgrade_ranged_crossbow_cranequin_fre",
+	}	
+	_CBA.rewards["french"][2100]={
+		title = "$11166510",
+		upgrade = AGS_UP_D_RANGED_III,
+	}		
+	_CBA.rewards["french"][2300]={
+		title = "$11143344",
+		upgrade = AGS_UP_BARDING,
+	}
+	_CBA.rewards["french"][2500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 40)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_fre"),
+		num_upgrade = 40,
+	}
+	_CBA.rewards["french"][2600]={
+		title = Loc_FormatText("$42764","$11153830"),
+		upgradeBP = "upgrade_cavalry_cantled_saddle_fre",
+	}
+	_CBA.rewards["french"][2750]={
+		title = Loc_FormatText("$42764","$11146004"),
+		upgradeBP = "upgrade_cavalry_bloodline_fre",
+	}
+	_CBA.rewards["french"][2850]={
+		title = Loc_FormatText("$42764","$11143350"),
+		upgradeBP = "upgrade_cavalry_grapered_lance_fre",
+	}
+	_CBA.rewards["french"][3500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_fre"),
+		num_upgrade = 50,
+	}
+	_CBA.rewards["french"][4000]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_fre"),
+		num_upgrade = 60,
+	}
+	---------------
+	---   HRE   ---
+	---------------
+	
+		--[[ Disabled
+	_CBA.rewards["hre"][50]={
+		title = "Stable",
+		restriction = AGS_BP_STABLE,
+	}
+	_CBA.rewards["hre"][150]={
+		title = "3x Springalds",
+		unit = BP_GetSquadBlueprint("unit_springald_3_hre"),
+		num = 3,
+	}
+	_CBA.rewards["hre"][300]={
+		title = "Siege Workshop",
+		restriction = AGS_BP_WORKSHOP,
+	}
+]]	
+
+	
+	_CBA.rewards["hre"][0]={ 
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_hre"),	
+		num_upgrade = 40,	
+	}
+	_CBA.rewards["hre"][50]={
+		title = Loc_FormatText("$42764","$11162125"),
+		upgradeBP = "upgrade_riveted_chain_armour_hre",
+	}
+	_CBA.rewards["hre"][250]={
+		title = "$11166275",
+		upgrade = AGS_UP_A_MELEE_I,
+	}
+	_CBA.rewards["hre"][300]={
+		title = Loc_FormatText("$42764","$11182585"),
+		upgradeBP = "upgrade_building_fire_armor_hre",
+	}
+	_CBA.rewards["hre"][350]={
+		title = "$11166446",
+		upgrade = AGS_UP_D_MELEE_I,
+	}
+	_CBA.rewards["hre"][400]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_hre"),	
+		num_upgrade = 50,	
+	}
+	_CBA.rewards["hre"][750]={
+		title = Loc_FormatText("$42764","$11154075"),
+		upgradeBP = "upgrade_infantry_marching_drills_hre",
+	}
+	_CBA.rewards["hre"][850]={
+		title = Loc_FormatText("$42764","$11157705"),
+		upgradeBP = "upgrade_gothic_plate_armour_hre",
+	}
+	_CBA.rewards["hre"][1100]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_hre"),	
+		num_upgrade = 60,	
+	}	
+	_CBA.rewards["hre"][1250]={
+		title = Loc_FormatText("$42764","$11164733"),
+		upgradeBP = "upgrade_man_at_arms_two_handed_hre",
+	}
+	_CBA.rewards["hre"][1450]={
+		title = Loc_FormatText("$42764","$11157752"),
+		upgradeBP = "upgrade_reinforced_defenses_hre",
+	}
+	_CBA.rewards["hre"][1850]={
+		title = Loc_FormatText("$42764","$11182587"),
+		upgradeBP = "upgrade_landsknecht_charge_drills_hre",
+	}
+	_CBA.rewards["hre"][2100]={
+		title = "$11166510",
+		upgrade = AGS_UP_D_RANGED_III,
+	}		
+	_CBA.rewards["hre"][2250]={
+		title = Loc_FormatText("$42764","$11157699"),
+		upgradeBP = "upgrade_man_at_arms_maces_hre",
+	}
+	_CBA.rewards["hre"][2300]={
+		title = "$11143344",
+		upgrade = AGS_UP_BARDING,
+	}
+	_CBA.rewards["hre"][2500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 40)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_hre"),
+		num_upgrade = 40,
+	}
+	_CBA.rewards["hre"][3500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_hre"),
+		num_upgrade = 50,
+	}
+	_CBA.rewards["hre"][4000]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_hre"),
+		num_upgrade = 60,
+	}
+	---------------
+	--- mongol  ---
+	---------------
+	
+	--[[ Disabled
+	
+	_CBA.rewards["mongol"][50]={
+		title = "Stable",
+		restriction = AGS_BP_STABLE,
+	}
+	_CBA.rewards["mongol"][150]={
+		title = "3x Springalds",
+		unit = BP_GetSquadBlueprint("unit_springald_3_mon"),
+		num = 3,
+	}	
+	_CBA.rewards["mongol"][300]={
+		title = "Siege Workshop",
+		restriction = AGS_BP_WORKSHOP,
+	}
+	
+	-- Improved Armor/Damage upgrades
+	
+		_CBA.rewards["mongol"][650]={
+		title = "$11166446",
+		upgradeBP = "upgrade_melee_armor_i_improved_mon",
+	}
+	_CBA.rewards["mongol"][650]={
+		title = "+1 Ranged Armor",
+		upgradeBP = "upgrade_ranged_armor_i_improved_mon",
+	}
+	_CBA.rewards["mongol"][950]={
+		title = "$11166275",
+		upgradeBP = "upgrade_melee_damage_ii_improved_mon",
+	}
+	_CBA.rewards["mongol"][1375]={
+		title = "+1 Ranged Armor",
+		upgradeBP = "upgrade_ranged_armor_ii_improved_mon",
+	}
+	_CBA.rewards["mongol"][1450]={
+		title = "$11166446",
+		upgradeBP = "upgrade_melee_armor_iii_improved_mon",
+	}
+	_CBA.rewards["mongol"][2250]={
+		title = "+1 Ranged Armor",
+		upgradeBP = "upgrade_ranged_armor_iii_improved_mon",
+	}
+	_CBA.rewards["mongol"][2350]={
+		title = "+1 Ranged Damage",
+		upgradeBP = "upgrade_ranged_damage_iii_improved_mon",
+	}
+	]]
+	
+	_CBA.rewards["mongol"][0]={ 
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_mon"),	
+		num_upgrade = 40,	
+	}
+	_CBA.rewards["mongol"][250]={
+		title = "$11166275",
+		upgrade = AGS_UP_A_MELEE_I,
+	}
+
+	_CBA.rewards["mongol"][300]={
+		title = "$11166446",
+		upgrade = AGS_UP_D_MELEE_I,
+	}
+	_CBA.rewards["mongol"][350]={
+		title = Loc_FormatText("$42764","$11166275"),
+		upgradeBP = "upgrade_melee_damage_i_improved_mon",
+	}
+	_CBA.rewards["mongol"][400]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_mon"),	
+		num_upgrade = 50,	
+	}
+	_CBA.rewards["mongol"][550]={
+		title = Loc_FormatText("$42764","$11183515"),
+		upgradeBP = "upgrade_improved_siege_engineers_mon",
+	}
+	_CBA.rewards["mongol"][750]={
+		title = "$11166532",
+		upgrade = AGS_UP_A_RANGED_I,
+	}
+	
+	_CBA.rewards["mongol"][850]={
+		title = "$11166393",
+		upgrade = AGS_UP_A_MELEE_II,
+	}
+	_CBA.rewards["mongol"][1100]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_mon"),	
+		num_upgrade = 60,	
+	}	
+	_CBA.rewards["mongol"][1150]={
+		title = "$11166509",
+		upgrade = AGS_UP_D_RANGED_II,
+	}
+	_CBA.rewards["mongol"][1250]={
+		title = "$11168127",
+		upgrade = AGS_UP_SPEARMAN_ELITE,
+	}
+	_CBA.rewards["mongol"][1575]={
+		title = "$11166539",
+		upgrade = AGS_UP_A_RANGED_II,
+	}
+	_CBA.rewards["mongol"][1650]={
+		title = "$11168132",
+		upgrade = AGS_UP_MANATARMS_ELITE,
+	}
+
+	_CBA.rewards["mongol"][1750]={
+		title = "$11166402",
+		upgrade = AGS_UP_A_MELEE_III,
+	}
+	_CBA.rewards["mongol"][1850]={
+		title = "$11144582",
+		upgrade = AGS_UP_SIEGE_ADJUSTABLE_CROSSBAR,
+	}
+	
+	_CBA.rewards["mongol"][1950]={
+		title = Loc_FormatText("$42764","$11168948"),
+		upgradeBP = "upgrade_spearman_elite_spear_tactics_improved_mon",
+	}
+	_CBA.rewards["mongol"][2100]={
+		title = "$11166510",
+		upgrade = AGS_UP_D_RANGED_III,
+	}		
+	_CBA.rewards["mongol"][2300]={
+		title = "$11143344",
+		upgrade = AGS_UP_BARDING,
+	}
+	_CBA.rewards["mongol"][2500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 47)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_mon"),
+		num_upgrade = 47,
+	}
+	_CBA.rewards["mongol"][2650]={
+		title = Loc_FormatText("$42764","$11157927"),
+		upgradeBP = "upgrade_cavalry_barding_improved_mon",
+	}
+	_CBA.rewards["mongol"][2800]={
+		title = "$11143350",
+		upgrade = AGS_UP_GRAPERED_LANCE,
+	}
+	_CBA.rewards["mongol"][3200]={
+		title = Loc_FormatText("$42764","$11168970"),
+		upgradeBP = "upgrade_cavalry_grapered_lance_improved_mon",
+	}
+	_CBA.rewards["mongol"][3300]={
+		title = Loc_FormatText("$42764","$11168965"),
+		upgradeBP = "upgrade_manatarms_elite_army_tactics_improved_mon",
+	}
+	_CBA.rewards["mongol"][3400]={
+		title = Loc_FormatText("$42764","$11152807"),
+		upgradeBP = "upgrade_tech_university_biology_improved_mon",
+	}
+	_CBA.rewards["mongol"][3500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 58)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_mon"),
+		num_upgrade = 58,
+	}
+	_CBA.rewards["mongol"][3750]={
+		title = Loc_FormatText("$42764","$11157969"),
+		upgradeBP = "upgrade_tech_military_academy_improved_mon",
+	}
+	_CBA.rewards["mongol"][4000]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 70)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_mon"),
+		num_upgrade = 70,
+	}
+	---------------
+	--- rus     ---
+	---------------
+	
+	_CBA.rewards["rus"][0]={ 
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_rus"),	
+		num_upgrade = 40,	
+	}
+	_CBA.rewards["rus"][175]={
+		title = Loc_FormatText("$42764","$11191585"),
+		upgradeBP = "upgrade_springald_range_rus",
+	}	
+	_CBA.rewards["rus"][250]={
+		title = "$11166275",
+		upgrade = AGS_UP_A_MELEE_I,
+	}
+	_CBA.rewards["rus"][300]={
+		title = Loc_FormatText("$42764","$11161698"),
+		upgradeBP = "upgrade_siege_improvements_rus",
+	}
+	_CBA.rewards["rus"][350]={
+		title = "$11166446",
+		upgrade = AGS_UP_D_MELEE_I,
+	}
+	_CBA.rewards["rus"][400]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_rus"),	
+		num_upgrade = 50,	
+	}
+	_CBA.rewards["rus"][750]={
+		title = Loc_FormatText("$42764","$11191591"),
+		upgradeBP = "upgrade_siege_crew_training_rus",
+	}
+	_CBA.rewards["rus"][1100]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_rus"),	
+		num_upgrade = 60,	
+	}
+	_CBA.rewards["rus"][1150]={
+		title = Loc_FormatText("$42764","$11161695"),
+		upgradeBP = "upgrade_cavalry_hp_rus",
+	}	
+	_CBA.rewards["rus"][1250]={
+		title = Loc_FormatText("$42764","$11249942"),
+		upgradeBP = "upgrade_cavalry_melee_damage_rus",
+	}
+	_CBA.rewards["rus"][1750]={
+		title = Loc_FormatText("$42764","$11191594"),
+		upgradeBP = "upgrade_siege_fined_tuned_guns_rus",
+	}
+	_CBA.rewards["rus"][2100]={
+		title = "$11166510",
+		upgrade = AGS_UP_D_RANGED_III,
+	}		
+	_CBA.rewards["rus"][2300]={
+		title = "$11143344",
+		upgrade = AGS_UP_BARDING,
+	}
+	_CBA.rewards["rus"][2500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 40)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_rus"),
+		num_upgrade = 40,
+	}
+	_CBA.rewards["rus"][3500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_rus"),
+		num_upgrade = 50,
+	}
+	_CBA.rewards["rus"][4000]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_rus"),
+		num_upgrade = 60,
+	}
+	---------------
+	-- sultanate --
+	---------------
+	
+	_CBA.rewards["sultanate"][0]={ 
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_sul"),	
+		num_upgrade = 40,	
+	}
+	_CBA.rewards["sultanate"][250]={
+		title = "$11166275",
+		upgrade = AGS_UP_A_MELEE_I,
+	}
+	_CBA.rewards["sultanate"][300]={
+		title = Loc_FormatText("$42764","$11169611"),
+		upgradeBP = "upgrade_improved_swords_sul",
+	}
+	_CBA.rewards["sultanate"][350]={
+		title = "$11166446",
+		upgrade = AGS_UP_D_MELEE_I,
+	}
+	_CBA.rewards["sultanate"][400]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_sul"),	
+		num_upgrade = 50,	
+	}
+	_CBA.rewards["sultanate"][550]={
+		title = Loc_FormatText("$42764","$11182779"),
+		upgradeBP = "upgrade_landmark_fire_siege_armor_sul",
+	}
+	_CBA.rewards["sultanate"][750]={
+		title = Loc_FormatText("$42764","$11159837"),
+		upgradeBP = "upgrade_landmark_force_march_sul",
+	}
+	_CBA.rewards["sultanate"][1100]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_sul"),	
+		num_upgrade = 60,	
+	}	
+	_CBA.rewards["sultanate"][1250]={
+		title = Loc_FormatText("$42764","$11182679"),
+		upgradeBP = "upgrade_landmark_keep_defense_sul",
+	}
+	_CBA.rewards["sultanate"][2100]={
+		title = "$11166510",
+		upgrade = AGS_UP_D_RANGED_III,
+	}		
+	_CBA.rewards["sultanate"][2300]={
+		title = "$11143344",
+		upgrade = AGS_UP_BARDING,
+	}
+	_CBA.rewards["sultanate"][2500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 40)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_sul"),
+		num_upgrade = 40,
+	}
+	_CBA.rewards["sultanate"][3500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_sul"),
+		num_upgrade = 50,
+	}
+	_CBA.rewards["sultanate"][4000]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_sul"),
+		num_upgrade = 60,
+	}
+	_CBA.rewards["sultanate"][6250]={
+		title = Loc_FormatText("$42764","$11184522"),
+		upgradeBP = "upgrade_age3_war_elephant_elite_sul",
+	}	
+	---------------
+	--- Abbasid ---
+	---------------
+
+	
+	_CBA.rewards["abbasid"][0]={ 
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_abb"),	
+		num_upgrade = 40,	
+	}
+	_CBA.rewards["abbasid"][50]={
+		title = Loc_FormatText("$42764","$11183483"),
+		upgradeBP = "upgrade_camel_archer_comp_bow_abb",
+	}
+	_CBA.rewards["abbasid"][250]={
+		title = "$11166275",
+		upgrade = AGS_UP_A_MELEE_I,
+	}
+	_CBA.rewards["abbasid"][300]={
+		title = Loc_FormatText("$42764","$11183488"),
+		upgradeBP = "upgrade_mil_camel_archers_improved_weapon_abb",
+	}
+	_CBA.rewards["abbasid"][350]={
+		title = "$11166446",
+		upgrade = AGS_UP_D_MELEE_I,
+	}
+	_CBA.rewards["abbasid"][400]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_abb"),	
+		num_upgrade = 50,	
+	}
+	_CBA.rewards["abbasid"][550]={
+		title = Loc_FormatText("$42764","$11183496"),
+		upgradeBP = "upgrade_camel_speed_boost_abb",
+	}
+	_CBA.rewards["abbasid"][1100]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_abb"),	
+		num_upgrade = 60,	
+	}	
+	_CBA.rewards["abbasid"][1250]={
+		title = Loc_FormatText("$42764","$11225223"),
+		upgradeBP = "upgrade_camel_armor_abb",
+	}
+	_CBA.rewards["abbasid"][1350]={
+		title = Loc_FormatText("$42764","$11183520"),
+		upgradeBP = "upgrade_mil_mameluke_shields_abb",
+	}
+	_CBA.rewards["abbasid"][1750]={
+		title = Loc_FormatText("$42764","$11183479"),
+		upgradeBP = "upgrade_mil_camel_support_abb",
+	}
+	_CBA.rewards["abbasid"][2100]={
+		title = "$11166510",
+		upgrade = AGS_UP_D_RANGED_III,
+	}		
+	_CBA.rewards["abbasid"][2300]={
+		title = "$11143344",
+		upgrade = AGS_UP_BARDING,
+	}
+	_CBA.rewards["abbasid"][2500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 40)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_abb"),
+		num_upgrade = 40,
+	}
+	_CBA.rewards["abbasid"][3500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_abb"),
+		num_upgrade = 50,
+	}
+	_CBA.rewards["abbasid"][4000]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_abb"),
+		num_upgrade = 60,
+	}
+	---------------
+	--- Malian ---
+	---------------
+	
+	_CBA.rewards["malian"][0]={ 
+		unit_upgrade = BP_GetSquadBlueprint("unit_gbeto_3_mal"),	
+		num_upgrade = 55,	
+	}
+	_CBA.rewards["malian"][50]={
+		title = Loc_FormatText("$42764","$11218603"),
+		upgradeBP = "upgrade_stealth_healing_mal",
+	}
+	_CBA.rewards["malian"][125]={
+		title = Loc_FormatText("$42764","$11218600"),
+		upgradeBP = "upgrade_archer_poison_arrow_mal",
+	}
+	_CBA.rewards["malian"][225]={
+		title = Loc_FormatText("$42764","$11218507"),
+		upgradeBP = "upgrade_sofa_armor_mal",
+	}
+	_CBA.rewards["malian"][250]={
+		title = "$11166275",
+		upgrade = AGS_UP_A_MELEE_I,
+	}
+	_CBA.rewards["malian"][300]={
+		title = Loc_FormatText("$42764","$11218602"),
+		upgradeBP = "upgrade_sofa_farima_leadership_mal",
+	}
+	_CBA.rewards["malian"][350]={
+		title = "$11166446",
+		upgrade = AGS_UP_D_MELEE_I,
+	}
+	_CBA.rewards["malian"][400]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 65)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_gbeto_3_mal"),	
+		num_upgrade = 65,	
+	}
+	_CBA.rewards["malian"][1100]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 80)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_gbeto_3_mal"),	
+		num_upgrade = 80,	
+	}	
+	_CBA.rewards["malian"][2100]={
+		title = "$11166510",
+		upgrade = AGS_UP_D_RANGED_III,
+	}		
+	_CBA.rewards["malian"][2300]={
+		title = "$11143344",
+		upgrade = AGS_UP_BARDING,
+	}
+	_CBA.rewards["malian"][2500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 40)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Sofa",
+		unit_upgrade = BP_GetSquadBlueprint("unit_horseman_4_mal"),
+		num_upgrade = 40,
+	}
+	_CBA.rewards["malian"][3500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Sofa",
+		unit_upgrade = BP_GetSquadBlueprint("unit_horseman_4_mal"),
+		num_upgrade = 50,
+	}
+	_CBA.rewards["malian"][4000]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Sofa",
+		unit_upgrade = BP_GetSquadBlueprint("unit_horseman_4_mal"),
+		num_upgrade = 60,
+	}
+	---------------
+	--- Ottoman ---
+	---------------
+	
+	_CBA.rewards["ottoman"][0]={ 
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_ott"),	
+		num_upgrade = 40,	
+	}
+	_CBA.rewards["ottoman"][250]={
+		title = "$11166275",
+		upgrade = AGS_UP_A_MELEE_I,
+	}
+	_CBA.rewards["ottoman"][350]={
+		title = "$11166446",
+		upgrade = AGS_UP_D_MELEE_I,
+	}
+	_CBA.rewards["ottoman"][400]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_ott"),	
+		num_upgrade = 50,	
+	}
+	_CBA.rewards["ottoman"][1100]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_ott"),	
+		num_upgrade = 60,	
+	}	
+	_CBA.rewards["ottoman"][1250]={
+		title = Loc_FormatText("$42764","$11218008"),
+		upgradeBP = "upgrade_ranged_janissary_guns_ott",
+	}
+	_CBA.rewards["ottoman"][2100]={
+		title = "$11166510",
+		upgrade = AGS_UP_D_RANGED_III,
+	}		
+	_CBA.rewards["ottoman"][2300]={
+		title = "$11143344",
+		upgrade = AGS_UP_BARDING,
+	}
+	_CBA.rewards["ottoman"][2500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 40)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_ott"),
+		num_upgrade = 40,
+	}
+	_CBA.rewards["ottoman"][3500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_ott"),
+		num_upgrade = 50,
+	}
+	_CBA.rewards["ottoman"][4000]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_ott"),
+		num_upgrade = 60,
+	}
+	-- Abbasid / Expansion
+	
+	
+	_CBA.rewards["abbasid_ha_01"][0]={ 
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_abb_ha_01"),	
+		num_upgrade = 40,	
+	}
+	_CBA.rewards["abbasid_ha_01"][250]={
+		title = "$11166275",
+		upgrade = AGS_UP_A_MELEE_I,
+	}
+	_CBA.rewards["abbasid_ha_01"][350]={
+		title = "$11166446",
+		upgrade = AGS_UP_D_MELEE_I,
+	}
+	_CBA.rewards["abbasid_ha_01"][400]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_abb_ha_01"),	
+		num_upgrade = 50,	
+	}
+	_CBA.rewards["abbasid_ha_01"][1100]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_abb_ha_01"),	
+		num_upgrade = 60,	
+	}	
+	_CBA.rewards["abbasid_ha_01"][2100]={
+		title = "$11166510",
+		upgrade = AGS_UP_D_RANGED_III,
+	}		
+	_CBA.rewards["abbasid_ha_01"][2300]={
+		title = "$11143344",
+		upgrade = AGS_UP_BARDING,
+	}
+	_CBA.rewards["abbasid_ha_01"][2500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 40)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_abb_ha_01"),
+		num_upgrade = 40,
+	}
+	_CBA.rewards["abbasid_ha_01"][3500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_abb_ha_01"),
+		num_upgrade = 50,
+	}
+	_CBA.rewards["abbasid_ha_01"][4000]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_abb_ha_01"),
+		num_upgrade = 60,
+	}
+	---------------
+	-- French / Expansion
+	---------------
+	
+	_CBA.rewards["french_ha_01"][0]={ 
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_fre"),	
+		num_upgrade = 40,	
+	}
+	_CBA.rewards["french_ha_01"][350]={
+		title = "$11166446",
+		upgrade = AGS_UP_D_MELEE_I,
+	}
+	_CBA.rewards["french_ha_01"][400]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_fre"),	
+		num_upgrade = 50,	
+	}
+	_CBA.rewards["french_ha_01"][1100]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_fre"),	
+		num_upgrade = 60,	
+	}
+	_CBA.rewards["french_ha_01"][2100]={
+		title = "$11166510",
+		upgrade = AGS_UP_D_RANGED_III,
+	}		
+	_CBA.rewards["french_ha_01"][2300]={
+		title = "$11143344",
+		upgrade = AGS_UP_BARDING,
+	}
+	_CBA.rewards["french_ha_01"][2500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 40)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_fre"),
+		num_upgrade = 40,
+	}
+	_CBA.rewards["french_ha_01"][3500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_fre"),
+		num_upgrade = 50,
+	}
+	_CBA.rewards["french_ha_01"][4000]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_fre"),
+		num_upgrade = 60,
+	}
+	---------------
+	--- chinese_ha_01 
+	---------------
+
+	_CBA.rewards["chinese_ha_01"][0]={ 
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_chi_ha_01"),	
+		num_upgrade = 40,	
+	}
+	_CBA.rewards["chinese_ha_01"][250]={
+		title = "$11166275",
+		upgrade = AGS_UP_A_MELEE_I,
+	}
+	_CBA.rewards["chinese_ha_01"][350]={
+		title = "$11166446",
+		upgrade = AGS_UP_D_MELEE_I,
+	}
+	_CBA.rewards["chinese_ha_01"][400]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_chi_ha_01"),	
+		num_upgrade = 50,	
+	}
+	_CBA.rewards["chinese_ha_01"][1100]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_chi_ha_01"),	
+		num_upgrade = 60,	
+	}	
+	_CBA.rewards["chinese_ha_01"][2100]={
+		title = "$11143344",
+		upgrade = AGS_UP_BARDING,
+	}
+	_CBA.rewards["chinese_ha_01"][2500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 40)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_chi_ha_01"),
+		num_upgrade = 40,
+	}
+	_CBA.rewards["chinese_ha_01"][3500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_chi_ha_01"),
+		num_upgrade = 50,
+	}
+	_CBA.rewards["chinese_ha_01"][4000]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_chi_ha_01"),
+		num_upgrade = 60,
+	}
+	---------------
+	---   HRE   ---
+	---------------
+
+	_CBA.rewards["hre_ha_01"][0]={ 
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_hre_ha_01"),	
+		num_upgrade = 20,	
+	}
+	_CBA.rewards["hre_ha_01"][250]={
+		title = "$11166275",
+		upgrade = AGS_UP_A_MELEE_I,
+	}
+	_CBA.rewards["hre_ha_01"][350]={
+		title = "$11166446",
+		upgrade = AGS_UP_D_MELEE_I,
+	}
+	_CBA.rewards["hre_ha_01"][400]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 25)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_hre_ha_01"),	
+		num_upgrade = 25,	
+	}
+	_CBA.rewards["hre_ha_01"][1100]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 30)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_hre_ha_01"),	
+		num_upgrade = 30,	
+	}	
+	_CBA.rewards["hre_ha_01"][2100]={
+		title = "$11166510",
+		upgrade = AGS_UP_D_RANGED_III,
+	}		
+	_CBA.rewards["hre_ha_01"][2300]={
+		title = "$11143344",
+		upgrade = AGS_UP_BARDING,
+	}
+	_CBA.rewards["hre_ha_01"][2500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 20)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_hre_ha_01"),
+		num_upgrade = 20,
+	}
+	_CBA.rewards["hre_ha_01"][3500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 25)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_hre_ha_01"),
+		num_upgrade = 25,
+	}
+	_CBA.rewards["hre_ha_01"][4000]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 30)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_hre_ha_01"),
+		num_upgrade = 30,
+	}
+	---------------
+	-- Japan / Expansion
+	---------------
+	
+	_CBA.rewards["japanese"][0]={ 
+		unit_upgrade = BP_GetSquadBlueprint("unit_samurai_3_jpn"),	
+		num_upgrade = 40,	
+	}
+	_CBA.rewards["japanese"][350]={
+		title = "$11166446",
+		upgrade = AGS_UP_D_MELEE_I,
+	}
+	_CBA.rewards["japanese"][400]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_samurai_3_jpn"),	
+		num_upgrade = 50,	
+	}
+	_CBA.rewards["japanese"][1100]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_samurai_3_jpn"),	
+		num_upgrade = 60,	
+	}
+	_CBA.rewards["japanese"][2100]={
+		title = "$11166510",
+		upgrade = AGS_UP_D_RANGED_III,
+	}		
+	_CBA.rewards["japanese"][2300]={
+		title = "$11143344",
+		upgrade = AGS_UP_BARDING,
+	}
+	_CBA.rewards["japanese"][2500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 40)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_jpn"),
+		num_upgrade = 40,
+	}
+	_CBA.rewards["japanese"][3500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_jpn"),
+		num_upgrade = 50,
+	}
+	_CBA.rewards["japanese"][4000]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_jpn"),
+		num_upgrade = 60,
+	}
+	---------------
+	-- Byzantine / Expansion
+	---------------
+	
+	_CBA.rewards["byzantine"][0]={ 
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_byz"),	
+		num_upgrade = 40,	
+	}
+	_CBA.rewards["byzantine"][350]={
+		title = "$11166446",
+		upgrade = AGS_UP_D_MELEE_I,
+	}
+	_CBA.rewards["byzantine"][400]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_byz"),	
+		num_upgrade = 50,	
+	}
+	_CBA.rewards["byzantine"][1100]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_byz"),	
+		num_upgrade = 60,	
+	}
+	_CBA.rewards["byzantine"][2100]={
+		title = "$11166510",
+		upgrade = AGS_UP_D_RANGED_III,
+	}		
+	_CBA.rewards["byzantine"][2300]={
+		title = "$11143344",
+		upgrade = AGS_UP_BARDING,
+	}
+	_CBA.rewards["byzantine"][2500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 30)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_byz"),
+		num_upgrade = 30,
+	}
+	_CBA.rewards["byzantine"][3500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 38)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_byz"),
+		num_upgrade = 38,
+	}
+	_CBA.rewards["byzantine"][4000]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 45)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_byz"),
+		num_upgrade = 45,
+	}
+	---------------
+	-- Mongol / Golden Horde (Dynasties)
+	---------------
+	_CBA.rewards["mongol_ha_gol"][0]={ 
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_mon_ha_gol"),	
+		num_upgrade = 40,
+	}
+	_CBA.rewards["mongol_ha_gol"][250]={
+		title = "$11166275",
+		upgrade = AGS_UP_A_MELEE_I,
+	}
+	_CBA.rewards["mongol_ha_gol"][350]={
+		title = "$11166446",
+		upgrade = AGS_UP_D_MELEE_I,
+	}
+	_CBA.rewards["mongol_ha_gol"][400]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_mon_ha_gol"),	
+		num_upgrade = 50,
+	}
+	_CBA.rewards["mongol_ha_gol"][1100]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_mon_ha_gol"),	
+		num_upgrade = 60,
+	}
+	_CBA.rewards["mongol_ha_gol"][2100]={
+		title = "$11166510",
+		upgrade = AGS_UP_D_RANGED_III,
+	}
+	_CBA.rewards["mongol_ha_gol"][2300]={
+		title = "$11143344",
+		upgrade = AGS_UP_BARDING,
+	}
+	_CBA.rewards["mongol_ha_gol"][2500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 47)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_stone_knight_4_mon_ha_gol"),	
+		num_upgrade = 47,
+	}
+	_CBA.rewards["mongol_ha_gol"][3500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 58)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_stone_knight_4_mon_ha_gol"),	
+		num_upgrade = 58,
+	}
+	_CBA.rewards["mongol_ha_gol"][4000]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 70)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_stone_knight_4_mon_ha_gol"),	
+		num_upgrade = 70,
+	}
+	---------------
+	-- Lancaster / English (Dynasties)
+	---------------
+	_CBA.rewards["lancaster"][0]={ 
+		unit_upgrade = BP_GetSquadBlueprint("unit_earlsguard_3_lan"),	
+		num_upgrade = 40,
+	}
+	_CBA.rewards["lancaster"][350]={
+		title = "$11166446",
+		upgrade = AGS_UP_D_MELEE_I,
+	}
+	_CBA.rewards["lancaster"][400]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_earlsguard_3_lan"),	
+		num_upgrade = 50,
+	}
+	_CBA.rewards["lancaster"][1100]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_earlsguard_3_lan"),	
+		num_upgrade = 60,
+	}
+	_CBA.rewards["lancaster"][2100]={
+		title = "$11166510",
+		upgrade = AGS_UP_D_RANGED_III,
+	}
+	_CBA.rewards["lancaster"][2300]={
+		title = "$11143344",
+		upgrade = AGS_UP_BARDING,
+	}
+	_CBA.rewards["lancaster"][2500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 40)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_lan"),	
+		num_upgrade = 40,
+	}
+	_CBA.rewards["lancaster"][3500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_lan"),	
+		num_upgrade = 50,
+	}
+	_CBA.rewards["lancaster"][4000]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_lan"),	
+		num_upgrade = 60,
+	}
+	---------------
+	-- Templar / French (Dynasties)
+	---------------
+	_CBA.rewards["templar"][0]={ 
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_tem"),	
+		num_upgrade = 40,
+	}
+	_CBA.rewards["templar"][350]={
+		title = "$11166446",
+		upgrade = AGS_UP_D_MELEE_I,
+	}
+	_CBA.rewards["templar"][400]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_tem"),	
+		num_upgrade = 50,
+	}
+	_CBA.rewards["templar"][1100]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_tem"),	
+		num_upgrade = 60,
+	}
+	_CBA.rewards["templar"][2100]={
+		title = "$11166510",
+		upgrade = AGS_UP_D_RANGED_III,
+	}
+	_CBA.rewards["templar"][2300]={
+		title = "$11143344",
+		upgrade = AGS_UP_BARDING,
+	}
+	_CBA.rewards["templar"][2500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 40)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_hospitaller_4_tem"),	
+		num_upgrade = 40,
+	}
+	_CBA.rewards["templar"][3500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_hospitaller_4_tem"),	
+		num_upgrade = 50,
+	}
+	_CBA.rewards["templar"][4000]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_hospitaller_4_tem"),	
+		num_upgrade = 60,
+	}
+	---------------
+	-- Japanese / Sengoku (Dynasties)
+	---------------
+	_CBA.rewards["japanese_ha_sen"][0]={ 
+		unit_upgrade = BP_GetSquadBlueprint("unit_samurai_3_jpn_ha_sen"),	
+		num_upgrade = 40,
+	}
+	_CBA.rewards["japanese_ha_sen"][350]={
+		title = "$11166446",
+		upgrade = AGS_UP_D_MELEE_I,
+	}
+	_CBA.rewards["japanese_ha_sen"][400]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_samurai_3_jpn_ha_sen"),	
+		num_upgrade = 50,
+	}
+	_CBA.rewards["japanese_ha_sen"][1100]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_samurai_3_jpn_ha_sen"),	
+		num_upgrade = 60,
+	}
+	_CBA.rewards["japanese_ha_sen"][2100]={
+		title = "$11166510",
+		upgrade = AGS_UP_D_RANGED_III,
+	}
+	_CBA.rewards["japanese_ha_sen"][2300]={
+		title = "$11143344",
+		upgrade = AGS_UP_BARDING,
+	}
+	_CBA.rewards["japanese_ha_sen"][2500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 40)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_jpn_ha_sen"),	
+		num_upgrade = 40,
+	}
+	_CBA.rewards["japanese_ha_sen"][3500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_jpn_ha_sen"),	
+		num_upgrade = 50,
+	}
+	_CBA.rewards["japanese_ha_sen"][4000]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_jpn_ha_sen"),	
+		num_upgrade = 60,
+	}
+	---------------
+	-- Byzantine / Macedonian (Dynasties)
+	---------------
+	_CBA.rewards["byzantine_ha_mac"][0]={ 
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_byz_ha_mac"),	
+		num_upgrade = 40,
+	}
+	_CBA.rewards["byzantine_ha_mac"][350]={
+		title = "$11166446",
+		upgrade = AGS_UP_D_MELEE_I,
+	}
+	_CBA.rewards["byzantine_ha_mac"][400]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_byz_ha_mac"),	
+		num_upgrade = 50,
+	}
+	_CBA.rewards["byzantine_ha_mac"][1100]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_byz_ha_mac"),	
+		num_upgrade = 60,
+	}
+	_CBA.rewards["byzantine_ha_mac"][2100]={
+		title = "$11166510",
+		upgrade = AGS_UP_D_RANGED_III,
+	}
+	_CBA.rewards["byzantine_ha_mac"][2300]={
+		title = "$11143344",
+		upgrade = AGS_UP_BARDING,
+	}
+	_CBA.rewards["byzantine_ha_mac"][2500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 30)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_byz_ha_mac"),	
+		num_upgrade = 30,
+	}
+	_CBA.rewards["byzantine_ha_mac"][3500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 38)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_byz_ha_mac"),	
+		num_upgrade = 38,
+	}
+	_CBA.rewards["byzantine_ha_mac"][4000]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 45)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_byz_ha_mac"),	
+		num_upgrade = 45,
+	}
+	---------------
+	-- Sultanate / Tughluq (Dynasties)
+	---------------
+	_CBA.rewards["sultanate_ha_tug"][0]={ 
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_sul_ha_tug"),	
+		num_upgrade = 40,
+	}
+	_CBA.rewards["sultanate_ha_tug"][250]={
+		title = "$11166275",
+		upgrade = AGS_UP_A_MELEE_I,
+	}
+	_CBA.rewards["sultanate_ha_tug"][350]={
+		title = "$11166446",
+		upgrade = AGS_UP_D_MELEE_I,
+	}
+	_CBA.rewards["sultanate_ha_tug"][400]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_sul_ha_tug"),	
+		num_upgrade = 50,
+	}
+	_CBA.rewards["sultanate_ha_tug"][1100]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_sul_ha_tug"),	
+		num_upgrade = 60,
+	}
+	_CBA.rewards["sultanate_ha_tug"][2100]={
+		title = "$11166510",
+		upgrade = AGS_UP_D_RANGED_III,
+	}
+	_CBA.rewards["sultanate_ha_tug"][2300]={
+		title = "$11143344",
+		upgrade = AGS_UP_BARDING,
+	}
+	_CBA.rewards["sultanate_ha_tug"][2500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 40)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_sul_ha_tug"),	
+		num_upgrade = 40,
+	}
+	_CBA.rewards["sultanate_ha_tug"][3500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_sul_ha_tug"),	
+		num_upgrade = 50,
+	}
+	_CBA.rewards["sultanate_ha_tug"][4000]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_knight_4_sul_ha_tug"),	
+		num_upgrade = 60,
+	}
+
+	------------------
+	--- jin_dynasty --
+	------------------
+	-- Standalone table; Iron Pagoda fills the knight-tier role.
+	-- TODO: find a Jin-specific UCS string for Iron Pagoda entries if "$11182408" ("X Knights") is unsuitable.
+	_CBA.rewards["jin_dynasty"][0]={
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_jin"),
+		num_upgrade = 40,
+	}
+	_CBA.rewards["jin_dynasty"][250]={
+		title = "$11166275",
+		upgrade = AGS_UP_A_MELEE_I,
+	}
+	_CBA.rewards["jin_dynasty"][350]={
+		title = "$11166446",
+		upgrade = AGS_UP_D_MELEE_I,
+	}
+	_CBA.rewards["jin_dynasty"][400]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_jin"),
+		num_upgrade = 50,
+	}
+	_CBA.rewards["jin_dynasty"][1100]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11195782", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Man-at-arms",
+		unit_upgrade = BP_GetSquadBlueprint("unit_manatarms_3_jin"),
+		num_upgrade = 60,
+	}
+	_CBA.rewards["jin_dynasty"][2100]={
+		title = "$11143344",
+		upgrade = AGS_UP_BARDING,
+	}
+	_CBA.rewards["jin_dynasty"][2500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 40)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_iron_pagoda_4_jin"),
+		num_upgrade = 40,
+	}
+	_CBA.rewards["jin_dynasty"][3500]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 50)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_iron_pagoda_4_jin"),
+		num_upgrade = 50,
+	}
+	_CBA.rewards["jin_dynasty"][4000]={
+		title = Loc_FormatText("$11004775", Loc_FormatText("$11219110","$42814"),Loc_FormatText("$11182408", 60)), -- "%1%/%2%", "Upgrade: %1VALUE%","Reinforcements", "%1AMOUNT% Knights",
+		unit_upgrade = BP_GetSquadBlueprint("unit_iron_pagoda_4_jin"),
+		num_upgrade = 60,
+	}
+
+	local shared_reward_civs = {
+		"english", "chinese", "french", "hre", "mongol", "rus", "sultanate", "abbasid", "malian", "ottoman",
+		"abbasid_ha_01", "french_ha_01", "chinese_ha_01", "hre_ha_01", "japanese", "byzantine",
+		"mongol_ha_gol", "lancaster", "templar", "japanese_ha_sen", "byzantine_ha_mac", "sultanate_ha_tug",
+		"jin_dynasty",
+	}
+	for _, civ_name in ipairs(shared_reward_civs) do
+		CBA_Rewards_Onslaught_ApplySharedThresholds(civ_name)
+	end
+
+	-- DLC variant civs: alias to parent reward tables (driven by AGS_CIV_FACTION_MAP)
+	if AGS_CIV_FACTION_MAP ~= nil then
+		for variant, parent in pairs(AGS_CIV_FACTION_MAP) do
+			if _CBA.rewards[parent] ~= nil and _CBA.rewards[variant] == nil then
+				_CBA.rewards[variant] = _CBA.rewards[parent]
+			end
+		end
+	end
+end

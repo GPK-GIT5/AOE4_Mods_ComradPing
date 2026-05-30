@@ -1,0 +1,288 @@
+---------------------------------------------------------------------------------------------------
+-- Authors:
+-- Onslaught Balance Team
+--
+-- Description:
+-- Unlimited Resources Balance — applies production time penalties to high-power units
+-- that become disproportionately strong when resource income is unlimited.
+--
+-- Only active when the "Unlimited Resources" lobby option is selected.
+--
+-- All penalties are applied as production_speed_modifier (MUT_Multiplication) multipliers:
+--   0.6667 = 50% slowdown (1.5x train time)  — standard cap
+--   0.5000 = 100% slowdown (2.0x train time) — Tughlaq War Elephant user override
+--
+-- Royal Knight (Age 2 variants only): penalty applied at Age 2, cancelled at Age 3.
+---------------------------------------------------------------------------------------------------
+
+URB_MODULE = "URBBalance"
+
+-- Dedup guard: tracks which blueprints have already had modifiers applied (by PropertyBagGroupID).
+_URB_MODIFIERS_APPLIED = {}
+
+-- Royal Knight state per-player: nil = untouched, "applied" = penalty active, "cancelled" = lifted.
+_URB_RK_STATE = {}
+
+-- Resolved Royal Knight squad blueprints (cached at PresetFinalize).
+_URB_RK_SBP_CACHE = {}
+
+---------------------------------------------------------------------------------------------------
+-- Static unit penalty table.
+-- Each entry: { match1, match2, anti1, anti2, modifier }
+--   match1 / match2 : both must be substrings of the blueprint name (case-sensitive).
+--   anti1  / anti2  : must NOT appear as substrings of the blueprint name.
+--   modifier        : production_speed_modifier multiplier value.
+--
+-- Matching uses plain substring search (no regex). Entries are evaluated in order; the first
+-- match wins and the remaining entries are skipped for that blueprint.
+---------------------------------------------------------------------------------------------------
+local _URB_STATIC_UNITS = {
+
+    -- === WAR ELEPHANTS ===
+
+    -- Tughlaq War Elephant (Age 3, 45s → 90s; user override: 100% penalty, modifier 0.5)
+    -- Checked BEFORE delhi to avoid "_sul" partial match triggering here first.
+    { match1 = "war_elephant",        match2 = "_sul_ha_tug", anti1 = "tower",        modifier = 0.5000 },
+
+    -- Delhi War Elephant (Age 3, 60s → 90s; 50% penalty)
+    { match1 = "war_elephant",        match2 = "_sul",        anti1 = "_ha_tug", anti2 = "tower",  modifier = 0.6667 },
+
+    -- Byzantine War Elephant (Age 3, 100s → 150s; 50% penalty)
+    { match1 = "war_elephant",        match2 = "_merc_byz",   anti1 = "tower",        modifier = 0.6667 },
+
+    -- === TOWER ELEPHANTS ===
+
+    -- Delhi Sultan's Elite Tower Elephant (Age 3, 200s → 300s; 50% penalty)
+    -- Checked before the generic tower_ pattern to avoid cross-match.
+    { match1 = "war_elephant_tower2",                                                  modifier = 0.6667 },
+
+    -- Delhi Tower Elephant (Age 3, 60s → 90s; 50% penalty)
+    { match1 = "war_elephant_tower_",  match2 = "_sul",       anti1 = "_ha_tug",      modifier = 0.6667 },
+
+    -- Byzantine Tower Elephant (Age 4, 130s → 195s; 50% penalty)
+    { match1 = "war_elephant_tower_",  match2 = "_merc_byz",                          modifier = 0.6667 },
+
+    -- === ORDER OF THE DRAGON (HRE_HA_01) ===
+
+    -- Gilded Knight Age 3 (42s → 63s; 50% penalty)
+    { match1 = "knight_3_hre_ha_01",                                                   modifier = 0.6667 },
+
+    -- Elite Gilded Knight Age 4 (42s → 63s; 50% penalty)
+    { match1 = "knight_4_hre_ha_01",                                                   modifier = 0.6667 },
+
+    -- Gilded Handcannoneer (Age 4, 35s → 53s; 50% penalty)
+    { match1 = "handcannon",          match2 = "_hre_ha_01",                           modifier = 0.6667 },
+
+    -- === BYZANTINE / MACEDONIAN CATAPHRACTS ===
+
+    -- Byzantine Cataphract, non-elite (Age 3, 40s → 60s; 50% penalty)
+    -- match "knight_3_byz", exclude macedonian "_ha_mac" and byzantine merc prefix "_merc"
+    { match1 = "knight_3_byz",        anti1 = "_ha_mac",     anti2 = "_merc",         modifier = 0.6667 },
+
+    -- Byzantine Elite Cataphract (Age 4, 40s → 60s; 50% penalty)
+    { match1 = "knight_4_byz",        anti1 = "_ha_mac",     anti2 = "_merc",         modifier = 0.6667 },
+
+    -- Macedonian Elite Cataphract (Age 4, 40s → 60s; 50% penalty)
+    -- attribName: unit_cataphract_4_byz_mac_ha
+    { match1 = "cataphract",          match2 = "_byz_mac_ha",                          modifier = 0.6667 },
+
+    -- Macedonian Elite Riddari (Age 4, 35s → 53s; 50% penalty)
+    -- attribName: unit_knight_4_byz_ha_mac
+    { match1 = "knight_4_byz_ha_mac",                                                  modifier = 0.6667 },
+
+    -- === TEMPLAR ===
+
+    -- Szlachta Cavalry (Age 4, 40s → 60s; 50% penalty)
+    -- Note: attrib has a typo — "szlatcha" not "szlachta"
+    { match1 = "szlatcha",                                                              modifier = 0.6667 },
+
+    -- === TIMING-UNIQUE ACCESS CASES ===
+
+    -- Rus Early Knight (Age 2 timing-unique, 35s -> 53s; 50% penalty)
+    { match1 = "knight_2_rus",                                                          modifier = 0.6667 },
+
+    -- English Early Man-at-Arms (Age 2 timing-unique, 15s -> 23s; 50% penalty)
+    { match1 = "manatarms_2_eng",                                                       modifier = 0.6667 },
+
+    -- HRE Early Man-at-Arms (Age 2 timing-unique, 22.5s -> 34s; 50% penalty)
+    { match1 = "manatarms_2_hre",                                                       modifier = 0.6667 },
+
+    -- Macedonian Hippodrome Horseman (Hippodrome unlocks in Age 2; 20s -> 30s; 50% penalty)
+    -- Attrib uses dummy champion blueprint: unit_dummy_champion_horseman_byz_ha_mac
+    { match1 = "dummy_champion_horseman_byz_ha_mac",                                    modifier = 0.6667 },
+
+    -- Macedonian Hippodrome Riddari (Hippodrome unlocks in Age 2; 30s -> 45s; 50% penalty)
+    -- Attrib uses dummy champion blueprint: unit_dummy_champion_knight_byz_ha_mac
+    { match1 = "dummy_champion_knight_byz_ha_mac",                                      modifier = 0.6667 },
+}
+
+-- Royal Knight Age 2 blueprints (penalty active in Age 2, cancelled at Age 3).
+-- French + Jeannedarc share the same blueprint (unit_knight_2_fre).
+local _URB_RK_PATTERNS = {
+    "knight_2_fre",            -- French Royal Knight Age 2 (also used by Jeannedarc)
+    "royal_knight_2_merc_byz", -- Byzantine Royal Knight Age 2
+}
+
+local _URB_RK_PENALTY_MODIFIER = 0.6667  -- 50% slowdown at Age 2
+local _URB_RK_CANCEL_MODIFIER  = 1.5000  -- inverse: 0.6667 × 1.5 ≈ 1.0 (restores normal speed)
+
+---------------------------------------------------------------------------------------------------
+-- Module Delegates
+---------------------------------------------------------------------------------------------------
+
+Core_RegisterModule(URB_MODULE)
+
+function URBBalance_UpdateModuleSettings()
+    AGS_Print("URBBalance_UpdateModuleSettings")
+    if _mod.resource_amount ~= "unlimited" then
+        Core_UnregisterModule(URB_MODULE)
+    end
+end
+
+function URBBalance_PresetFinalize()
+    AGS_Print("URBBalance_PresetFinalize")
+    if _mod.resource_amount ~= "unlimited" then
+        AGS_Print("URBBalance: Unlimited Resources not enabled, skipping")
+        return
+    end
+
+    URBBalance_ApplyStaticPenalties(BP_GetSquadBlueprints())
+    URBBalance_InitRoyalKnightWatcher(BP_GetSquadBlueprints())
+end
+
+---------------------------------------------------------------------------------------------------
+-- Static Penalty Functions
+---------------------------------------------------------------------------------------------------
+
+-- Iterates all squad blueprints and applies static production penalties.
+function URBBalance_ApplyStaticPenalties(squad_blueprints)
+    local applied_count = 0
+    for _, squad_bp in pairs(squad_blueprints) do
+        if squad_bp ~= nil then
+            local bp_name = BP_GetName(squad_bp)
+            if bp_name ~= nil then
+                for _, entry in ipairs(_URB_STATIC_UNITS) do
+                    if URBBalance_MatchesEntry(bp_name, entry) then
+                        local pbg_id = squad_bp.PropertyBagGroupID
+                        if _URB_MODIFIERS_APPLIED[pbg_id] == nil then
+                            _URB_MODIFIERS_APPLIED[pbg_id] = true
+                            for _, player in pairs(PLAYERS) do
+                                URBBalance_ApplyModifier(player.id, squad_bp, entry.modifier)
+                            end
+                            applied_count = applied_count + 1
+                            AGS_Print(string.format("URBBalance: modifier=%.4f applied to [%s]", entry.modifier, bp_name))
+                        end
+                        break -- first matching entry wins; no double-applying
+                    end
+                end
+            end
+        end
+    end
+    AGS_Print(string.format("URBBalance: %d blueprint(s) penalized", applied_count))
+end
+
+-- Returns true when bp_name satisfies all match and anti constraints of an entry.
+function URBBalance_MatchesEntry(bp_name, entry)
+    if entry.match1 ~= nil and string.find(bp_name, entry.match1, 1, true) == nil then
+        return false
+    end
+    if entry.match2 ~= nil and string.find(bp_name, entry.match2, 1, true) == nil then
+        return false
+    end
+    if entry.anti1 ~= nil and string.find(bp_name, entry.anti1, 1, true) ~= nil then
+        return false
+    end
+    if entry.anti2 ~= nil and string.find(bp_name, entry.anti2, 1, true) ~= nil then
+        return false
+    end
+    return true
+end
+
+-- Applies a production_speed_modifier to a squad blueprint for one player.
+function URBBalance_ApplyModifier(player_id, squad_bp, modifier_value)
+    local modifier = Modifier_Create(MAT_SquadType, "production_speed_modifier", MUT_Multiplication, false, modifier_value, squad_bp)
+    if modifier ~= nil then
+        local ok, result = pcall(Modifier_ApplyToPlayer, modifier, player_id, 0.0)
+        if not ok then
+            AGS_Print(string.format("[URBBalance] Modifier apply failed P%d: %s", player_id, tostring(result)))
+        end
+    else
+        AGS_Print(string.format("[URBBalance] Failed to create modifier P%d for [%s]", player_id, tostring(BP_GetName(squad_bp))))
+    end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Royal Knight Age-Expiry Watcher
+-- The Age 2 Royal Knight variants are outliers only during Age 2.  Once the global age
+-- advances to Age 3, comparable knights become widely available and the penalty is lifted
+-- by applying the inverse multiplier (1.5 × 0.6667 ≈ 1.0).
+---------------------------------------------------------------------------------------------------
+
+-- Resolves RK blueprints from the full squad blueprint list and registers the interval rule.
+function URBBalance_InitRoyalKnightWatcher(squad_blueprints)
+    _URB_RK_SBP_CACHE = {}
+    for _, squad_bp in pairs(squad_blueprints) do
+        if squad_bp ~= nil then
+            local bp_name = BP_GetName(squad_bp)
+            if bp_name ~= nil then
+                for _, pattern in ipairs(_URB_RK_PATTERNS) do
+                    if string.find(bp_name, pattern, 1, true) ~= nil then
+                        table.insert(_URB_RK_SBP_CACHE, squad_bp)
+                        AGS_Print(string.format("URBBalance: RK watcher registered BP [%s]", bp_name))
+                        break
+                    end
+                end
+            end
+        end
+    end
+
+    if #_URB_RK_SBP_CACHE > 0 then
+        Rule_AddInterval(URBBalance_RoyalKnightAgeWatcher, 5.0)
+        AGS_Print(string.format("URBBalance: RK age watcher started (%d BP(s))", #_URB_RK_SBP_CACHE))
+    else
+        AGS_Print("URBBalance: No RK blueprints found — watcher not started")
+    end
+end
+
+-- Interval rule (5s): applies RK penalty at Age 2, cancels it at Age 3+.
+-- Named global required by Rule_AddInterval (anonymous functions are rejected).
+function URBBalance_RoyalKnightAgeWatcher()
+    local all_settled = true
+
+    for _, player in pairs(PLAYERS) do
+        if not Core_IsPlayerEliminated(player.id) then
+            local pid   = player.id
+            local age   = Player_GetCurrentAge(pid)
+            local state = _URB_RK_STATE[pid]
+
+            if state == nil then
+                all_settled = false
+                if age >= 2 then
+                    -- Apply penalty at Age 2 (Feudal Age)
+                    for _, squad_bp in ipairs(_URB_RK_SBP_CACHE) do
+                        URBBalance_ApplyModifier(pid, squad_bp, _URB_RK_PENALTY_MODIFIER)
+                    end
+                    _URB_RK_STATE[pid] = "applied"
+                    AGS_Print(string.format("URBBalance: RK penalty applied for P%d (age=%d)", pid, age))
+                end
+            elseif state == "applied" then
+                all_settled = false
+                if age >= 3 then
+                    -- Cancel penalty at Age 3 (Castle Age) by applying inverse modifier
+                    for _, squad_bp in ipairs(_URB_RK_SBP_CACHE) do
+                        URBBalance_ApplyModifier(pid, squad_bp, _URB_RK_CANCEL_MODIFIER)
+                    end
+                    _URB_RK_STATE[pid] = "cancelled"
+                    AGS_Print(string.format("URBBalance: RK penalty cancelled for P%d (age=%d)", pid, age))
+                end
+            end
+            -- state == "cancelled": nothing to do for this player
+        end
+    end
+
+    -- Remove the interval rule once every non-eliminated player has settled.
+    if all_settled then
+        pcall(Rule_Remove, URBBalance_RoyalKnightAgeWatcher)
+        AGS_Print("URBBalance: RK age watcher removed (all players settled)")
+    end
+end

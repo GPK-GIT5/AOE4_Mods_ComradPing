@@ -1,0 +1,993 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — Core Infrastructure
+-- Shared state, logging, test runner, module registration, and phase header/footer.
+-- Source of truth for the _cba_debug state table.
+--
+-- Integrates with the three registry layers:
+--   cba_debug_settings.scar  — centralized flag/toggle store
+--   cba_debug_registry.scar  — module manifest & dependency tracking
+--   cba_debug_rules.scar     — declarative invariant enforcement
+--
+-- Branch: onslaught-v3.3
+-- Source files: cba.scar, rewards/cba_rewards.scar, cba_annihilation.scar, cba_religious.scar,
+--   wonder.scar, cba_options.scar, cba_auto_age.scar, ags_global_settings.scar,
+--   gameplay/cba_economy.scar
+---------------------------------------------------------------------------------------------------
+
+CBA_DEBUG_MODULE = "CBA_Debug"
+
+_cba_debug = {
+	enabled = true,
+	logging_enabled = true,  -- Default ON; toggle via DEV menu "CBA Debug" entry.
+	entry_point = "unknown",
+	phase_delay = 2,
+	test_results = {},
+	phase_results = {},
+	_phase_start_idx = 1,
+	_phase_start_passed = 0,
+	_phase_start_total = 0,
+	_phase_counter_getter = nil,
+	_active_run_tag = nil,
+	log_area_filters = {},
+	-- Module registry for split debugger
+	modules = {
+		"cba_debug_settings",
+		"cba_debug_registry",
+		"cba_debug_rules",
+		"cba_debug_core",
+		"cba_debug_helpers",
+		"cba_debug_validation",
+		"cba_debug_inspectors",
+		"cba_debug_stress",
+		"cba_debug_coverage",
+		"cba_debug_event_probes",
+		"cba_debug_destructive",
+		"cba_debug_limits_ui",
+		"cba_debug_leaver",
+		"cba_debug_ui_prompts",
+		"cba_debug_comprehensive_stress",
+		"cba_debug_ai_behavior",
+		"cba_debug_scenario",
+		"cba_debug_playerui",
+		"cba_debug_playerui_anim",
+		"cba_debug_civ_overview",
+		"cba_debug_ai_player",
+		"cba_debug_battle_lag",
+		"cba_debug_session_stress",
+		"cba_debug_determinism",
+	},
+	-- State tables this debugger validates (onslaught-v3.3)
+	state_tables = {"_mod", "_CBA", "_buildingLimit", "_autoage", "_annihilation", "_religious", "_wonder", "AGS_GLOBAL_SETTINGS"},
+}
+
+Core_RegisterModule(CBA_DEBUG_MODULE)
+
+_cba_debug._startup_capture_done = false
+
+---------------------------------------------------------------------------------------------------
+-- Module Delegates
+---------------------------------------------------------------------------------------------------
+
+function CBA_Debug_UpdateModuleSettings(options)
+	if options and options.section then
+		_cba_debug.entry_point = "lobby"
+	else
+		_cba_debug.entry_point = "direct"
+	end
+	if _cba_debug.enabled ~= true then
+		_cba_debug.enabled = true
+	end
+	Debug_CaptureStartupState("module_settings")
+end
+
+function CBA_Debug_EarlyInitializations()
+	_cba_debug.entry_point = "onslaught"
+	if _cba_debug.enabled ~= true then
+		_cba_debug.enabled = true
+	end
+	Debug_CaptureStartupState("early_init")
+end
+
+function Debug_CaptureStartupState(source)
+	if _cba_debug == nil then return end
+	if _cba_debug._startup_capture_done then return end
+	_cba_debug._startup_capture_done = true
+
+	local lines = {}
+	local label = tostring(source or "startup")
+	local ok_gt, gt = pcall(World_GetGameTime)
+	local ok_seed, seed = pcall(World_GetRandSeed)
+
+	table.insert(lines, string.format("[CBA_DEBUG_STARTUP] source=%s", label))
+	table.insert(lines, string.format("[CBA_DEBUG_STARTUP] entry=%s enabled=%s game_time=%.2f", tostring(_cba_debug.entry_point), tostring(_cba_debug.enabled), (ok_gt and gt) or -1))
+	table.insert(lines, string.format("[CBA_DEBUG_STARTUP] rand_seed=%s", ok_seed and tostring(seed) or "unavailable"))
+
+	if AGS_GLOBAL_SETTINGS ~= nil then
+		table.insert(lines, string.format("[CBA_DEBUG_STARTUP] ags.AIPlayers=%s", tostring(AGS_GLOBAL_SETTINGS.AIPlayers)))
+		table.insert(lines, string.format("[CBA_DEBUG_STARTUP] ags.MapType=%s", tostring(AGS_GLOBAL_SETTINGS.MapType)))
+		table.insert(lines, string.format("[CBA_DEBUG_STARTUP] ags.GameMode=%s", tostring(AGS_GLOBAL_SETTINGS.GameMode)))
+		table.insert(lines, string.format("[CBA_DEBUG_STARTUP] ags.Seed=%s", tostring(AGS_GLOBAL_SETTINGS.MapgenRandomSeed)))
+	else
+		table.insert(lines, "[CBA_DEBUG_STARTUP] ags=nil")
+	end
+
+	for _, line in ipairs(lines) do
+		print(line)
+		pcall(Misc_AppendToFile, "scarlog:cba_debug_startup.txt", line .. "\n")
+	end
+end
+
+function Debug_EndSessionDisable(reason)
+	local why = tostring(reason or "manual")
+	_cba_debug.enabled = false
+	if _DEBUG_SETTINGS ~= nil then
+		_DEBUG_SETTINGS["ENABLED"] = false
+	end
+	print(string.format("[CBA_DEBUG] Debug logging disabled for end-of-session. reason=%s", why))
+	pcall(Misc_AppendToFile, "scarlog:cba_debug_startup.txt", string.format("[CBA_DEBUG_END_SESSION] reason=%s\n", why))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Frame-41 OOS Isolation Helpers
+-- Console quick-reference:
+--   Debug_Frame41_IsolationStatus()                 -- Print local startup/config snapshot + parity checklist
+--   Debug_Frame41_IsolationMark("note")            -- Persist marker line in scarlog:cba_debug_startup.txt
+--   Debug_Frame41_IsolationResolved("note")        -- End-of-session: mark resolved and disable debug logging
+---------------------------------------------------------------------------------------------------
+
+function Debug_Frame41_IsolationStatus()
+	if _cba_debug == nil then return end
+	if _cba_debug.enabled ~= true then
+		_cba_debug.enabled = true
+		if _DEBUG_SETTINGS ~= nil then
+			_DEBUG_SETTINGS["ENABLED"] = true
+		end
+	end
+
+	Debug_CaptureStartupState("frame41_status")
+
+	print("[FRAME41_PLAN] Local status captured. Required cross-peer parity fields:")
+	print("[FRAME41_PLAN] 1) option_cba_setting_ai_players")
+	print("[FRAME41_PLAN] 2) maptype")
+	print("[FRAME41_PLAN] 3) mapgen_random_seed")
+	print("[FRAME41_PLAN] Verify DataCRC000/001/002 match before validating runtime determinism.")
+	if type(_AI_DebugSnapshotAllPlayers) == "function" then
+		_AI_DebugSnapshotAllPlayers("frame41_status", "manual_status")
+	end
+
+	pcall(Misc_AppendToFile, "scarlog:cba_debug_startup.txt", "[FRAME41_PLAN] status_invoked=true\n")
+end
+
+function Debug_Frame41_IsolationMark(note)
+	local tag = tostring(note or "checkpoint")
+	local ok_gt, gt = pcall(World_GetGameTime)
+	local line = string.format("[FRAME41_MARK] t=%.2f note=%s", (ok_gt and gt) or -1, tag)
+	print(line)
+	pcall(Misc_AppendToFile, "scarlog:cba_debug_startup.txt", line .. "\n")
+end
+
+function Debug_Frame41_IsolationResolved(note)
+	local why = tostring(note or "frame41_resolved")
+	local line = string.format("[FRAME41_RESOLVED] note=%s", why)
+	print(line)
+	pcall(Misc_AppendToFile, "scarlog:cba_debug_startup.txt", line .. "\n")
+	Debug_EndSessionDisable(why)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Structured Logging
+---------------------------------------------------------------------------------------------------
+
+function DebugLog(area, msg)
+	if not _cba_debug.enabled then return end
+	if _cba_debug.log_area_filters and next(_cba_debug.log_area_filters) then
+		local found = false
+		for _, f in ipairs(_cba_debug.log_area_filters) do
+			if string.lower(area) == string.lower(f) then
+				found = true
+				break
+			end
+		end
+		if not found then return end
+	end
+	print(string.format("[CBA_DEBUG][%s] %s", string.upper(area), msg))
+end
+
+function DebugLog_SetFilter(...)
+	local args = {...}
+	if #args == 0 or (args[1] == nil) then
+		_cba_debug.log_area_filters = {}
+		print("[CBA_DEBUG] Log filter cleared — showing all areas")
+		return
+	end
+	_cba_debug.log_area_filters = args
+	print("[CBA_DEBUG] Log filter set: " .. table.concat(args, ", "))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Test Runner
+---------------------------------------------------------------------------------------------------
+
+function _Debug_RunTest(name, test_fn)
+	print(string.format("    [TEST] %s", name))
+	local ok, result_or_err = pcall(function()
+		local p, d = test_fn()
+		return {pass = p, detail = d or ""}
+	end)
+
+	if not ok then
+		table.insert(_cba_debug.test_results, {
+			name = name, pass = false, detail = "CRASH: " .. tostring(result_or_err)
+		})
+		print(string.format("      CRASH: %s", tostring(result_or_err)))
+	else
+		local r = result_or_err
+		table.insert(_cba_debug.test_results, {
+			name = name, pass = r.pass, detail = r.detail
+		})
+		print(string.format("      %s: %s", r.pass and "PASS" or "FAIL", r.detail))
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase Headers / Footers
+---------------------------------------------------------------------------------------------------
+
+function _Debug_ResetPhaseTracking()
+	_cba_debug.test_results = {}
+	_cba_debug.phase_results = {}
+	_cba_debug._phase_start_idx = 1
+	_cba_debug._phase_start_passed = 0
+	_cba_debug._phase_start_total = 0
+	_cba_debug._current_phase_num = nil
+	_cba_debug._current_phase_name = nil
+end
+
+function _Debug_SetPhaseCounterGetter(getter)
+	if type(getter) == "function" then
+		_cba_debug._phase_counter_getter = getter
+	else
+		_cba_debug._phase_counter_getter = nil
+	end
+end
+
+function _Debug_PhaseHeader(phase_num, phase_name)
+	-- Auto-close previous phase if it wasn't explicitly closed via PhaseFooter
+	if _cba_debug._current_phase_num ~= nil then
+		_Debug_PhaseFooter(_cba_debug._current_phase_num, _cba_debug._current_phase_name)
+	end
+	_cba_debug._current_phase_num = phase_num
+	_cba_debug._current_phase_name = phase_name
+	print("")
+	print(string.format("  ======== PHASE %s: %s ========", tostring(phase_num), string.upper(phase_name)))
+	_cba_debug._phase_start_idx = #_cba_debug.test_results + 1
+
+	if type(_cba_debug._phase_counter_getter) == "function" then
+		local ok, counters = pcall(_cba_debug._phase_counter_getter)
+		if ok and type(counters) == "table" then
+			_cba_debug._phase_start_passed = counters.passed or 0
+			_cba_debug._phase_start_total = counters.total or 0
+		else
+			_cba_debug._phase_start_passed = 0
+			_cba_debug._phase_start_total = 0
+		end
+	else
+		_cba_debug._phase_start_passed = 0
+		_cba_debug._phase_start_total = 0
+	end
+end
+
+function _Debug_PhaseFooter(phase_num, phase_name)
+	local phase_pass = 0
+	local phase_total = 0
+
+	if type(_cba_debug._phase_counter_getter) == "function" then
+		local ok, counters = pcall(_cba_debug._phase_counter_getter)
+		if ok and type(counters) == "table" then
+			phase_pass = (counters.passed or 0) - (_cba_debug._phase_start_passed or 0)
+			phase_total = (counters.total or 0) - (_cba_debug._phase_start_total or 0)
+			if phase_pass < 0 then phase_pass = 0 end
+			if phase_total < 0 then phase_total = 0 end
+			if phase_pass > phase_total then phase_pass = phase_total end
+		end
+	else
+		local start_idx = _cba_debug._phase_start_idx or 1
+		for i = start_idx, #_cba_debug.test_results do
+			phase_total = phase_total + 1
+			if _cba_debug.test_results[i].pass then
+				phase_pass = phase_pass + 1
+			end
+		end
+	end
+
+	table.insert(_cba_debug.phase_results, {
+		phase = phase_num,
+		name = phase_name,
+		passed = phase_pass,
+		total = phase_total,
+	})
+
+	_cba_debug._current_phase_num = nil
+	_cba_debug._current_phase_name = nil
+
+	print(string.format("  -------- Phase %d: %d / %d passed --------", phase_num, phase_pass, phase_total))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Reusable Test Helpers
+---------------------------------------------------------------------------------------------------
+
+function _Debug_TableExists(name, ref)
+	if ref == nil then return false, name .. " is nil" end
+	return true, name .. " present"
+end
+
+function _Debug_FunctionExists(fn_name)
+	if type(_G[fn_name]) == "function" then return true, fn_name .. " found" end
+	return false, fn_name .. " missing"
+end
+
+function _Debug_CountKeys(tbl)
+	local count = 0
+	for _ in pairs(tbl) do count = count + 1 end
+	return count
+end
+
+function _Debug_GetPlayerCiv(player)
+	local ok, civ = pcall(Player_GetRaceName, player.id)
+	return ok and civ or "unknown"
+end
+---------------------------------------------------------------------------------------------------
+-- Universal Completion Marker
+-- Machine-parseable end-of-suite marker for scarlog grep + in-game notification + file log.
+---------------------------------------------------------------------------------------------------
+
+function _Debug_EndMarker(suite_name, passed, total, elapsed_seconds)
+	-- Auto-close last open phase before emitting the completion marker
+	if _cba_debug._current_phase_num ~= nil then
+		_Debug_PhaseFooter(_cba_debug._current_phase_num, _cba_debug._current_phase_name)
+	end
+	_Debug_SetPhaseCounterGetter(nil)
+	_cba_debug._active_run_tag = nil
+
+	local status = (passed == total) and "PASS" or "FAIL"
+	local marker_line = string.format("[CBA_DEBUG_END] suite=%s passed=%d total=%d elapsed=%.1fs status=%s",
+		suite_name, passed, total, elapsed_seconds, status)
+	print("")
+	print(marker_line)
+	print(string.format("  ======== %s COMPLETE ========", string.upper(suite_name)))
+
+	-- Persistent file log (scarlog: alias writes to log directory, survives match end)
+	pcall(Misc_AppendToFile, "scarlog:cba_debug_runs.txt", marker_line .. "\n")
+
+	-- In-game event cue with audio stinger
+	pcall(UI_CreateEventCue,
+		string.format("[DEBUG] %s Complete!", suite_name),
+		string.format("%d/%d passed", passed, total),
+		"high_priority", "", "sfx_ui_event_queue_high_priority_play",
+		5.0)
+
+	-- Master suite orchestration: record result and advance when awaited suite completes
+	if _cba_debug._master and _cba_debug._master.running and suite_name == _cba_debug._master.awaiting then
+		table.insert(_cba_debug._master.results, {
+			suite = suite_name, passed = passed, total = total,
+		})
+		_Debug_ScheduleNextPhase(_Debug_MasterAdvance, 2, "Next Suite", "MasterSuite")
+	end
+
+	-- Sub-orchestrator: system-level masters use the same EndMarker hook
+	if _cba_debug._sub and _cba_debug._sub.running and suite_name == _cba_debug._sub.awaiting then
+		table.insert(_cba_debug._sub.results, {
+			suite = suite_name, passed = passed, total = total,
+		})
+		_Debug_ScheduleNextPhase(_Debug_SubAdvance, 2, "Next Sub-Suite", _cba_debug._sub.name)
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Step Mode — Interactive phase stepping
+-- Toggle with Debug_StepMode(true/false). When enabled, suites pause between phases.
+-- Console: Debug_Continue() to resume, Debug_Skip() to skip, Debug_StepStatus() to inspect.
+---------------------------------------------------------------------------------------------------
+
+_cba_debug.step_mode = false
+_cba_debug.step_waiting = false
+_cba_debug.step_callback = nil
+_cba_debug.step_phase_name = ""
+_cba_debug.step_suite_name = ""
+
+function Debug_StepMode(enabled)
+	_cba_debug.step_mode = (enabled == true)
+	print(string.format("[CBA_DEBUG] Step mode: %s", _cba_debug.step_mode and "ON" or "OFF"))
+	if not _cba_debug.step_mode and _cba_debug.step_waiting then
+		print("[CBA_DEBUG] Auto-resuming paused phase...")
+		Debug_Continue()
+	end
+end
+
+function Debug_Continue()
+	if not _cba_debug.step_waiting then
+		print("[CBA_DEBUG] Not paused — nothing to continue.")
+		return
+	end
+	local cb = _cba_debug.step_callback
+	_cba_debug.step_waiting = false
+	_cba_debug.step_callback = nil
+
+	print(string.format("[STEP] Resuming: %s", _cba_debug.step_phase_name))
+	if cb then cb() end
+end
+
+function Debug_Skip()
+	if not _cba_debug.step_waiting then
+		print("[CBA_DEBUG] Not paused — nothing to skip.")
+		return
+	end
+	_cba_debug.step_waiting = false
+	_cba_debug.step_callback = nil
+	print(string.format("[STEP] Skipped: %s", _cba_debug.step_phase_name))
+end
+
+function Debug_StepStatus()
+	print(string.format("[CBA_DEBUG] step_mode=%s waiting=%s suite=%s phase=%s",
+		tostring(_cba_debug.step_mode),
+		tostring(_cba_debug.step_waiting),
+		_cba_debug.step_suite_name,
+		_cba_debug.step_phase_name))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase Scheduler — Replaces direct Rule_AddOneShot in suites for step-mode support.
+-- When step_mode=false: identical to Rule_AddOneShot (zero regression).
+-- When step_mode=true: pauses and waits for Debug_Continue()/Debug_Skip().
+---------------------------------------------------------------------------------------------------
+
+function _Debug_ScheduleNextPhase(next_fn, delay, phase_name, suite_name)
+	if _cba_debug.step_mode then
+		_cba_debug.step_waiting = true
+		_cba_debug.step_callback = next_fn
+		_cba_debug.step_phase_name = phase_name or "unknown"
+		_cba_debug.step_suite_name = suite_name or ""
+		print(string.format("[STEP] Paused before \"%s\". Call Debug_Continue() or Debug_Skip()", phase_name or "next"))
+	else
+		Rule_AddOneShot(next_fn, delay)
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Hook Registry — Named functions callable from console during debug sessions.
+-- Console: Debug_RegisterHook(name, fn), Debug_FireHook(name), Debug_ListHooks(), Debug_ClearHooks()
+---------------------------------------------------------------------------------------------------
+
+_cba_debug.hooks = {}
+
+function Debug_RegisterHook(name, fn)
+	if type(name) ~= "string" or type(fn) ~= "function" then
+		print("[CBA_DEBUG] RegisterHook requires (string name, function fn)")
+		return
+	end
+	_cba_debug.hooks[name] = fn
+	print(string.format("[CBA_DEBUG] Hook registered: %s", name))
+end
+
+function Debug_FireHook(name)
+	local fn = _cba_debug.hooks[name]
+	if fn == nil then
+		print(string.format("[CBA_DEBUG] Hook '%s' not found. Use Debug_ListHooks()", name))
+		return
+	end
+	print(string.format("[CBA_DEBUG] Firing hook: %s", name))
+	local ok, err = pcall(fn)
+	if not ok then
+		print(string.format("[CBA_DEBUG] Hook '%s' crashed: %s", name, tostring(err)))
+	end
+end
+
+function Debug_ListHooks()
+	local count = 0
+	print("[CBA_DEBUG] Registered hooks:")
+	for name, _ in pairs(_cba_debug.hooks) do
+		print(string.format("  - %s", name))
+		count = count + 1
+	end
+	if count == 0 then print("  (none)") end
+	if count > 20 then print("  WARNING: >20 hooks registered — consider Debug_ClearHooks()") end
+end
+
+function Debug_ClearHooks()
+	_cba_debug.hooks = {}
+	print("[CBA_DEBUG] All hooks cleared.")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Master Suite Orchestrator
+-- Single console command to run all suites end-to-end with completion chaining.
+-- Supports step mode: enable Debug_StepMode(true) before calling, or pass true.
+-- Console: Debug_RunAll()  or  Debug_RunAll(true)  (enables step mode)
+---------------------------------------------------------------------------------------------------
+
+function Debug_RunAll(step)
+	_cba_debug.enabled = true
+	if step == true then Debug_StepMode(true) end
+
+	local ok, gt = pcall(World_GetGameTime)
+	_cba_debug._master = {
+		running = true,
+		queue = {},
+		results = {},
+		start_time = ok and gt or 0,
+		awaiting = nil,
+	}
+
+	_Debug_MasterEnqueue(_Debug_MasterRunSmoke, "SmokeTests")
+	_Debug_MasterEnqueue(Debug_FullValidation, "Validation")
+	_Debug_MasterEnqueue(Debug_StressTest, "StressTest")
+	_Debug_MasterEnqueue(Debug_CoverageTest, "Coverage")
+	_Debug_MasterEnqueue(Debug_EventProbes, "EventProbes")
+	_Debug_MasterEnqueue(Debug_AdvancedStressAll, "AdvStressAll")
+	_Debug_MasterEnqueue(Debug_InteractiveChecks, "InteractiveChecks")
+
+	-- Q&A suites excluded from default flow. Run manually:
+	--   scar_exec Debug_ComprehensiveStress()
+	--   scar_exec Debug_AIBehavior()
+	--   scar_exec Debug_QADiagnostic()
+
+	print("")
+	print("================================================================")
+	print("  CBA DEBUG — MASTER SUITE (7 suites)")
+	print("  Step mode: " .. tostring(_cba_debug.step_mode))
+	print("  Each suite prints [CBA_DEBUG_END] on completion.")
+	print("================================================================")
+
+	_Debug_MasterAdvance()
+end
+
+---------------------------------------------------------------------------------------------------
+-- Console: Debug_RunFullValidation()
+-- Runs the unified SiegeTest through the master orchestrator.
+-- Reports aggregate results.
+---------------------------------------------------------------------------------------------------
+
+function Debug_RunFullValidation()
+	_cba_debug.enabled = true
+
+	local ok, gt = pcall(World_GetGameTime)
+	_cba_debug._master = {
+		running = true,
+		queue = {},
+		results = {},
+		start_time = ok and gt or 0,
+		awaiting = nil,
+	}
+
+	_Debug_MasterEnqueue(Debug_SiegeTest, "SiegeTest")
+
+	print("")
+	print("================================================================")
+	print("  CBA DEBUG — FULL VALIDATION (1 suite)")
+	print("  1. SiegeTest (unified: BP audit, ram/ST lifecycle,")
+	print("     generic weapons, SE gate, field edge cases,")
+	print("     workshop enforcement, event handlers)")
+	print("  Suite prints [CBA_DEBUG_END] on completion.")
+	print("================================================================")
+
+	_Debug_MasterAdvance()
+end
+
+function _Debug_MasterEnqueue(fn, end_marker)
+	table.insert(_cba_debug._master.queue, {fn = fn, end_marker = end_marker})
+end
+
+function _Debug_MasterRunSmoke()
+	local passed, total = Debug_RunSmokeTests()
+	_Debug_EndMarker("SmokeTests", passed or 0, total or 0, 0)
+end
+
+function _Debug_MasterAdvance()
+	local m = _cba_debug._master
+	if m == nil or not m.running then return end
+
+	if #m.queue == 0 then
+		_Debug_MasterFinalReport()
+		return
+	end
+
+	local entry = table.remove(m.queue, 1)
+	m.awaiting = entry.end_marker
+
+	print(string.format("\n[MASTER] >>> Starting: %s (%d remaining)", entry.end_marker, #m.queue))
+	local ok, err = pcall(entry.fn)
+	if not ok then
+		print(string.format("[MASTER] CRASHED on '%s': %s", entry.end_marker, tostring(err)))
+		table.insert(m.results, { suite = entry.end_marker, passed = 0, total = 1 })
+		_Debug_ScheduleNextPhase(_Debug_MasterAdvance, 1, "Recovery", "MasterSuite")
+	end
+end
+
+function _Debug_MasterFinalReport()
+	local m = _cba_debug._master
+	local ok, gt = pcall(World_GetGameTime)
+	local elapsed = (ok and m.start_time) and (gt - m.start_time) or 0
+
+	local total_passed = 0
+	local total_tests = 0
+	for _, r in ipairs(m.results) do
+		total_passed = total_passed + r.passed
+		total_tests = total_tests + r.total
+	end
+
+	print("")
+	print("================================================================")
+	print("  MASTER SUITE — ALL SUITES COMPLETE")
+	print(string.format("  Suites run: %d  Aggregate: %d/%d  Elapsed: %.1fs", #m.results, total_passed, total_tests, elapsed))
+	for _, r in ipairs(m.results) do
+		local st = (r.passed == r.total) and "PASS" or "FAIL"
+		print(string.format("    [%s] %s: %d/%d", st, r.suite, r.passed, r.total))
+	end
+	print("================================================================")
+
+	m.running = false
+	_Debug_EndMarker("MasterSuite", total_passed, total_tests, elapsed)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Sub-Orchestrator — System-level master runners
+-- Same queue/advance/report pattern as MasterSuite, but uses _cba_debug._sub.
+-- Only one sub-orchestrator can run at a time. If _master is active, sub results
+-- feed into it via _Debug_EndMarker for the sub's own name.
+--
+-- Usage from system .run() functions:
+--   _Debug_SubStart("SiegeAll")
+--   _Debug_SubEnqueue(Debug_SiegeTest, "SiegeTest")
+--   _Debug_SubLaunch()
+---------------------------------------------------------------------------------------------------
+
+function _Debug_SubStart(name)
+	_cba_debug.enabled = true
+	local ok, gt = pcall(World_GetGameTime)
+	_cba_debug._sub = {
+		running = true,
+		name = name,
+		queue = {},
+		results = {},
+		start_time = ok and gt or 0,
+		awaiting = nil,
+	}
+end
+
+function _Debug_SubEnqueue(fn, end_marker)
+	if _cba_debug._sub == nil then return end
+	table.insert(_cba_debug._sub.queue, {fn = fn, end_marker = end_marker})
+end
+
+function _Debug_SubLaunch()
+	local s = _cba_debug._sub
+	if s == nil then return end
+
+	print("")
+	print(string.format("  ──── %s (%d sub-suites) ────", s.name, #s.queue))
+	_Debug_SubAdvance()
+end
+
+function _Debug_SubAdvance()
+	local s = _cba_debug._sub
+	if s == nil or not s.running then return end
+
+	if #s.queue == 0 then
+		_Debug_SubFinalReport()
+		return
+	end
+
+	local entry = table.remove(s.queue, 1)
+	s.awaiting = entry.end_marker
+
+	print(string.format("\n  [%s] >>> %s (%d remaining)", s.name, entry.end_marker, #s.queue))
+	local ok, err = pcall(entry.fn)
+	if not ok then
+		print(string.format("  [%s] CRASHED on '%s': %s", s.name, entry.end_marker, tostring(err)))
+		table.insert(s.results, { suite = entry.end_marker, passed = 0, total = 1 })
+		_Debug_ScheduleNextPhase(_Debug_SubAdvance, 1, "Recovery", s.name)
+	end
+end
+
+function _Debug_SubFinalReport()
+	local s = _cba_debug._sub
+	if s == nil then return end
+
+	local ok, gt = pcall(World_GetGameTime)
+	local elapsed = (ok and s.start_time) and (gt - s.start_time) or 0
+
+	local total_passed = 0
+	local total_tests = 0
+	for _, r in ipairs(s.results) do
+		total_passed = total_passed + r.passed
+		total_tests = total_tests + r.total
+	end
+
+	print("")
+	print(string.format("  ──── %s COMPLETE ────", s.name))
+	print(string.format("  Sub-suites: %d  Aggregate: %d/%d  Elapsed: %.1fs", #s.results, total_passed, total_tests, elapsed))
+	for _, r in ipairs(s.results) do
+		local st = (r.passed == r.total) and "PASS" or "FAIL"
+		print(string.format("    [%s] %s: %d/%d", st, r.suite, r.passed, r.total))
+	end
+
+	s.running = false
+	-- Fire EndMarker with the sub-orchestrator's own name so the master can chain it
+	_Debug_EndMarker(s.name, total_passed, total_tests, elapsed)
+end
+
+---------------------------------------------------------------------------------------------------
+-- _Debug_LogCommandFailure
+-- Structured log when a console command hits an unexpected state.
+-- Usage: _Debug_LogCommandFailure("Debug_GetSiegeLimitState", "player2 siegeLimit_count is nil")
+---------------------------------------------------------------------------------------------------
+function _Debug_LogCommandFailure(command_name, reason)
+	local msg = string.format("[CBA_DEBUG_FAIL] command=%s reason=%s", tostring(command_name), tostring(reason))
+	print(msg)
+	DebugLog("command_failure", msg)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Hierarchical Debug Namespace
+-- Provides `debug` global table with tag-based dispatch, discovery, and safety layer.
+-- All existing Debug_* globals remain unchanged. The `debug.*` paths are aliases.
+--
+-- Primary commands:
+--   debug.run()              -- run all suites (== Debug_RunAll)
+--   debug.run("siege")       -- run tagged subsystem
+--   debug.list()             -- show available tags
+--   debug.status()           -- print hierarchy + safety state
+---------------------------------------------------------------------------------------------------
+
+debug = {
+	-- System sub-tables (populated by domain files via self-registration)
+	playerUI    = {},
+	leaver      = {},
+	players     = {},
+	siege       = {},
+	limits      = {},
+	data        = {},
+	ai          = {},
+	qa          = {},
+	validation  = {},
+	inspect     = {},
+	helpers     = {},
+	prompt      = {},
+
+	-- Internal registry: tag -> {handler, description, tier}
+	_registry = {},
+}
+
+---------------------------------------------------------------------------------------------------
+-- Registry
+---------------------------------------------------------------------------------------------------
+
+--- Register a tag for debug.run() dispatch.
+-- @param tag       string   Short key (e.g. "siege", "playerui")
+-- @param handler   function Called when debug.run(tag) is invoked
+-- @param desc      string   One-line description shown in debug.list()
+-- @param tier      number   Optional tier (1=quick, 2=medium, 3=heavy). Default 2.
+function debug._register(tag, handler, desc, tier)
+	if type(tag) ~= "string" or type(handler) ~= "function" then
+		print("[DEBUG] _register requires (string tag, function handler)")
+		return
+	end
+	if debug._registry[tag] ~= nil then
+		print(string.format("[DEBUG] WARNING: tag '%s' already registered — overwriting", tag))
+	end
+	debug._registry[tag] = {
+		handler = handler,
+		description = desc or "",
+		tier = tier or 2,
+	}
+end
+
+---------------------------------------------------------------------------------------------------
+-- Tag-based Dispatcher
+---------------------------------------------------------------------------------------------------
+
+--- Primary entry point. Dispatches by tag or runs all suites.
+-- @param tag  string|nil  nil or "all" → Debug_RunAll(); known tag → handler; unknown → debug.list()
+function debug.run(tag)
+	if _cba_debug._active_run_tag ~= nil then
+		print(string.format("[DEBUG] Busy: '%s' is still running. Wait for [CBA_DEBUG_END] before starting another suite.", tostring(_cba_debug._active_run_tag)))
+		return
+	end
+
+	if tag == nil or (type(tag) == "string" and string.lower(tag) == "all") then
+		_cba_debug._active_run_tag = "all"
+		_Debug_ResetPhaseTracking()
+		_Debug_SetPhaseCounterGetter(nil)
+		Debug_RunAll()
+		return
+	end
+	local entry = debug._registry[tag]
+	if entry == nil then
+		print(string.format("[DEBUG] Unknown tag '%s'. Available tags:", tostring(tag)))
+		debug.list()
+		return
+	end
+	_cba_debug.enabled = true
+	_cba_debug._active_run_tag = tag
+	_Debug_ResetPhaseTracking()
+	_Debug_SetPhaseCounterGetter(nil)
+	print(string.format("[DEBUG] >>> Running: %s — %s", tag, entry.description))
+	local ok, err = pcall(entry.handler)
+	if not ok then
+		_cba_debug._active_run_tag = nil
+		_Debug_SetPhaseCounterGetter(nil)
+		print(string.format("[DEBUG] Tag '%s' crashed: %s", tag, tostring(err)))
+	end
+end
+
+function debug.unlock()
+	_cba_debug._active_run_tag = nil
+	_Debug_SetPhaseCounterGetter(nil)
+	print("[DEBUG] Active-run lock cleared.")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Discovery
+---------------------------------------------------------------------------------------------------
+
+--- List all registered tags, optionally filtered by substring.
+-- @param filter  string|nil  Substring match against tag or description (case-insensitive)
+function debug.list(filter)
+	print("[DEBUG] Registered tags:")
+	local count = 0
+	local sorted = {}
+	for tag, _ in pairs(debug._registry) do
+		table.insert(sorted, tag)
+	end
+	table.sort(sorted)
+	for _, tag in ipairs(sorted) do
+		local entry = debug._registry[tag]
+		local line = string.format("  %-20s T%d  %s", tag, entry.tier, entry.description)
+		if filter == nil or string.find(string.lower(tag .. " " .. entry.description), string.lower(filter)) then
+			print(line)
+			count = count + 1
+		end
+	end
+	if count == 0 then
+		print("  (no matching tags)")
+	end
+	print(string.format("[DEBUG] %d tag(s) shown", count))
+end
+
+--- Print the full debug namespace hierarchy and safety state.
+function debug.status()
+	print("[DEBUG] === Namespace Status ===")
+	local systems = {"playerUI", "leaver", "players", "siege", "limits", "data", "ai", "qa", "validation", "inspect", "helpers", "prompt"}
+	for _, name in ipairs(systems) do
+		local tbl = debug[name]
+		if tbl then
+			local fns = {}
+			for k, v in pairs(tbl) do
+				if type(v) == "function" then
+					table.insert(fns, k)
+				end
+			end
+			table.sort(fns)
+			if #fns > 0 then
+				print(string.format("  debug.%-12s [%d] %s", name, #fns, table.concat(fns, ", ")))
+			else
+				print(string.format("  debug.%-12s (empty)", name))
+			end
+		end
+	end
+
+	-- Registry summary
+	local tag_count = 0
+	for _ in pairs(debug._registry) do tag_count = tag_count + 1 end
+	print(string.format("  Registry: %d tag(s)", tag_count))
+
+	-- Safety state
+	if debug._safety then
+		print(string.format("  Safety: exclude_human=%s", tostring(debug._safety.exclude_human)))
+	end
+
+	print("[DEBUG] === End Status ===")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Safety Layer
+-- Human player excluded from destructive operations by default.
+-- Override per-session with debug._safety.include_human().
+-- Direct Debug_Force* globals remain unguarded (expert escape hatch).
+---------------------------------------------------------------------------------------------------
+
+debug._safety = {
+	exclude_human = true,
+}
+
+--- Explicitly allow destructive operations on the human player for this session.
+-- Prints confirmation. Resets on match restart.
+function debug._safety.include_human()
+	debug._safety.exclude_human = false
+	print("[DEBUG_SAFETY] Human player INCLUDED in destructive targets for this session.")
+	print("[DEBUG_SAFETY] Call debug._safety.exclude_human_reset() to re-enable protection.")
+end
+
+--- Re-enable human player protection.
+function debug._safety.exclude_human_reset()
+	debug._safety.exclude_human = true
+	print("[DEBUG_SAFETY] Human player protection re-enabled.")
+end
+
+--- Validate a player index target. Returns true if safe to proceed.
+-- When exclude_human is true and target is the local human player, prints warning and returns false.
+-- @param player_index  number  1-based player index
+-- @return boolean  true if target is valid for destructive operations
+function debug._safety.validate_target(player_index)
+	if not debug._safety.exclude_human then
+		return true
+	end
+	-- Guard: check if target is the local (human) player
+	local ok, local_player = pcall(Game_GetLocalPlayer)
+	if not ok or local_player == nil then
+		return true  -- cannot determine local player; allow (fail-open for AI-only lobbies)
+	end
+	local ok2, target_player = pcall(World_GetPlayerAt, player_index)
+	if not ok2 or target_player == nil then
+		print(string.format("[DEBUG_SAFETY] Invalid player index: %d", player_index))
+		return false
+	end
+	if target_player == local_player then
+		print(string.format("[DEBUG_SAFETY] BLOCKED: Player %d is the human player.", player_index))
+		print("[DEBUG_SAFETY] Use debug._safety.include_human() to override.")
+		return false
+	end
+	return true
+end
+
+--- Advisory check: is this a test lobby or direct console entry?
+-- Returns true for "lobby" or "direct" entry points. Does NOT block automatically.
+-- @return boolean
+function debug._safety.is_test_lobby()
+	local ep = _cba_debug.entry_point
+	return (ep == "lobby" or ep == "direct")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Settings Registry Bridge
+-- Syncs _cba_debug fields with the centralized _DEBUG_SETTINGS store so both
+-- access paths (legacy _cba_debug.enabled and new Debug_GetSetting("ENABLED"))
+-- read consistent values. During the transition, _cba_debug fields remain authoritative
+-- and are synced INTO the registry at load time.
+---------------------------------------------------------------------------------------------------
+
+if _DEBUG_SETTINGS ~= nil then
+	-- Sync core defaults from _cba_debug into the settings registry
+	_DEBUG_SETTINGS["ENABLED"]          = _cba_debug.enabled
+	_DEBUG_SETTINGS["STEP_MODE"]        = _cba_debug.step_mode
+	_DEBUG_SETTINGS["PHASE_DELAY"]      = _cba_debug.phase_delay
+	_DEBUG_SETTINGS["LOG_AREA_FILTERS"] = _cba_debug.log_area_filters
+
+	-- Safety flag bridge
+	if debug._safety then
+		_DEBUG_SETTINGS["SAFETY_EXCLUDE_HUMAN"] = debug._safety.exclude_human
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Module Registry — Register core itself
+-- Core registers as the first module with its manifest so Debug_ListModules() includes it.
+---------------------------------------------------------------------------------------------------
+
+if Debug_RegisterModule ~= nil then
+	Debug_RegisterModule({
+		name = "core",
+		tags = {},
+		tier = 1,
+		depends = {},
+		state_tables = {"_cba_debug"},
+		required_game = {},
+		namespace = nil,
+		description = "Core infrastructure: logging, test runner, phase orchestration, safety layer",
+	}, {
+		-- Core exposes these through the debug.* namespace directly (already wired above)
+		-- No additional handler registration needed — debug.run, debug.list, debug.status
+		-- are set up in the namespace block above.
+	})
+end

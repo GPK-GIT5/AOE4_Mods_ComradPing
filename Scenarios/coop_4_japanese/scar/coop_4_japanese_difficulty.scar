@@ -1,0 +1,363 @@
+-- Difficulty check / Thanks to AGameAnx		
+function GetAIDifficulty(player)
+	local AIPlayerNames = {
+		[Loc_ToAnsi(1309)] = 0,     -- A.I. Easy
+		[Loc_ToAnsi(1310)] = 1,     -- A.I. Intermediate
+		[Loc_ToAnsi(1311)] = 2,     -- A.I. Hard
+		[Loc_ToAnsi(1312)] = 3,     -- A.I. Hardest
+		[Loc_ToAnsi(11250912)] = 4, -- A.I. Redicilous
+		[Loc_ToAnsi(11250913)] = 5, -- A.I. Outrageous
+		[Loc_ToAnsi(11250914)] = 6, -- A.I. Absurd
+	}
+	-- Strip number prefix from display name (e.g., "5 A.I. Absurd" -> "A.I. Absurd")
+	local display_name = Loc_ToAnsi(Player_GetDisplayName(player))
+	local clean_name = string.match(display_name, "^%d+%s+(.+)") or display_name
+	return AIPlayerNames[clean_name] or 2
+end
+
+-- ============================================================
+-- DIFFICULTY CONFIGURATION — Japan Co-op Scenario
+-- ============================================================
+--
+-- This file centralizes EVERY difficulty setting so you can
+-- tune the scenario without touching any game-logic files.
+--
+-- HOW IT WORKS
+--   1. The game reads the AI difficulty selected in lobby.
+--   2. Difficulty_Init() picks the matching tier below and
+--      stores it in the global "DC" (Difficulty Config).
+--   3. All game logic reads from DC instead of raw numbers.
+--
+-- HOW TO EDIT
+--   Find the tier you want to change (Easy, Intermediate, …)
+--   and adjust the values inside it. Each field has a comment
+--   explaining what it does. Save the file and test in-game.
+--
+-- TIER REFERENCE
+--   0 = Easy          Beginner-friendly, extra resources
+--   1 = Intermediate  Baseline difficulty (≈ TIER_DEFAULTS)
+--   2 = Hard          Standard challenge, siege locked
+--   3 = Hardest       Extra waves, fewer resources
+--   4 = Ridiculous    Garrison archers, stronger AI upgrades
+--   5 = Outrageous    Workshop locked, top-tier AI upgrades
+--   6 = Absurd        Everything maxed, early AI upgrades
+--
+-- ============================================================
+
+-- ---------------------------------------------------------
+-- _MergeTier: Shallow-copy TIER_DEFAULTS, then overlay.
+-- Returns a complete tier table ready for DC consumption.
+-- ---------------------------------------------------------
+local function _MergeTier(overrides)
+    local tier = {}
+    for k, v in pairs(TIER_DEFAULTS) do
+        tier[k] = v
+    end
+    for k, v in pairs(overrides) do
+        tier[k] = v
+    end
+    return tier
+end
+
+-- ============================================================
+-- TIER_DEFAULTS — INTERMEDIATE BASELINE 
+--
+-- This block defines INTERMEDIATE difficulty (Tier 1).
+-- All tiers override only the fields that differ from this baseline.
+-- Every field used in Difficulty_Config is defined here.
+-- ============================================================
+TIER_DEFAULTS = {
+
+    -- ===== RESOURCES & SCALING =====
+    starting_food                           = 2000,       -- Food given after village capture
+    starting_gold                           = 1000,       -- Gold given after village capture
+    starting_wood                           = 750,       -- Wood given after village capture
+    tc_health_multiplier                    = 10,         -- NPC town center HP scale (higher = tougher)
+
+    -- ===== ENEMY DEFENSES (outposts & keeps) =====
+    outpost_handcannon_slits                = true,      -- Handcannon Slits upgrade on outposts
+    outpost_garrison                        = false,     -- Garrison 5 archers per outpost
+    keep_garrison                           = true,      -- Fill keeps with 15 archers each
+
+    -- ===== PLAYER REINFORCEMENTS (army respawn below 30%) =====
+    player_reinforcements                   = true,      -- Enable reinforcement respawn rule
+    reinforcement_pre_capture               = true,      -- Allow deploy before village capture
+
+    -- ===== PATROLS & VILLAGE DEFENSE (starting area harassment) =====
+    patrol_respawn                          = true,      -- Enable respawning patrol groups
+    patrol_strength                         = "easy",    -- "easy" | "hard" patrol unit type
+    village_defender_strength               = "easy",    -- "easy" | "hard" flank patrol units
+
+    -- ===== PLAYER RESTRICTIONS (Restriction_Profile at start) =====
+    player_starting_upgrades_bonus          = true,     -- Grant free melee/ranged upgrades
+    disable_conversion                      = true,      -- Block monk conversion ability
+    restrict_keep                           = true,      -- Lock keep building
+    restrict_keep_landmarks                 = true,     -- Lock keep-related landmarks
+    restrict_siege                          = true,      -- Lock siege units (mangonel, etc.)
+    restrict_engineers                      = false,     -- Lock siege engineers upgrade
+    restrict_workshop                       = false,     -- Lock siege workshop building
+    restrict_age4                           = true,     -- Cap max age to Castle, lock Age 4
+
+    -- ===== PROFILE TRANSITIONS (after Phase 2 siege capture) =====
+    phase2_siege_profile                    = "siege_available",  -- "siege_available" | "engineers_available"
+    phase2_workshop_unlock                  = false,              -- Also unlock workshop (Absurd only)
+
+    -- ===== ATTACK WAVES (Phase 1 village defense, ~5–30 min) =====
+    waves_5min_flank                        = true,      -- Extra flank wave at 5 min
+    waves_late_extra                        = true,      -- Extra waves at 40/45 min
+    waves_hardest_extra                     = true,      -- Hardest-tier waves (~20/35/45 min)
+    hard_waves_siege                        = false,      -- Siege waves at ~30 min (mangonels)
+    hard_waves_infantry                     = false,      -- Extra infantry waves at ~30 min
+
+    -- ===== PHASE 2 SPAWNS & COUNTER ATTACKS =====
+    phase2_spawn_tier                       = "easy",    -- "easy" | "hard" unit composition
+    counter_attack_village                  = false,     -- Mangonel attack after village capture
+    workshop_counter_type                   = "wave_city_10m_flank",   -- Workshop defense wave key
+
+    -- ===== CITY #2 DEFENSE (Phase 3) =====
+    city2_counter_wave                      = "wave_city_15m",   -- Counter wave at city spawn
+    city2_defender_strength                 = "easy",            -- "easy" | "hard" defenders
+    city2_flank_wave                        = true,              -- Enable extra flank wave
+    city2_late_extra                        = false,             -- Extra city waves at 40/45 min
+    city2_hardest_extra                     = false,             -- Hardest-tier extra waves
+
+    -- ===== ENEMY AI UPGRADES (phased progression) =====
+    ai_upgrade_tier                         = "default",  -- "default" | "ridiculous" | "outrageous_plus"
+    early_phase1_upgrades                   = false,      -- Apply Phase 1 upgrades at start (not village)
+    schedule_phase4_upgrades                = true,       -- Schedule late-game Phase 4 upgrade wave
+}
+
+-- ============================================================
+-- TIER OVERRIDES
+-- ============================================================
+Difficulty_Config = {
+
+-- ===========================================
+-- TIER 0: EASY
+-- ===========================================
+[0] = _MergeTier({
+    label                                   = "Easy",
+
+    -- ===== RESOURCES & SCALING =====
+    starting_food                           = 3000,
+    starting_gold                           = 2000,
+    starting_wood                           = 1750,
+    tc_health_multiplier                    = 15,
+    -- ===== ENEMY DEFENSES (outposts & keeps) =====
+    outpost_handcannon_slits                = false,
+    keep_garrison                           = false,
+    -- ===== PATROLS & VILLAGE DEFENSE (starting area harassment) =====
+    patrol_respawn                          = false,
+    -- ===== PLAYER RESTRICTIONS (Restriction_Profile at start) =====
+    disable_conversion                      = false,
+    restrict_keep                           = false,
+    restrict_siege                          = false,
+    restrict_keep_landmarks                 = false,
+    -- ===== ATTACK WAVES (Phase 1 village defense, ~5–30 min) =====
+    waves_5min_flank                        = false,
+    waves_late_extra                        = false,
+    -- ===== CITY #2 DEFENSE (Phase 3) =====
+    city2_flank_wave                        = false,
+}),
+
+-- ===========================================
+-- TIER 1: INTERMEDIATE
+[1] = _MergeTier({
+    label                                   = "Intermediate",
+
+    -- All values match TIER_DEFAULTS 
+}),
+
+-- ===========================================
+-- TIER 2: HARD
+-- ===========================================
+[2] = _MergeTier({
+    label                           = "Hard",
+
+    -- ===== RESOURCES & SCALING =====
+    tc_health_multiplier                    = 5,
+
+    -- ===== ENEMY DEFENSES (outposts & keeps) =====
+    outpost_garrison                        = true,    
+
+    -- ===== PATROLS & VILLAGE DEFENSE (starting area harassment) =====
+    patrol_strength                         = "hard",
+
+    -- ===== PLAYER RESTRICTIONS (Restriction_Profile at start) =====
+    player_starting_upgrades_bonus          = false,
+
+    -- ===== PROFILE TRANSITIONS (after Phase 2 siege capture) =====
+    phase2_siege_profile                    = "engineers_available",
+
+    -- ===== ATTACK WAVES (Phase 1 village defense, ~5–30 min) =====
+    hard_waves_infantry                     = true,      -- Extra infantry waves at ~30 min
+
+    -- ===== PHASE 2 SPAWNS & COUNTER ATTACKS =====
+    phase2_spawn_tier                       = "hard",
+    counter_attack_village                  = true,
+
+}),
+
+-- ===========================================
+-- TIER 3: HARDEST
+-- ===========================================
+[3] = _MergeTier({
+    label                           = "Hardest",
+
+    -- ===== RESOURCES & SCALING =====
+    tc_health_multiplier                    = 5,
+
+    -- ===== ENEMY DEFENSES (outposts & keeps) =====
+    outpost_garrison                        = true,
+
+    -- ===== PATROLS & VILLAGE DEFENSE (starting area harassment) =====
+    patrol_strength                         = "hard",
+
+    -- ===== PLAYER RESTRICTIONS (Restriction_Profile at start) =====
+    player_starting_upgrades_bonus          = false,
+    restrict_engineers                      = true,     -- Lock siege engineers upgrade
+
+    -- ===== PROFILE TRANSITIONS (after Phase 2 siege capture) =====
+    phase2_siege_profile                    = "engineers_available",
+
+    -- ===== ATTACK WAVES (Phase 1 village defense, ~5–30 min) =====
+    hard_waves_infantry                     = true,      -- Extra infantry waves at ~30 min
+
+    -- ===== PHASE 2 SPAWNS & COUNTER ATTACKS =====
+    phase2_spawn_tier                       = "hard",
+    counter_attack_village                  = true,
+    workshop_counter_type                   = "wave_city_20m",
+
+    -- ===== CITY #2 DEFENSE (Phase 3) =====
+    city2_defender_strength                 = "hard",
+    city2_late_extra                        = true,
+}),
+
+-- ===========================================
+-- TIER 4: RIDICULOUS
+-- ===========================================
+[4] = _MergeTier({
+    label                           = "Ridiculous",
+
+    -- ===== RESOURCES & SCALING =====
+    tc_health_multiplier                    = 5,
+    
+    -- ===== ENEMY DEFENSES (outposts & keeps) =====
+    outpost_garrison                        = true,
+
+     -- ===== PATROLS & VILLAGE DEFENSE (starting area harassment) =====
+    patrol_respawn                          = true,      -- Enable respawning patrol groups
+    patrol_strength                         = "hard",    -- "easy" | "hard" patrol unit type
+    village_defender_strength               = "hard",    -- "easy" | "hard" flank patrol units
+
+    -- ===== PLAYER RESTRICTIONS (Restriction_Profile at start) =====
+    player_starting_upgrades_bonus          = false,
+    restrict_engineers                      = true,     -- Lock siege engineers upgrade
+
+    -- ===== PROFILE TRANSITIONS (after Phase 2 siege capture) =====
+    phase2_siege_profile                    = "engineers_available",
+
+    -- ===== PLAYER REINFORCEMENTS (army respawn below 30%) =====
+    player_reinforcements                   = false,
+
+     -- ===== CITY #2 DEFENSE (Phase 3) =====
+    city2_counter_wave                      = "wave_city_25m",   -- Counter wave at city spawn
+    city2_defender_strength                 = "hard",            -- "easy" | "hard" defenders
+    city2_flank_wave                        = true,              -- Enable extra flank wave
+
+    -- ===== ENEMY AI UPGRADES (phased progression) =====
+    ai_upgrade_tier                         = "ridiculous",
+}),
+
+-- ===========================================
+-- TIER 5: OUTRAGEOUS
+-- ===========================================
+[5] = _MergeTier({
+    label                           = "Outrageous",
+
+    -- ===== RESOURCES & SCALING =====
+    tc_health_multiplier                    = 5,
+    
+    -- ===== ENEMY DEFENSES (outposts & keeps) =====
+    outpost_garrison                        = true,
+
+    -- ===== PATROLS & VILLAGE DEFENSE (starting area harassment) =====
+    patrol_respawn                          = true,      -- Enable respawning patrol groups
+    patrol_strength                         = "hard",    -- "easy" | "hard" patrol unit type
+    village_defender_strength               = "hard",    -- "easy" | "hard" flank patrol units
+
+    -- ===== PLAYER REINFORCEMENTS (army respawn below 30%) =====
+    player_reinforcements                   = false,
+
+    -- ===== PLAYER RESTRICTIONS (Restriction_Profile at start) =====
+    player_starting_upgrades_bonus          = false,
+    restrict_engineers                      = true,     -- Lock siege engineers upgrade
+
+    -- ===== PROFILE TRANSITIONS (after Phase 2 siege capture) =====
+    phase2_siege_profile                    = "engineers_available",
+
+    -- ===== CITY #2 DEFENSE (Phase 3) =====
+    city2_counter_wave                      = "wave_city_25m",   -- Counter wave at city spawn
+    city2_defender_strength                 = "hard",            -- "easy" | "hard" defenders
+    city2_flank_wave                        = true,              -- Enable extra flank wave
+    city2_late_extra                        = true,             -- Extra city waves at 40/45 min
+
+    -- ===== ENEMY AI UPGRADES (phased progression) =====
+    ai_upgrade_tier                         = "outrageous_plus",
+}),
+
+-- ===========================================
+-- TIER 6: ABSURD
+-- ===========================================
+[6] = _MergeTier({
+    label                           = "Absurd",
+
+    -- ===== RESOURCES & SCALING =====
+    tc_health_multiplier                    = 5,
+    
+    -- ===== ENEMY DEFENSES (outposts & keeps) =====
+    outpost_garrison                        = true,
+
+    -- ===== PATROLS & VILLAGE DEFENSE (starting area harassment) =====
+    patrol_respawn                          = true,      -- Enable respawning patrol groups
+    patrol_strength                         = "hard",    -- "easy" | "hard" patrol unit type
+    village_defender_strength               = "hard",    -- "easy" | "hard" flank patrol units
+
+    -- ===== PLAYER REINFORCEMENTS (army respawn below 30%) =====
+    player_reinforcements                   = false,
+
+    -- ===== PLAYER RESTRICTIONS (Restriction_Profile at start) =====
+    player_starting_upgrades_bonus          = false,
+    restrict_engineers                      = true,     -- Lock siege engineers upgrade
+    restrict_workshop                       = true,
+
+    -- ===== PROFILE TRANSITIONS (after Phase 2 siege capture) =====
+    phase2_siege_profile                    = "engineers_available",
+    phase2_workshop_unlock                  = true,
+
+    -- ===== CITY #2 DEFENSE (Phase 3) =====
+    city2_counter_wave                      = "wave_city_25m",   -- Counter wave at city spawn
+    city2_defender_strength                 = "hard",            -- "easy" | "hard" defenders
+    city2_flank_wave                        = true,              -- Enable extra flank wave
+    city2_late_extra                        = true,             -- Extra city waves at 40/45 min
+    city2_hardest_extra                     = true,             -- Hardest-tier extra waves
+
+    -- ===== ENEMY AI UPGRADES (phased progression) =====
+    ai_upgrade_tier                         = "outrageous_plus",
+    early_phase1_upgrades                   = true,
+}),
+
+} -- end Difficulty_Config
+
+-- ============================================================
+-- Difficulty_Init: Call once after AI_Difficulty is set.
+-- Sets the global DC (Difficulty Config) to the active tier.
+-- ============================================================
+function Difficulty_Init()
+    DC = Difficulty_Config[AI_Difficulty]
+    if DC == nil then
+        print(string.format("[DIFFICULTY] WARNING: No config for tier %d, falling back to Hard (2)", AI_Difficulty))
+        DC = Difficulty_Config[2]
+    end
+    print(string.format("[DIFFICULTY] Initialized: %s (tier %d)", DC.label, AI_Difficulty))
+end

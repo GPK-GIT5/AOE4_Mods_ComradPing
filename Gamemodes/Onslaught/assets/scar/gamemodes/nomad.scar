@@ -1,0 +1,7 @@
+---------------------------------------------------------------------------------------------------
+-- NOMAD mode placeholder
+---------------------------------------------------------------------------------------------------
+import("onslaught.scar")
+-- Start conditions are creating or destroying entities.
+import("startconditions/nomad_start.scar")
+--import("AGS/startconditions/ags_start_scattered.scar")

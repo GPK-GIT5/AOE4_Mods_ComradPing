@@ -1,0 +1,617 @@
+---------------------------------------------------------------------------------------------------
+-- CBA AI Player — Villager Management
+-- Claiming, team management, construction queue processing, cleanup,
+-- parking, initial foundations seeding.
+-- Origin: cba_ai_player.scar lines 2259–2733, 3058–3171
+---------------------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------
+-- Claim Starting Villagers
+-----------------------------------------------------------------------
+
+function _AI_ClaimStartingVillagers(player)
+	local ai = player.ai
+	local sg = SGroup_CreateIfNotFound(player.ai.villager_sg_name)
+	ai.villager_sg = sg
+
+	if ai.villager_claim_done then return end
+	ai.villager_claim_attempts = (ai.villager_claim_attempts or 0) + 1
+
+	SGroup_Clear(sg)
+
+	local sg_all = Player_GetSquads(player.id)
+	local sg_temp = SGroup_CreateIfNotFound("sg_ai_vill_temp_" .. tostring(player.id))
+	SGroup_Clear(sg_temp)
+	SGroup_AddGroup(sg_temp, sg_all)
+	SGroup_Filter(sg_temp, "scar_villager", FILTER_KEEP)
+
+	if SGroup_CountSpawned(sg_temp) > 0 then
+		SGroup_AddGroup(sg, sg_temp)
+	end
+
+	local count = SGroup_CountSpawned(sg)
+	if count > 0 then
+		ai.villager_claim_done = true
+		_AI_EnsureEconomySuppressed(player, "villager_claim", true)
+		pcall(Cmd_Stop, sg)
+
+		print(string.format("[AI_PLAYER] %s claimed %d starting villagers (ready for construction).",
+			player.ai.label or "P?", count))
+		_AI_DebugSnapshot(player, "claim_starting_villagers", string.format("count=%d attempts=%d", count, ai.villager_claim_attempts or 0))
+
+		if not ai.startup_seed_done then
+			_AI_SyncVillagerTeams(player)
+			_AI_DebugSnapshot(player, "pre_initial_seed", string.format("count=%d", count))
+			_AI_QueueInitialFoundations(player)
+			ai.startup_seed_done = true
+			_AI_DebugSnapshot(player, "post_initial_seed", string.format("count=%d", count))
+		end
+	else
+		if ai.villager_claim_attempts >= _AI_CLAIM_RETRY_MAX_ATTEMPTS then
+			ai.villager_claim_done = true
+			print(string.format("[AI_PLAYER] %s no villagers found after %d attempts.",
+				player.ai.label or "P?", ai.villager_claim_attempts))
+			_AI_DebugSnapshot(player, "claim_failed", string.format("attempts=%d", ai.villager_claim_attempts))
+		elseif ai.villager_claim_attempts == 1 or (ai.villager_claim_attempts % 5) == 0 then
+			print(string.format("[AI_PLAYER] %s waiting for villagers (attempt %d/%d).",
+				player.ai.label or "P?", ai.villager_claim_attempts, _AI_CLAIM_RETRY_MAX_ATTEMPTS))
+		end
+	end
+end
+
+-----------------------------------------------------------------------
+-- RULE: Villager Management
+-----------------------------------------------------------------------
+
+function _AI_Rule_VillagerManagement()
+	if _AI_IsExternallyLocked() then return end
+	for _, player in ipairs(_ai_players) do
+		if not _AI_IsEliminated(player) then
+			if player.ai ~= nil and not player.ai.villager_claim_done then
+				_AI_ClaimStartingVillagers(player)
+			end
+			_AI_SyncVillagerTeams(player)
+			_AI_ProcessConstructionQueue(player)
+			_AI_CleanupProductionEgroups(player)
+			_AI_ProcessConstructionQueue(player)
+			_AI_ParkVillagers(player)
+		end
+	end
+end
+
+-----------------------------------------------------------------------
+-- Construction Queue Processing
+-----------------------------------------------------------------------
+
+function _AI_ProcessConstructionQueue(player)
+	local ai = player.ai
+	if ai == nil then return end
+	if #ai.construction_queue == 0 then return end
+
+	local now = World_GetGameTime()
+	local vill_alive = ai.villager_sg ~= nil and SGroup_CountSpawned(ai.villager_sg) or 0
+	local remaining = {}
+
+	for _, entry in ipairs(ai.construction_queue) do
+		if not entry.completed then
+			local current_progress = nil
+			if entry.entity == nil then
+				entry.entity = _AI_FindPendingEntityNearPos(player, entry)
+				if entry.entity ~= nil then
+					local eid = "?"
+					local ok_eid, ent_id = pcall(Entity_GetID, entry.entity)
+					if ok_eid and ent_id ~= nil then eid = tostring(ent_id) end
+					_AI_RecordBuildEvent(player, "discovered", entry.type_key,
+						string.format("id=%s (%.0f,%.0f)", eid, entry.pos.x or 0, entry.pos.z or 0))
+					print(string.format("[AI_PLAYER][BUILD] %s discovered foundation %s id=%s age=%.1fs issues=%d",
+						ai.label or "P?", entry.type_key or "?", eid,
+						entry.queued_at and (now - entry.queued_at) or 0,
+						entry.issue_count or 0))
+				end
+			end
+
+			-- Stale queue expiry
+			if entry.entity == nil and entry.queued_at ~= nil and (now - entry.queued_at) > _AI_CONSTRUCT_STALE_TIMEOUT then
+				ai.telemetry.build_abandoned = ai.telemetry.build_abandoned + 1
+				ai.telemetry.queue_terminal_abandoned = (ai.telemetry.queue_terminal_abandoned or 0) + 1
+				_AI_BlacklistPosition(player, entry.pos, _AI_STALE_POS_BLACKLIST_TTL, "abandoned_stale")
+				_AI_ReleaseTeamFromEntry(player, entry)
+				_AI_OnChainBuildingAbandoned(player, entry)
+				if entry.zone == "secondary" then
+					player.ai.secondary_zone_count = math.max(0, player.ai.secondary_zone_count - 1)
+				else
+					player.ai.primary_zone_count = math.max(0, player.ai.primary_zone_count - 1)
+				end
+				_AI_RecordBuildEvent(player, "abandoned_stale", entry.type_key,
+					string.format("age=%.1fs issues=%d", now - entry.queued_at, entry.issue_count or 0))
+				print(string.format("[AI_PLAYER] WARN: %s abandoned stale foundation %s (no entity found after %.1fs, %d issues)",
+					ai.label or "P?", entry.type_key or "?", now - entry.queued_at, entry.issue_count or 0))
+				goto continue_queue
+			end
+
+			-- Max reissue cap
+			if (entry.issue_count or 0) >= _AI_CONSTRUCT_MAX_REISSUES and entry.entity == nil then
+				if _AI_CONSTRUCT_BLOCKED_RETRY and not entry.blocked_retried then
+					entry.blocked_retried = true
+					ai.telemetry.build_blocked = ai.telemetry.build_blocked + 1
+					local zone_center = entry.zone == "secondary" and _AI_GetSecondaryZoneCenter(player) or _AI_GetPrimaryZoneCenter(player)
+					if zone_center ~= nil then
+						local new_pos = nil
+						local retry_seed = ((entry.pos.x or 0) * 3) + ((entry.pos.z or 0) * 5)
+						for tries = 1, 6 do
+							local candidate = _AI_GetDeterministicPlacementRetry(zone_center, tries, 10, retry_seed)
+							if not _AI_IsPositionBlacklisted(player, candidate) then
+								new_pos = candidate
+								break
+							end
+						end
+						if new_pos == nil then
+							new_pos = _AI_GetDeterministicPlacementRetry(zone_center, 7, 10, retry_seed)
+						end
+						_AI_BlacklistPosition(player, entry.pos, _AI_STALE_POS_BLACKLIST_TTL, "blocked_retry")
+						entry.pos = new_pos
+						entry.issue_count = 0
+						entry.queued_at = now
+						_AI_RecordBuildEvent(player, "blocked_retry", entry.type_key,
+							string.format("new pos (%.0f,%.0f)", new_pos.x or 0, new_pos.z or 0))
+						print(string.format("[AI_PLAYER] %s blocked %s — retrying at new position (%.0f,%.0f)",
+							ai.label or "P?", entry.type_key or "?", new_pos.x or 0, new_pos.z or 0))
+						_AI_IssueVillagerBuildOrder(player, entry)
+					end
+					table.insert(remaining, entry)
+					goto continue_queue
+				else
+					ai.telemetry.build_abandoned = ai.telemetry.build_abandoned + 1
+					ai.telemetry.queue_terminal_abandoned = (ai.telemetry.queue_terminal_abandoned or 0) + 1
+					_AI_BlacklistPosition(player, entry.pos, _AI_STALE_POS_BLACKLIST_TTL, "abandoned_maxissue")
+					_AI_ReleaseTeamFromEntry(player, entry)
+					_AI_OnChainBuildingAbandoned(player, entry)
+					if entry.zone == "secondary" then
+						player.ai.secondary_zone_count = math.max(0, player.ai.secondary_zone_count - 1)
+					else
+						player.ai.primary_zone_count = math.max(0, player.ai.primary_zone_count - 1)
+					end
+					_AI_RecordBuildEvent(player, "abandoned_maxissue", entry.type_key,
+						string.format("issues=%d", entry.issue_count or 0))
+					print(string.format("[AI_PLAYER] WARN: %s abandoned %s after %d reissue attempts",
+						ai.label or "P?", entry.type_key or "?", entry.issue_count or 0))
+					goto continue_queue
+				end
+			end
+
+			if entry.entity ~= nil then
+				local ok_alive, alive = pcall(Entity_IsAlive, entry.entity)
+				if ok_alive and alive then
+					local ok_prog, prog = pcall(Entity_GetBuildingProgress, entry.entity)
+					if ok_prog then
+						current_progress = prog
+						if prog > (entry.last_progress or -1) + 0.005 then
+							entry.last_progress = prog
+							entry.last_progress_at = now
+						end
+					end
+					if ok_prog and prog >= 1.0 then
+						ai.telemetry.queue_terminal_completed = (ai.telemetry.queue_terminal_completed or 0) + 1
+						if ai.buildings[entry.type_key] then
+							table.insert(ai.buildings[entry.type_key].entities, { entity = entry.entity, zone = entry.zone or "primary" })
+							ai.buildings[entry.type_key].count = ai.buildings[entry.type_key].count + 1
+						end
+						ai.total_buildings = ai.total_buildings + 1
+						_AI_RegisterCompletedBuilding(player, entry)
+						_AI_ReleaseTeamFromEntry(player, entry)
+						_AI_OnChainBuildingComplete(player, entry)
+					end
+				else
+					ai.telemetry.queue_terminal_destroyed = (ai.telemetry.queue_terminal_destroyed or 0) + 1
+					_AI_RecordBuildEvent(player, "destroyed_mid", entry.type_key,
+						string.format("prog=%.2f", entry.last_progress or 0))
+					_AI_ReleaseTeamFromEntry(player, entry)
+					_AI_OnChainBuildingAbandoned(player, entry)
+					if entry.zone == "secondary" then
+						player.ai.secondary_zone_count = math.max(0, player.ai.secondary_zone_count - 1)
+					else
+						player.ai.primary_zone_count = math.max(0, player.ai.primary_zone_count - 1)
+					end
+					entry.entity = nil
+				end
+			end
+
+			if not entry.completed then
+				-- Force-construct fallback
+				if vill_alive <= 0 and _AI_ALLOW_FORCE_CONSTRUCT_FALLBACK and entry.entity ~= nil then
+					local ok_alive2, alive2 = pcall(Entity_IsAlive, entry.entity)
+					if ok_alive2 and alive2 then
+						local ok_fc = pcall(Entity_ForceConstruct, entry.entity)
+						if ok_fc then
+							ai.telemetry.build_forced = ai.telemetry.build_forced + 1
+							_AI_RecordBuildEvent(player, "force_completed", entry.type_key, "villagers_dead_fallback")
+							print(string.format("[AI_PLAYER] %s force-completed %s (villager fallback)",
+								ai.label or "P?", entry.type_key or "?"))
+						end
+					end
+				end
+
+				local stalled = entry.last_progress_at == nil or (now - entry.last_progress_at) >= _AI_CONSTRUCT_REISSUE_INTERVAL
+				if entry.entity ~= nil and current_progress ~= nil and current_progress > 0.01 then
+					stalled = entry.last_progress_at == nil or (now - entry.last_progress_at) >= _AI_CONSTRUCT_PROGRESS_STALL_TIMEOUT
+				end
+				local no_entity = (entry.entity == nil)
+				local can_reissue = (entry.last_issue_at == nil or (now - entry.last_issue_at) >= _AI_CONSTRUCT_REISSUE_INTERVAL)
+					and (no_entity or stalled or (current_progress ~= nil and current_progress <= 0.01))
+				if can_reissue and vill_alive > 0 then
+					if _AI_AssignTeamToEntry(player, entry) then
+						local why = (entry.issue_count or 0) <= 0 and "initial" or "reissue"
+						_AI_IssueVillagerBuildOrder(player, entry, why)
+					else
+						if entry.last_no_team_log_at == nil or (now - entry.last_no_team_log_at) >= _AI_DIAG_LOG_INTERVAL then
+							entry.last_no_team_log_at = now
+							print(string.format("[AI_PLAYER][BUILD] %s waiting_no_team %s free_teams=%d queued=%d age=%.1fs issues=%d",
+								ai.label or "P?", entry.type_key or "?",
+								_AI_CountFreeTeams(player), #ai.construction_queue,
+								entry.queued_at and (now - entry.queued_at) or 0,
+								entry.issue_count or 0))
+						end
+					end
+				elseif can_reissue and vill_alive <= 0 then
+					if entry.last_no_villager_log_at == nil or (now - entry.last_no_villager_log_at) >= _AI_DIAG_LOG_INTERVAL then
+						entry.last_no_villager_log_at = now
+						print(string.format("[AI_PLAYER][BUILD] %s waiting_no_villagers %s queued=%d age=%.1fs issues=%d",
+							ai.label or "P?", entry.type_key or "?", #ai.construction_queue,
+							entry.queued_at and (now - entry.queued_at) or 0,
+							entry.issue_count or 0))
+					end
+				end
+				table.insert(remaining, entry)
+			end
+		end
+		::continue_queue::
+	end
+	ai.construction_queue = remaining
+end
+
+-----------------------------------------------------------------------
+-- Production EGroup Cleanup
+-----------------------------------------------------------------------
+
+function _AI_CleanupProductionEgroups(player)
+	local ai = player.ai
+	local recomputed_total = 0
+	local building_types = _AI_GetOrderedBuildingTypeKeys(player, ai.production_egroups)
+	for _, type_key in ipairs(building_types) do
+		local egs = ai.production_egroups[type_key]
+		for k = #egs, 1, -1 do
+			local eg = EGroup_CreateIfNotFound(egs[k])
+			local keep_eg = false
+			if EGroup_Count(eg) > 0 then
+				local ent = EGroup_GetEntityAt(eg, 1)
+				if ent ~= nil then
+					local ok_alive, alive = pcall(Entity_IsAlive, ent)
+					keep_eg = ok_alive and alive
+				end
+			end
+			if not keep_eg then
+				table.remove(egs, k)
+			end
+		end
+		if ai.buildings[type_key] then
+			local alive_entities = {}
+			for _, rec in ipairs(ai.buildings[type_key].entities) do
+				local ent = rec.entity or rec
+				local ok_alive, alive = pcall(Entity_IsAlive, ent)
+				if ok_alive and alive then
+					table.insert(alive_entities, rec)
+				end
+			end
+			ai.buildings[type_key].entities = alive_entities
+			ai.buildings[type_key].count = #alive_entities
+			recomputed_total = recomputed_total + #alive_entities
+		end
+	end
+	if ai.total_buildings ~= recomputed_total then
+		print(string.format("[AI_PLAYER] SANITY: %s total_buildings corrected %d -> %d",
+			ai.label or "P?", ai.total_buildings, recomputed_total))
+		ai.total_buildings = recomputed_total
+	end
+end
+
+-----------------------------------------------------------------------
+-- Park Free Villagers
+-----------------------------------------------------------------------
+
+function _AI_ParkVillagers(player)
+	local ai = player.ai
+	if ai.villager_sg == nil then return end
+	if SGroup_CountSpawned(ai.villager_sg) <= 0 then return end
+	if _AI_IsEliminated(player) then return end
+
+	if ai.economy ~= nil and not ai.economy.suppressed then
+		ai.economy.drift_alerts = (ai.economy.drift_alerts or 0) + 1
+		_AI_EnsureEconomySuppressed(player, "villager_park_guard", true)
+		pcall(Cmd_Stop, ai.villager_sg)
+	end
+
+	local free_teams = {}
+	for _, team in ipairs(ai.villager_teams) do
+		if not team.busy and team.sg ~= nil and SGroup_CountSpawned(team.sg) > 0 then
+			table.insert(free_teams, team)
+		end
+	end
+	if #free_teams == 0 then return end
+
+	local park_pos = _AI_GetPrimaryZoneCenter(player)
+	if park_pos == nil then park_pos = _AI_GetBasePosition(player) end
+	if park_pos == nil then return end
+
+	local now = World_GetGameTime()
+	local last_active = ai.last_villager_active_order_at or -9999
+	if (now - last_active) >= _AI_VILLAGER_ACTIVE_ORDER_INTERVAL then
+		ai.villager_active_idx = (ai.villager_active_idx or 0) + 1
+		local idx = ai.villager_active_idx
+		local angle = (idx * 90) % 360
+		local rad = math.rad(angle)
+		local target = Util_GetOffsetPosition(
+			park_pos,
+			math.cos(rad) * _AI_VILLAGER_ACTIVE_RADIUS,
+			math.sin(rad) * _AI_VILLAGER_ACTIVE_RADIUS
+		)
+		if not _AI_IsWithinPlayableBounds(target) then
+			target = park_pos
+		end
+		for _, team in ipairs(free_teams) do
+			local just_released = team.released_at ~= nil and (now - team.released_at) < _AI_VILLAGER_RELEASE_GRACE
+			if not just_released then
+				pcall(Cmd_Move, team.sg, target, false)
+				ai.telemetry.villager_park_orders = (ai.telemetry.villager_park_orders or 0) + 1
+			else
+				ai.telemetry.villager_park_suppressed = (ai.telemetry.villager_park_suppressed or 0) + 1
+			end
+		end
+		ai.last_villager_active_order_at = now
+	else
+		for _, team in ipairs(free_teams) do
+			local just_released = team.released_at ~= nil and (now - team.released_at) < _AI_VILLAGER_RELEASE_GRACE
+			if just_released then
+				ai.telemetry.villager_park_suppressed = (ai.telemetry.villager_park_suppressed or 0) + 1
+				goto next_free_team
+			end
+			local ok, vill_pos = pcall(SGroup_GetPosition, team.sg)
+			if ok and vill_pos ~= nil then
+				local ok_dist, dist = pcall(World_DistancePointToPoint, vill_pos, park_pos)
+				if ok_dist and dist > 60 then
+					pcall(Cmd_Move, team.sg, park_pos, false)
+					ai.telemetry.villager_park_orders = (ai.telemetry.villager_park_orders or 0) + 1
+				end
+			end
+			::next_free_team::
+		end
+	end
+end
+
+-----------------------------------------------------------------------
+-- Villager Team Management
+-----------------------------------------------------------------------
+
+function _AI_SyncVillagerTeams(player)
+	local ai = player.ai
+	if ai.villager_sg == nil then return end
+
+	pcall(SGroup_Filter, ai.villager_sg, "scar_villager", FILTER_KEEP)
+	local total = SGroup_CountSpawned(ai.villager_sg)
+	if total <= 0 then
+		ai.villager_teams = {}
+		ai.villager_teams_synced = true
+		return
+	end
+
+	local had_teams = #ai.villager_teams > 0
+	if had_teams then
+		local any_invalid = false
+		for _, team in ipairs(ai.villager_teams) do
+			if team.sg ~= nil then
+				pcall(SGroup_Filter, team.sg, "scar_villager", FILTER_KEEP)
+				if SGroup_CountSpawned(team.sg) <= 0 then
+					any_invalid = true
+					if team.busy and team.assigned_entry ~= nil then
+						team.assigned_entry.assigned_team = nil
+						team.assigned_entry = nil
+					end
+					team.busy = false
+				end
+			end
+		end
+		if not any_invalid then
+			ai.villager_teams_synced = true
+			return
+		end
+	end
+
+	local team_count = math.ceil(total / _AI_VILLAGER_TEAM_SIZE)
+	team_count = math.min(team_count, _AI_VILLAGER_TEAM_MAX)
+	local new_teams = {}
+	for t = 1, team_count do
+		local sg_name = "sg_ai_vteam_" .. tostring(player.id) .. "_" .. tostring(t)
+		local sg = SGroup_CreateIfNotFound(sg_name)
+		SGroup_Clear(sg)
+		table.insert(new_teams, {
+			sg_name = sg_name,
+			sg = sg,
+			busy = false,
+			assigned_entry = nil,
+		})
+	end
+
+	local team_idx = 1
+	for i = 1, total do
+		local squad = SGroup_GetSpawnedSquadAt(ai.villager_sg, i)
+		if squad ~= nil then
+			SGroup_Add(new_teams[team_idx].sg, squad)
+			if SGroup_CountSpawned(new_teams[team_idx].sg) >= _AI_VILLAGER_TEAM_SIZE then
+				team_idx = math.min(team_idx + 1, team_count)
+			end
+		end
+	end
+
+	ai.villager_teams = new_teams
+	ai.villager_teams_synced = true
+
+	print(string.format("[AI_PLAYER] %s synced %d villager teams (%d villagers, team_size=%d).",
+		ai.label or "P?", #new_teams, total, _AI_VILLAGER_TEAM_SIZE))
+end
+
+function _AI_GetFreeTeam(player)
+	for _, team in ipairs(player.ai.villager_teams) do
+		if team.assigned_entry ~= nil and not team.assigned_entry.completed then
+			team.busy = true
+			goto next_team
+		end
+		if team.assigned_entry ~= nil and team.assigned_entry.completed then
+			team.assigned_entry = nil
+			team.busy = false
+		end
+		if not team.busy and team.sg ~= nil and SGroup_CountSpawned(team.sg) > 0 then
+			return team
+		end
+		::next_team::
+	end
+	return nil
+end
+
+function _AI_AssignTeamToEntry(player, entry)
+	if entry.assigned_team ~= nil then
+		if not entry.completed then return true end
+		return false
+	end
+	local team = _AI_GetFreeTeam(player)
+	if team == nil then return false end
+	team.busy = true
+	team.assigned_entry = entry
+	entry.assigned_team = team
+	if team.released_at ~= nil then
+		local lag = World_GetGameTime() - team.released_at
+		player.ai.telemetry.team_release_to_assign_total = (player.ai.telemetry.team_release_to_assign_total or 0) + lag
+		player.ai.telemetry.team_release_to_assign_samples = (player.ai.telemetry.team_release_to_assign_samples or 0) + 1
+	end
+	player.ai.telemetry.team_assignments = (player.ai.telemetry.team_assignments or 0) + 1
+	print(string.format("[AI_PLAYER] %s assigned team %s to %s at (%.0f,%.0f).",
+		player.ai.label or "P?", team.sg_name or "?",
+		entry.type_key or "?", entry.pos.x or 0, entry.pos.z or 0))
+	return true
+end
+
+function _AI_ReleaseTeamFromEntry(player, entry)
+	if entry.assigned_team == nil then return end
+	local team = entry.assigned_team
+	team.busy = false
+	team.assigned_entry = nil
+	team.released_at = World_GetGameTime()
+	entry.assigned_team = nil
+	player.ai.telemetry.team_releases = (player.ai.telemetry.team_releases or 0) + 1
+	print(string.format("[AI_PLAYER] %s released team %s from %s.",
+		player.ai.label or "P?", team.sg_name or "?", entry.type_key or "?"))
+end
+
+function _AI_CountFreeTeams(player)
+	local n = 0
+	for _, team in ipairs(player.ai.villager_teams) do
+		if not team.busy and team.sg ~= nil and SGroup_CountSpawned(team.sg) > 0 then
+			n = n + 1
+		end
+	end
+	return n
+end
+
+-----------------------------------------------------------------------
+-- Place Initial Buildings (startup seed)
+-----------------------------------------------------------------------
+
+function _AI_QueueInitialFoundations(player)
+	local ai = player.ai
+	local player_civ = ai.civ_name or Player_GetRaceName(player.id)
+	local zone_center = _AI_GetPrimaryZoneCenter(player)
+	if zone_center == nil then return end
+
+	local current_age = Player_GetCurrentAge(player.id)
+	local priority = ai.building_priority or _AI_BUILDING_PRIORITY
+
+	_AI_SyncVillagerTeams(player)
+
+	local placed = 0
+	local placed_secondary = 0
+	local max_parallel = math.min(3, _AI_CountFreeTeams(player))
+	_AI_DebugSnapshot(player, "initial_seed_begin",
+		string.format("age=%d max_parallel=%d zone=(%.0f,%.0f)", current_age, max_parallel, zone_center.x or 0, zone_center.z or 0))
+	for _, entry in ipairs(priority) do
+		if placed >= max_parallel then break end
+		local role = entry.role or _AI_BPKeyToRole(entry.key)
+		if role == "infantry" and current_age >= (entry.min_age or 1) then
+			local ebp = AGS_GetCivilizationEntity(player_civ, entry.key)
+			if ebp ~= nil then
+				local remaining = max_parallel - placed
+				for i = 1, remaining do
+					local ok, result = pcall(_AI_PlaceBuilding, player, ebp, zone_center, entry.key, "primary")
+					if ok and result then
+						local q_entry = ai.construction_queue[#ai.construction_queue]
+						if q_entry ~= nil then
+							_AI_AssignTeamToEntry(player, q_entry)
+						end
+						placed = placed + 1
+						_AI_DebugSnapshot(player, "initial_seed_success",
+							string.format("type=%s placed=%d/%d", tostring(entry.key), placed, max_parallel))
+						if placed >= max_parallel then break end
+					else
+						_AI_DebugSnapshot(player, "initial_seed_place_failed",
+							string.format("type=%s placed=%d/%d ok=%s result=%s", tostring(entry.key), placed, max_parallel, tostring(ok), tostring(result)))
+					end
+				end
+			else
+				_AI_DebugSnapshot(player, "initial_seed_missing_ebp", string.format("type=%s", tostring(entry.key)))
+			end
+		end
+	end
+
+	if current_age >= 2 then
+		for _, entry in ipairs(priority) do
+			local role = entry.role or _AI_BPKeyToRole(entry.key)
+			if role == "ranged" and current_age >= (entry.min_age or 1) then
+				local ebp = AGS_GetCivilizationEntity(player_civ, entry.key)
+				if ebp ~= nil then
+					local free_remaining = _AI_CountFreeTeams(player)
+					local ranged_seed = math.min(2, free_remaining)
+					for i = 1, ranged_seed do
+						local ok, result = pcall(_AI_PlaceBuilding, player, ebp, zone_center, entry.key, "primary")
+						if ok and result then
+							local q_entry = ai.construction_queue[#ai.construction_queue]
+							if q_entry ~= nil then
+								_AI_AssignTeamToEntry(player, q_entry)
+							end
+							placed_secondary = placed_secondary + 1
+						end
+					end
+				end
+				break
+			end
+		end
+	end
+
+	if placed == 0 and max_parallel > 0 then
+		local base_pos = _AI_GetBasePosition(player)
+		local bounds_info = _AI_GetPlayableBoundsInfo()
+		local bounds_detail = _AI_FormatPlayableBoundsInfo(bounds_info)
+		if bounds_info ~= nil and bounds_info.ok and bounds_info.min ~= nil and bounds_info.max ~= nil and _AI_IsValidWorldPos(zone_center) then
+			local left = (zone_center.x or 0) - (bounds_info.min.x or 0)
+			local right = (bounds_info.max.x or 0) - (zone_center.x or 0)
+			local bottom = (zone_center.z or 0) - (bounds_info.min.z or 0)
+			local top = (bounds_info.max.z or 0) - (zone_center.z or 0)
+			bounds_detail = bounds_detail .. string.format(" edge=(l=%.1f r=%.1f b=%.1f t=%.1f)", left, right, bottom, top)
+		end
+		_AI_DebugSnapshot(player, "initial_seed_zero_risk",
+			string.format("max_parallel=%d age=%d civ=%s zone=(%.0f,%.0f) base=(%.0f,%.0f) %s",
+				max_parallel, current_age, tostring(player_civ), zone_center.x or 0, zone_center.z or 0,
+				base_pos and base_pos.x or 0, base_pos and base_pos.z or 0, bounds_detail))
+	end
+
+	print(string.format("[AI_PLAYER] %s seeded %d infantry + %d ranged (target=%d age=%d teams=%d civ=%s).",
+		ai.label or "P?", placed, placed_secondary, _AI_STARTER_TEAM_TARGET, current_age, #ai.villager_teams, player_civ))
+	_AI_DebugSnapshot(player, "initial_seed_end",
+		string.format("placed=%d ranged=%d target=%d age=%d", placed, placed_secondary, max_parallel, current_age))
+end

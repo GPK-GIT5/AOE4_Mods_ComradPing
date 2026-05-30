@@ -1,0 +1,89 @@
+--[[
+	Filename: coop_4_woodland_tribute.scar
+	Description: Tribute system for Woodland co-op scenario.
+	             Fixed 30% tax rate. No difficulty scaling.
+	Last Modified: 2026-03-09
+	
+	DEPENDENCIES
+	  - PLAYERS table must be populated (post Mission_SetupPlayers)
+	  - player5 global must exist (AI player)
+]]
+
+-----------------------------------------------------------------------
+-- AGS Shims — globals/functions the diplomacy modules expect
+-----------------------------------------------------------------------
+AGS_GLOBAL_SETTINGS = {
+	Diplomacy	= true,
+	Tributes	= true,
+	Relations	= false,
+	TeamVictory	= "standard",
+}
+
+AGS_GS_TEAM_VICTORY_STANDARD = "standard"
+
+function AGS_Print(msg)
+	print("[AGS] " .. tostring(msg))
+end
+
+function AGS_GetCurrentName(player)
+	return { LocString = Player_GetDisplayName(player.id) }
+end
+
+-----------------------------------------------------------------------
+-- Import the local diplomacy module chain
+-----------------------------------------------------------------------
+import("scar/diplomacy/Coop_4_Woodland_diplomacy.scar")
+
+Core_UnregisterModule(AGS_DIPLOMACY_MODULE)
+
+g_tribute_initialized = false
+
+-----------------------------------------------------------------------
+-- Tribute_Init — Call from Mission_Start()
+-----------------------------------------------------------------------
+function Tribute_Init()
+	if g_tribute_initialized then
+		print("[TRIBUTE] Init skipped (already initialized)")
+		return
+	end
+
+	for _, player in pairs(PLAYERS) do
+		if player.AGS_Team == nil then
+			player.AGS_Team = player.team or { index = 1 }
+		end
+	end
+	
+	AGS_Diplomacy_EarlyInitializations()
+	AGS_Diplomacy_LateInitializations()
+	AGS_Diplomacy_PresetFinalize()
+	
+	-- Fixed 30% tax rate (no difficulty scaling)
+	Diplomacy_SetTaxRate(nil, 0.30)
+	Diplomacy_UpdateDataContext()
+	print("[TRIBUTE] Tax rate set to 30% (fixed)")
+	
+	-- Hide AI players from tribute panel (Woodland has AI in slot 5 only)
+	if player5 ~= nil then
+		Diplomacy_OverridePlayerSettings(player5, false, false, false, false, false, false)
+	end
+	if player6 ~= nil then
+		Diplomacy_OverridePlayerSettings(player6, false, false, false, false, false, false)
+	end
+	
+	-- Hide team column and relation controls
+	Diplomacy_OverrideSettings(nil, nil, nil, false)
+	g_tribute_initialized = true
+	
+	print("[TRIBUTE] Initialized — tribute system active for 4 players")
+end
+
+-----------------------------------------------------------------------
+-- Tribute_Cleanup — Call on game over / defeat
+-----------------------------------------------------------------------
+function Tribute_Cleanup()
+	if _diplomacy ~= nil then
+		Diplomacy_OnGameOver()
+		g_tribute_initialized = false
+		print("[TRIBUTE] Cleaned up")
+	end
+end

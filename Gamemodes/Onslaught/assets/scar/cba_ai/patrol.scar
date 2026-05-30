@@ -1,0 +1,492 @@
+---------------------------------------------------------------------------------------------------
+-- CBA AI Player — Patrol & Rally Coordination
+-- MaA claiming, patrol waypoint system, rally logic, ally coordination.
+-- Origin: cba_ai_player.scar lines 2938–3171, 3179–3441, 3500–3628
+---------------------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------
+-- Claim Starting Man-at-Arms
+-----------------------------------------------------------------------
+
+function _AI_ClaimStartingMAA(player)
+	local ai = player.ai
+	local sg = SGroup_CreateIfNotFound(player.ai.patrol_sg_name)
+	ai.patrol_sg = sg
+
+	if ai.maa_claim_done then return end
+	ai.maa_claim_attempts = (ai.maa_claim_attempts or 0) + 1
+
+	SGroup_Clear(sg)
+
+	local sg_all = Player_GetSquads(player.id)
+	local sg_temp = SGroup_CreateIfNotFound("sg_ai_maa_temp_" .. tostring(player.id))
+	SGroup_Clear(sg_temp)
+	SGroup_AddGroup(sg_temp, sg_all)
+	SGroup_Filter(sg_temp, "scar_manatarms", FILTER_KEEP)
+
+	if SGroup_CountSpawned(sg_temp) <= 0 then
+		SGroup_Clear(sg_temp)
+		SGroup_AddGroup(sg_temp, sg_all)
+		SGroup_Filter(sg_temp, "scar_spearman", FILTER_KEEP)
+	end
+
+	if SGroup_CountSpawned(sg_temp) > 0 then
+		SGroup_AddGroup(sg, sg_temp)
+	end
+
+	local count = SGroup_CountSpawned(sg)
+	if count > 0 then
+		ai.maa_claim_done = true
+		ai.patrol_waypoint_idx = 1
+		_AI_IssuePatrolOrder(player)
+		_AI_DebugLog(1, string.format("[AI_PLAYER] %s claimed %d starting Man-at-Arms for patrol.",
+			player.ai.label or "P?", count))
+	else
+		if ai.maa_claim_attempts >= _AI_CLAIM_RETRY_MAX_ATTEMPTS then
+			ai.maa_claim_done = true
+			_AI_DebugLog(1, string.format("[AI_PLAYER] %s no patrol infantry found after %d attempts.",
+				player.ai.label or "P?", ai.maa_claim_attempts))
+		elseif ai.maa_claim_attempts == 1 or (ai.maa_claim_attempts % 5) == 0 then
+			_AI_DebugLog(1, string.format("[AI_PLAYER] %s waiting for patrol infantry (attempt %d/%d).",
+				player.ai.label or "P?", ai.maa_claim_attempts, _AI_CLAIM_RETRY_MAX_ATTEMPTS))
+		end
+	end
+end
+
+-----------------------------------------------------------------------
+-- RULE: Patrol Armies
+-----------------------------------------------------------------------
+
+function _AI_Rule_PatrolArmies()
+	if _AI_IsExternallyLocked() then return end
+	for _, player in ipairs(_ai_players) do
+		if not _AI_IsEliminated(player) then
+			_AI_ManagePatrol(player)
+		end
+	end
+end
+
+function _AI_ManagePatrol(player)
+	local ai = player.ai
+	if ai.patrol_sg == nil then return end
+
+	local patrol_count = SGroup_CountSpawned(ai.patrol_sg)
+	if patrol_count <= 0 then
+		if not ai.maa_claim_done then
+			_AI_ClaimStartingMAA(player)
+		end
+		return
+	end
+
+	_AI_MaaStateTick(player)
+end
+
+-----------------------------------------------------------------------
+-- Patrol Waypoint System
+-----------------------------------------------------------------------
+
+function _AI_IssuePatrolOrder(player)
+	local ai = player.ai
+	if ai.patrol_sg == nil then return end
+	local now = World_GetGameTime()
+	local hold_until = ai.patrol_order_hold_until or 0
+	local hold_owner = ai.patrol_last_order_source or ""
+
+	-- Respect any active non-patrol hold owner, including MAA engage windows,
+	-- so direct resume/reissue paths cannot override the current owner early.
+	if hold_until > now and hold_owner ~= "" and hold_owner ~= "patrol_waypoint" then
+		ai.telemetry.patrol_orders_suppressed = (ai.telemetry.patrol_orders_suppressed or 0) + 1
+		if _AI_IsPatrolOwnershipCaptureEnabled() then
+			_AI_DebugLog(1, string.format("[AI_PLAYER][PATROL_SKIP] %s reason=hold_active owner=%s remain=%.1fs",
+				ai.label or "P?",
+				hold_owner,
+				hold_until - now))
+		end
+		return
+	end
+
+	local waypoints = _AI_BuildPatrolWaypoints(player)
+	if #waypoints == 0 then return end
+
+	local idx = ai.patrol_waypoint_idx
+	if idx > #waypoints then
+		idx = 1
+	end
+
+	local target = nil
+	local selected_idx = idx
+	for offset = 0, (#waypoints - 1) do
+		local cand_idx = ((idx - 1 + offset) % #waypoints) + 1
+		local cand = waypoints[cand_idx]
+		if _AI_IsValidWorldPos(cand) and _AI_IsOutsideKeepAttackBoundary(player, cand) then
+			target = cand
+			selected_idx = cand_idx
+			break
+		end
+	end
+
+	if _AI_IsValidWorldPos(target) then
+		_AI_RecordPatrolCommand(player, "patrol_waypoint", "attack_move", target,
+			string.format("waypoint=%d/%d", selected_idx, #waypoints))
+		pcall(Cmd_AttackMove, ai.patrol_sg, target, false)
+		ai.patrol_current_target = target
+		ai.telemetry.patrol_orders = (ai.telemetry.patrol_orders or 0) + 1
+		local now = World_GetGameTime()
+		if ai.patrol_last_order_log_at == nil or (now - ai.patrol_last_order_log_at) >= _AI_DIAG_LOG_INTERVAL then
+			ai.patrol_last_order_log_at = now
+			_AI_DebugLog(1, string.format("[AI_PLAYER][PATROL] %s waypoint=%d/%d target=(%.0f,%.0f)",
+				ai.label or "P?", selected_idx, #waypoints, target.x or 0, target.z or 0))
+		end
+	else
+		ai.telemetry.maa_boundary_blocks = (ai.telemetry.maa_boundary_blocks or 0) + 1
+		local hold_pos = _AI_GetBasePosition(player)
+		if hold_pos ~= nil then
+			_AI_RecordPatrolCommand(player, "patrol_waypoint", "move", hold_pos,
+				"fallback_inside_boundary")
+			pcall(Cmd_Move, ai.patrol_sg, hold_pos, false)
+		end
+		_AI_LogBoundaryBlock(player, "patrol_waypoints_inside_boundary", hold_pos)
+	end
+	ai.patrol_waypoint_idx = selected_idx + 1
+end
+
+function _AI_ResumePatrolFromCurrentPosition(player)
+	local ai = player.ai
+	if ai.patrol_sg == nil then return end
+
+	local our_pos = _AI_GetPatrolCurrentPosition(player)
+	if our_pos == nil then
+		_AI_IssuePatrolOrder(player)
+		return
+	end
+
+	local waypoints = _AI_BuildPatrolWaypoints(player)
+	if #waypoints == 0 then return end
+
+	local best_idx = 1
+	local best_dist = math.huge
+	for i, wp in ipairs(waypoints) do
+		local ok, d = pcall(World_DistancePointToPoint, our_pos, wp)
+		if ok and d < best_dist then
+			best_dist = d
+			best_idx = i
+		end
+	end
+
+	ai.patrol_waypoint_idx = best_idx
+	_AI_IssuePatrolOrder(player)
+end
+
+function _AI_BuildPatrolWaypoints(player)
+	local ai = player.ai
+	local now = World_GetGameTime()
+
+	if ai._cached_waypoints ~= nil and ai._waypoint_cache_time ~= nil and (now - ai._waypoint_cache_time) < 15.0 then
+		return ai._cached_waypoints
+	end
+
+	local waypoints = {}
+
+	local function _is_near_existing(pos, min_dist)
+		for _, wp in ipairs(waypoints) do
+			local ok, d = pcall(World_DistancePointToPoint, pos, wp)
+			if ok and d < min_dist then return true end
+		end
+		return false
+	end
+
+	-- Nearest enemy base first
+	local base_pos = _AI_GetBasePosition(player)
+	local nearest_enemy_pos = nil
+	local nearest_enemy_dist = math.huge
+	if base_pos ~= nil then
+		for _, other in ipairs(PLAYERS) do
+			if other.id ~= player.id and not _AI_IsEliminated(other) then
+				local is_enemy = true
+				if player.AGS_Team ~= nil and other.AGS_Team ~= nil and player.AGS_Team.index ~= nil and other.AGS_Team.index ~= nil then
+					is_enemy = (player.AGS_Team.index ~= other.AGS_Team.index)
+				end
+				if is_enemy then
+					local enemy_pos = _AI_GetBasePosition(other)
+					if _AI_IsValidWorldPos(enemy_pos) then
+						local ok_dist, d = pcall(World_DistancePointToPoint, base_pos, enemy_pos)
+						if ok_dist and d < nearest_enemy_dist then
+							nearest_enemy_dist = d
+							nearest_enemy_pos = enemy_pos
+						end
+					end
+				end
+			end
+		end
+	end
+	if _AI_IsValidWorldPos(nearest_enemy_pos) and not _is_near_existing(nearest_enemy_pos, 30) then
+		table.insert(waypoints, nearest_enemy_pos)
+	end
+
+	-- Strategic staging points (70% toward enemy)
+	if base_pos ~= nil then
+		for _, other in ipairs(PLAYERS) do
+			if other.id ~= player.id and not _AI_IsEliminated(other) then
+				local is_enemy = true
+				if player.AGS_Team ~= nil and other.AGS_Team ~= nil and player.AGS_Team.index ~= nil and other.AGS_Team.index ~= nil then
+					is_enemy = (player.AGS_Team.index ~= other.AGS_Team.index)
+				end
+				if is_enemy then
+					local enemy_pos = _AI_GetBasePosition(other)
+					if enemy_pos ~= nil then
+						local ok_dist, total_dist = pcall(World_DistancePointToPoint, base_pos, enemy_pos)
+						if ok_dist and total_dist > 0 then
+							local pct = 70
+							local mid = Util_GetPositionFromAtoB(base_pos, enemy_pos, pct)
+							if _AI_IsValidWorldPos(mid) and not _is_near_existing(mid, 30) then
+								table.insert(waypoints, mid)
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+
+	-- Sacred sites
+	for _, site_pos in ipairs(_ai_sacred_sites) do
+		if _AI_IsValidWorldPos(site_pos) and not _is_near_existing(site_pos, 30) then
+			table.insert(waypoints, site_pos)
+		end
+	end
+
+	-- Do not include map center in normal rotation; this often reads as
+	-- an unintended retreat after dispatch/engage cycles.
+	-- Keep center as fallback-only if no strategic waypoints are available.
+	if #waypoints == 0 and _CBA ~= nil and _AI_IsValidWorldPos(_CBA.center) then
+		table.insert(waypoints, _CBA.center)
+	elseif #waypoints == 0 and _AI_IsValidWorldPos(base_pos) then
+		table.insert(waypoints, base_pos)
+	end
+
+	ai._cached_waypoints = waypoints
+	ai._waypoint_cache_time = now
+
+	return waypoints
+end
+
+function _AI_GetPatrolCurrentPosition(player)
+	local ai = player.ai
+	if ai.patrol_sg ~= nil and SGroup_CountSpawned(ai.patrol_sg) > 0 then
+		local ok, pos = pcall(SGroup_GetPosition, ai.patrol_sg)
+		if ok and pos ~= nil then return pos end
+	end
+	return _AI_GetBasePosition(player)
+end
+
+-----------------------------------------------------------------------
+-- Rally Coordination
+-----------------------------------------------------------------------
+
+function _AI_EmitThreatPing(player, pos)
+	if pos == nil then return end
+	_AI_DebugLog(1, string.format("[AI_PLAYER][PING] %s enemy sighted at (%.0f, %.0f).",
+		player.ai and player.ai.label or "P?", pos.x or 0, pos.z or 0))
+end
+
+function _AI_FindNearestAllyPatrolPosition(player)
+	local best_pos = nil
+	local best_dist = math.huge
+	local our_pos = _AI_GetPatrolCurrentPosition(player)
+	if our_pos == nil then return nil end
+
+	for _, ally in ipairs(_ai_players) do
+		if ally ~= player and ally.ai ~= nil and not _AI_IsEliminated(ally) then
+			local same_team = false
+			if player.AGS_Team ~= nil and ally.AGS_Team ~= nil then
+				same_team = (player.AGS_Team.index == ally.AGS_Team.index)
+			end
+			if same_team and ally.ai.patrol_sg ~= nil and SGroup_CountSpawned(ally.ai.patrol_sg) > 0 then
+				local ally_pos = _AI_GetPatrolCurrentPosition(ally)
+				if ally_pos ~= nil then
+					local ok_dist, dist = pcall(World_DistancePointToPoint, our_pos, ally_pos)
+					if ok_dist and dist < best_dist then
+						best_dist = dist
+						best_pos = ally_pos
+					end
+				end
+			end
+		end
+	end
+	return best_pos
+end
+
+function _AI_HasRallyTeammateAtThreat(player, threat_pos)
+	if threat_pos == nil then return false end
+	for _, ally in ipairs(_ai_players) do
+		if ally ~= player and ally.ai ~= nil and not _AI_IsEliminated(ally) then
+			local same_team = false
+			if player.AGS_Team ~= nil and ally.AGS_Team ~= nil then
+				same_team = (player.AGS_Team.index == ally.AGS_Team.index)
+			end
+			if same_team and ally.ai.patrol_sg ~= nil and SGroup_CountSpawned(ally.ai.patrol_sg) > 0 then
+				local ally_pos = _AI_GetPatrolCurrentPosition(ally)
+				if ally_pos ~= nil then
+					local ok_dist, dist = pcall(World_DistancePointToPoint, ally_pos, threat_pos)
+					if ok_dist and dist <= 45 then
+						return true
+					end
+				end
+			end
+		end
+	end
+	return false
+end
+
+function _AI_TryRallyAllies(player, threat_pos)
+	local ai = player.ai
+	local patrol_count = SGroup_CountSpawned(ai.patrol_sg)
+
+	if _AI_IsInsideKeepAttackBoundary(player, threat_pos) then
+		ai.telemetry.maa_boundary_blocks = (ai.telemetry.maa_boundary_blocks or 0) + 1
+		_AI_LogBoundaryBlock(player, "rally_blocked_inside_boundary", threat_pos)
+		return false
+	end
+
+	local combined_strength = patrol_count
+	local allies_to_rally = {}
+
+	for _, ally in ipairs(_ai_players) do
+		if ally ~= player and ally.ai ~= nil and not _AI_IsEliminated(ally) then
+			local same_team = false
+			if player.AGS_Team ~= nil and ally.AGS_Team ~= nil then
+				same_team = (player.AGS_Team.index == ally.AGS_Team.index)
+			end
+
+			if same_team and ally.ai.patrol_sg ~= nil then
+				local ally_count = SGroup_CountSpawned(ally.ai.patrol_sg)
+				if ally_count > 0 then
+					local ally_pos = _AI_GetPatrolCurrentPosition(ally)
+					if ally_pos ~= nil then
+						local our_pos = _AI_GetPatrolCurrentPosition(player)
+						if our_pos ~= nil then
+							local ok_dist, dist = pcall(World_DistancePointToPoint, our_pos, ally_pos)
+							if ok_dist and dist <= _AI_RALLY_RADIUS then
+								table.insert(allies_to_rally, ally)
+								combined_strength = combined_strength + ally_count
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+
+	if #allies_to_rally == 0 then
+		_AI_DebugLog(1, string.format("[AI_PLAYER] %s threat detected but no teammate in rally radius; waiting.",
+			ai.label or "P?"))
+		return false
+	end
+
+	if combined_strength < _AI_RALLY_MIN_STRENGTH then
+		return false
+	end
+
+	local our_pos = _AI_GetPatrolCurrentPosition(player)
+	local rally_pos = threat_pos
+	if our_pos ~= nil then
+		rally_pos = Util_GetPositionFromAtoB(our_pos, threat_pos, 20)
+	end
+
+	ai.patrol_rallying = true
+	ai.patrol_rally_pos = threat_pos
+	ai.patrol_rally_started = World_GetGameTime()
+	pcall(Cmd_AttackMove, ai.patrol_sg, rally_pos, false)
+
+	for _, ally in ipairs(allies_to_rally) do
+		if _AI_IsInsideKeepAttackBoundary(ally, threat_pos) then
+			ally.ai.telemetry.maa_boundary_blocks = (ally.ai.telemetry.maa_boundary_blocks or 0) + 1
+			_AI_LogBoundaryBlock(ally, "ally_rally_blocked_inside_boundary", threat_pos)
+			goto continue_ally_rally
+		end
+		ally.ai.patrol_rallying = true
+		ally.ai.patrol_rally_pos = threat_pos
+		ally.ai.patrol_rally_started = World_GetGameTime()
+		ally.ai.maa_enemy_pos = threat_pos
+		pcall(Cmd_AttackMove, ally.ai.patrol_sg, rally_pos, false)
+		local ally_maa = ally.ai.maa_state or MAA_STATE_IDLE
+		if ally_maa == MAA_STATE_SCOUTING or ally_maa == MAA_STATE_ENEMY_FOUND or ally_maa == MAA_STATE_RETREATING then
+			ally.ai.maa_rally_pos = threat_pos
+			_AI_MaaTransition(ally, MAA_STATE_RALLYING, "ally_reinforcement")
+		end
+		_AI_DebugLog(1, string.format("[AI_PLAYER] %s rallying with %s at (%.0f, %.0f).",
+			ally.ai.label or "P?", ai.label or "P?",
+			rally_pos.x or 0, rally_pos.z or 0))
+		::continue_ally_rally::
+	end
+
+	_AI_DebugLog(1, string.format("[AI_PLAYER] %s initiating rally: %d allies, combined strength %d at (%.0f, %.0f).",
+		ai.label or "P?", #allies_to_rally, combined_strength,
+		threat_pos.x or 0, threat_pos.z or 0))
+
+	return true
+end
+
+function _AI_CheckRallyStatus(player)
+	local ai = player.ai
+
+	if ai.patrol_rally_pos == nil or not _AI_IsValidWorldPos(ai.patrol_rally_pos) then
+		ai.patrol_rally_timeouts = (ai.patrol_rally_timeouts or 0) + 1
+		_AI_DebugLog(1, string.format("[AI_PLAYER][PATROL] %s rally_cancel invalid_rally_pos",
+			ai.label or "P?"))
+		ai.patrol_rallying = false
+		ai.patrol_rally_started = 0
+		ai.patrol_rally_pos = nil
+		_AI_IssuePatrolOrder(player)
+		return
+	end
+
+	if ai.patrol_rally_started ~= nil and ai.patrol_rally_started > 0 then
+		local elapsed = World_GetGameTime() - ai.patrol_rally_started
+		if elapsed >= _AI_RALLY_TIMEOUT then
+			ai.patrol_rally_timeouts = (ai.patrol_rally_timeouts or 0) + 1
+			_AI_DebugLog(1, string.format("[AI_PLAYER][PATROL] %s rally_timeout elapsed=%.1fs",
+				ai.label or "P?", elapsed))
+			ai.patrol_rallying = false
+			ai.patrol_rally_started = 0
+			ai.patrol_rally_pos = nil
+			_AI_IssuePatrolOrder(player)
+			return
+		end
+	end
+
+	if ai.patrol_sg == nil or SGroup_CountSpawned(ai.patrol_sg) <= 0 then
+		_AI_DebugLog(1, string.format("[AI_PLAYER][PATROL] %s rally_cancel no_patrol_units",
+			ai.label or "P?"))
+		ai.patrol_rallying = false
+		ai.patrol_rally_started = 0
+		ai.patrol_rally_pos = nil
+		return
+	end
+
+	local our_pos = _AI_GetPatrolCurrentPosition(player)
+	if our_pos ~= nil then
+		local ok_dist, dist = pcall(World_DistancePointToPoint, our_pos, ai.patrol_rally_pos)
+		if ok_dist and dist < 30 then
+			if _AI_HasRallyTeammateAtThreat(player, ai.patrol_rally_pos) then
+				pcall(Cmd_AttackMove, ai.patrol_sg, ai.patrol_rally_pos, false)
+				ai.patrol_order_hold_until = World_GetGameTime() + _AI_PATROL_ORDER_HOLD_AFTER_ASSAULT
+				ai.patrol_last_order_source = "rally_commit"
+				ai.telemetry.patrol_orders = (ai.telemetry.patrol_orders or 0) + 1
+				_AI_DebugLog(1, string.format("[AI_PLAYER][PATROL] %s rally_commit dist=%.1f",
+					ai.label or "P?", dist))
+				ai.patrol_rallying = false
+				ai.patrol_rally_started = 0
+				ai.patrol_rally_pos = nil
+				return
+			else
+				local now = World_GetGameTime()
+				if ai.patrol_last_wait_log_at == nil or (now - ai.patrol_last_wait_log_at) >= _AI_DIAG_LOG_INTERVAL then
+					ai.patrol_last_wait_log_at = now
+					_AI_DebugLog(1, string.format("[AI_PLAYER][PATROL] %s rally_wait no_teammate_in_assault dist=%.1f",
+						ai.label or "P?", dist))
+				end
+			end
+		end
+	end
+end

@@ -1,0 +1,259 @@
+---------------------------------------------------------------------------------------------------
+-- CBA AI Player — Utility Helpers
+-- Target selection, position validation/clamping, boundary checks, facing helpers,
+-- elimination check, team comparison.
+-- Origin: cba_ai_player.scar lines 3443–3628, 4353–4359
+---------------------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------
+-- Target Selection
+-----------------------------------------------------------------------
+
+function _AI_FindBestAttackTarget(player)
+	local best_pos = nil
+	local best_dist = math.huge
+	local base_pos = _AI_GetBasePosition(player)
+	if base_pos == nil then return nil end
+
+	for _, other in ipairs(PLAYERS) do
+		if other.id ~= player.id and not _AI_IsEliminated(other) then
+			-- Check if enemy (different team)
+			local is_enemy = true
+			if player.AGS_Team ~= nil and other.AGS_Team ~= nil then
+				is_enemy = (player.AGS_Team.index ~= other.AGS_Team.index)
+			end
+
+			if is_enemy then
+				local enemy_pos = _AI_GetBasePosition(other)
+				if enemy_pos ~= nil then
+					local ok, dist = pcall(World_DistancePointToPoint, base_pos, enemy_pos)
+					if ok and dist < best_dist then
+						best_dist = dist
+						best_pos = enemy_pos
+					end
+				end
+			end
+		end
+	end
+
+	return best_pos
+end
+
+-----------------------------------------------------------------------
+-- Utility Helpers
+-----------------------------------------------------------------------
+
+function _AI_GetBasePosition(player)
+	local ai = player.ai
+
+	if ai ~= nil and _AI_IsValidWorldPos(ai.base_pos_cached) then
+		return ai.base_pos_cached
+	end
+
+	-- Primary: keep position
+	if player.keep ~= nil and _AI_IsValidWorldPos(player.keep.position) then
+		if ai ~= nil then ai.base_pos_cached = player.keep.position end
+		return player.keep.position
+	end
+	-- Fallback: engine starting position
+	if player.id ~= nil then
+		local ok, pos = pcall(Player_GetStartingPosition, player.id)
+		if ok and _AI_IsValidWorldPos(pos) then
+			if ai ~= nil then ai.base_pos_cached = pos end
+			return pos
+		end
+	end
+	-- Fallback: cached starting position
+	if _AI_IsValidWorldPos(player.startingPos) then
+		if ai ~= nil then ai.base_pos_cached = player.startingPos end
+		return player.startingPos
+	end
+
+	if _AI_IsValidWorldPos(_CBA and _CBA.center or nil) then
+		if ai ~= nil then ai.base_pos_cached = _CBA.center end
+		return _CBA.center
+	end
+
+	return nil
+end
+
+function _AI_GetKeepBoundaryCenter(player)
+	if player ~= nil and player.keep ~= nil and _AI_IsValidWorldPos(player.keep.position) then
+		return player.keep.position
+	end
+	return _AI_GetBasePosition(player)
+end
+
+function _AI_GetKeepBoundaryDistance(player, target_pos)
+	if not _AI_IsValidWorldPos(target_pos) then return nil end
+	local center = _AI_GetKeepBoundaryCenter(player)
+	if not _AI_IsValidWorldPos(center) then return nil end
+	local ok, dist = pcall(World_DistancePointToPoint, center, target_pos)
+	if ok then return dist end
+	return nil
+end
+
+function _AI_IsInsideKeepAttackBoundary(player, target_pos)
+	local dist = _AI_GetKeepBoundaryDistance(player, target_pos)
+	if dist == nil then return false end
+	return dist <= _AI_KEEP_ATTACK_BLOCK_RADIUS
+end
+
+function _AI_IsOutsideKeepAttackBoundary(player, target_pos)
+	local dist = _AI_GetKeepBoundaryDistance(player, target_pos)
+	if dist == nil then return true end
+	return dist > _AI_KEEP_ATTACK_BLOCK_RADIUS
+end
+
+function _AI_LogBoundaryBlock(player, reason, target_pos)
+	local ai = player ~= nil and player.ai or nil
+	if ai == nil then return end
+	local now = World_GetGameTime()
+	if ai._maa_boundary_last_log_at ~= nil and (now - ai._maa_boundary_last_log_at) < _AI_DIAG_LOG_INTERVAL then
+		return
+	end
+	ai._maa_boundary_last_log_at = now
+	local dist = _AI_GetKeepBoundaryDistance(player, target_pos)
+	print(string.format("[AI_PLAYER][MAA][BOUNDARY_BLOCK] %s state=%s reason=%s radius=%.0f dist=%s target=(%.0f,%.0f)",
+		ai.label or "P?", ai.maa_state or MAA_STATE_IDLE, tostring(reason or "?"), _AI_KEEP_ATTACK_BLOCK_RADIUS,
+		dist and string.format("%.1f", dist) or "nil", target_pos and (target_pos.x or 0) or 0, target_pos and (target_pos.z or 0) or 0))
+end
+
+function _AI_IsValidWorldPos(pos)
+	if pos == nil then return false end
+	if pos.x == nil or pos.z == nil then return false end
+	if math.abs(pos.x) >= _AI_POS_INVALID_ABS or math.abs(pos.z) >= _AI_POS_INVALID_ABS then
+		return false
+	end
+	return true
+end
+
+function _AI_IsWithinPlayableBounds(pos)
+	if not _AI_IsValidWorldPos(pos) then return false end
+
+	local ok_min, map_min = pcall(World_GetDesignedMinimumPlayableArea)
+	local ok_max, map_max = pcall(World_GetDesignedMaximumPlayableArea)
+	if not ok_min or not ok_max or map_min == nil or map_max == nil then
+		return true
+	end
+
+	if pos.x < map_min.x or pos.x > map_max.x then return false end
+	if pos.z < map_min.z or pos.z > map_max.z then return false end
+	return true
+end
+
+-- Returns best-effort playable-bounds diagnostics for logging.
+-- Shape: {ok=bool, min=pos|nil, max=pos|nil, source=string, detail=string}
+function _AI_GetPlayableBoundsInfo()
+	local info = {
+		ok = false,
+		min = nil,
+		max = nil,
+		source = "none",
+		detail = "unavailable"
+	}
+
+	local ok_min, map_min = pcall(World_GetDesignedMinimumPlayableArea)
+	local ok_max, map_max = pcall(World_GetDesignedMaximumPlayableArea)
+	if ok_min and ok_max and map_min ~= nil and map_max ~= nil and map_min.x ~= nil and map_max.x ~= nil then
+		info.ok = true
+		info.min = map_min
+		info.max = map_max
+		info.source = "designed"
+		info.detail = string.format("designed[(%.0f,%.0f)->(%.0f,%.0f)]", map_min.x or 0, map_min.z or 0, map_max.x or 0, map_max.z or 0)
+		return info
+	end
+
+	local ok_pa, playable = pcall(World_GetPlayableArea)
+	if ok_pa and playable ~= nil then
+		local min_x = playable.min_x or playable.minX
+		local min_z = playable.min_z or playable.minZ
+		local max_x = playable.max_x or playable.maxX
+		local max_z = playable.max_z or playable.maxZ
+		if min_x ~= nil and min_z ~= nil and max_x ~= nil and max_z ~= nil then
+			info.ok = true
+			info.min = World_Pos(min_x, 0, min_z)
+			info.max = World_Pos(max_x, 0, max_z)
+			info.source = "playable"
+			info.detail = string.format("playable[(%.0f,%.0f)->(%.0f,%.0f)]", min_x, min_z, max_x, max_z)
+			return info
+		end
+		info.source = "playable"
+		info.detail = string.format("playable_shape=%s", tostring(scartype and scartype(playable) or type(playable)))
+		return info
+	end
+
+	if not ok_min or not ok_max then
+		info.detail = string.format("designed_min_ok=%s designed_max_ok=%s", tostring(ok_min), tostring(ok_max))
+	end
+	return info
+end
+
+function _AI_FormatPlayableBoundsInfo(info)
+	if info == nil then return "bounds=unavailable" end
+	if info.ok and info.min ~= nil and info.max ~= nil then
+		return string.format("bounds=%s min=(%.0f,%.0f) max=(%.0f,%.0f)", tostring(info.source), info.min.x or 0, info.min.z or 0, info.max.x or 0, info.max.z or 0)
+	end
+	return string.format("bounds=%s detail=%s", tostring(info.source or "none"), tostring(info.detail or "unavailable"))
+end
+
+-- Clamp a position to within playable bounds minus a margin (in world units).
+-- Returns original pos if bounds queries fail. Tracks clamped count on calling player.
+function _AI_ClampToPlayableBounds(pos, margin)
+	margin = margin or 8
+	local ok_min, map_min = pcall(World_GetDesignedMinimumPlayableArea)
+	local ok_max, map_max = pcall(World_GetDesignedMaximumPlayableArea)
+	if not ok_min or not ok_max or map_min == nil or map_max == nil then
+		return pos
+	end
+	local clamped = false
+	local x = pos.x
+	local z = pos.z
+	if x < map_min.x + margin then x = map_min.x + margin; clamped = true end
+	if x > map_max.x - margin then x = map_max.x - margin; clamped = true end
+	if z < map_min.z + margin then z = map_min.z + margin; clamped = true end
+	if z > map_max.z - margin then z = map_max.z - margin; clamped = true end
+	if clamped then
+		return World_Pos(x, pos.y or World_GetHeightAt(x, z), z)
+	end
+	return pos
+end
+
+function _AI_GetSafeFacingPosition(base_pos)
+	if _AI_IsValidWorldPos(_CBA ~= nil and _CBA.center or nil) then
+		return _CBA.center
+	end
+	return base_pos
+end
+
+-- Resolve a stable facing target from a resolved build position.
+-- Prefer map center so structures generally face outward from keeps toward action.
+function _AI_GetConstructionFacingPosition(player, build_pos, fallback_pos)
+	if _AI_IsValidWorldPos(build_pos) then
+		if _AI_IsValidWorldPos(_CBA ~= nil and _CBA.center or nil) then
+			return Util_GetPositionFromAtoB(build_pos, _CBA.center, 24)
+		end
+		local base = _AI_GetBasePosition(player)
+		if _AI_IsValidWorldPos(base) then
+			return Util_GetPositionFromAtoB(build_pos, base, 24)
+		end
+		if _AI_IsValidWorldPos(fallback_pos) then
+			return Util_GetPositionFromAtoB(build_pos, fallback_pos, 24)
+		end
+		return Util_GetOffsetPosition(build_pos, 8, 0)
+	end
+	return _AI_GetSafeFacingPosition(fallback_pos)
+end
+
+function _AI_IsEliminated(player)
+	if player.isEliminated then return true end
+	if player.eliminationReason ~= nil and player.eliminationReason ~= "alive" then return true end
+	return false
+end
+
+function _AI_IsSameTeam(a, b)
+	if a.AGS_Team ~= nil and b.AGS_Team ~= nil then
+		return a.AGS_Team.index == b.AGS_Team.index
+	end
+	return false
+end

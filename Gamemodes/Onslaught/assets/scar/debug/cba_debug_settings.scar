@@ -1,0 +1,218 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — Settings Registry
+-- Centralized, typed, discoverable settings for all debug flags and toggles.
+-- Replaces scattered globals with accessor API: Debug_GetSetting / Debug_SetSetting.
+--
+-- Loaded FIRST by cba_debug.scar (before cba_debug_core.scar) because core and domain
+-- modules read settings at load time and at runtime.
+--
+-- Console quick-reference:
+--   Debug_ListSettings()                  -- show all settings
+--   Debug_ListSettings("leaver")          -- filter by domain
+--   Debug_GetSetting("VERBOSE")           -- read a setting
+--   Debug_SetSetting("VERBOSE", false)    -- change a setting (type-checked)
+--   Debug_ResetSettings()                 -- restore all defaults
+---------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------
+-- Schema
+-- Each entry: { key, default, type, domain, description }
+-- Supported types: "boolean", "number", "string", "table"
+---------------------------------------------------------------------------------------------------
+
+-- EXTENSION: Add new settings to this table. Each entry is self-documenting.
+local _SETTINGS_SCHEMA = {
+	-- Core infrastructure
+	{
+		key = "ENABLED",
+		default = true,
+		type = "boolean",
+		domain = "core",
+		description = "Master toggle for structured debug output (defaults ON for crash-early diagnosis)",
+	},
+	{
+		key = "STEP_MODE",
+		default = false,
+		type = "boolean",
+		domain = "core",
+		description = "Interactive phase stepping: pauses between phases (Debug_Continue to resume)",
+	},
+	{
+		key = "PHASE_DELAY",
+		default = 2,
+		type = "number",
+		domain = "core",
+		description = "Seconds between scheduled phases in orchestrated runs",
+	},
+	{
+		key = "LOG_AREA_FILTERS",
+		default = {},
+		type = "table",
+		domain = "core",
+		description = "Area-based DebugLog filter list. Empty = show all areas.",
+	},
+	-- Leaver pipeline
+	{
+		key = "LEAVER_BYPASS_GATES",
+		default = false,
+		type = "boolean",
+		domain = "leaver",
+		description = "Bypass age gates in leaver pipeline (logs all bypasses as AGE_BYPASS)",
+	},
+	{
+		key = "LEAVER_BYPASS_CAPABILITY_GATES",
+		default = false,
+		type = "boolean",
+		domain = "leaver",
+		description = "Bypass capability/tech gates independently (logs as CAP_BYPASS)",
+	},
+	{
+		key = "LEAVER_VERBOSE",
+		default = true,
+		type = "boolean",
+		domain = "leaver",
+		description = "Per-unit transfer decision logging (every convert/create/destroy)",
+	},
+	-- Safety
+	{
+		key = "SAFETY_EXCLUDE_HUMAN",
+		default = true,
+		type = "boolean",
+		domain = "safety",
+		description = "Exclude human player from destructive debug operations",
+	},
+}
+
+---------------------------------------------------------------------------------------------------
+-- Internal Storage
+---------------------------------------------------------------------------------------------------
+
+-- Flat key → value store (populated from schema defaults at load time)
+_DEBUG_SETTINGS = {}
+
+-- Flat key → schema entry lookup (for type checking and discovery)
+local _SETTINGS_INDEX = {}
+
+-- Populate defaults and index
+for _, entry in ipairs(_SETTINGS_SCHEMA) do
+	-- Deep-copy table defaults so mutations don't bleed back into schema
+	if entry.type == "table" then
+		local copy = {}
+		for k, v in pairs(entry.default) do copy[k] = v end
+		_DEBUG_SETTINGS[entry.key] = copy
+	else
+		_DEBUG_SETTINGS[entry.key] = entry.default
+	end
+	_SETTINGS_INDEX[entry.key] = entry
+end
+
+---------------------------------------------------------------------------------------------------
+-- Public API
+---------------------------------------------------------------------------------------------------
+
+--- Read a debug setting by key.
+-- @param key  string  Setting key (case-sensitive, e.g. "LEAVER_VERBOSE")
+-- @return any  Current value, or nil if key unknown
+function Debug_GetSetting(key)
+	if _SETTINGS_INDEX[key] == nil then
+		print(string.format("[DEBUG_SETTINGS] Unknown key: '%s'. Use Debug_ListSettings()", tostring(key)))
+		return nil
+	end
+	return _DEBUG_SETTINGS[key]
+end
+
+--- Update a debug setting with type validation.
+-- @param key    string  Setting key
+-- @param value  any     New value (must match declared type)
+-- @return boolean  true if accepted, false if rejected
+function Debug_SetSetting(key, value)
+	local schema = _SETTINGS_INDEX[key]
+	if schema == nil then
+		print(string.format("[DEBUG_SETTINGS] Unknown key: '%s'. Use Debug_ListSettings()", tostring(key)))
+		return false
+	end
+	if type(value) ~= schema.type then
+		print(string.format("[DEBUG_SETTINGS] Type mismatch for '%s': expected %s, got %s",
+			key, schema.type, type(value)))
+		return false
+	end
+	_DEBUG_SETTINGS[key] = value
+	print(string.format("[DEBUG_SETTINGS] %s = %s", key, tostring(value)))
+	return true
+end
+
+--- List all settings, optionally filtered by domain substring.
+-- @param domain_filter  string|nil  Case-insensitive substring match on domain field
+function Debug_ListSettings(domain_filter)
+	print("[DEBUG_SETTINGS] --- All Settings ---")
+	local count = 0
+
+	-- Sort by domain then key for stable output
+	local sorted = {}
+	for _, entry in ipairs(_SETTINGS_SCHEMA) do
+		table.insert(sorted, entry)
+	end
+	table.sort(sorted, function(a, b)
+		if a.domain == b.domain then return a.key < b.key end
+		return a.domain < b.domain
+	end)
+
+	for _, entry in ipairs(sorted) do
+		if domain_filter == nil or string.find(string.lower(entry.domain), string.lower(domain_filter)) then
+			local current = _DEBUG_SETTINGS[entry.key]
+			local val_str = tostring(current)
+			if entry.type == "table" then
+				local n = 0
+				for _ in pairs(current) do n = n + 1 end
+				val_str = string.format("table(%d)", n)
+			end
+			print(string.format("  %-35s [%s] %-8s = %-10s  %s",
+				entry.key, entry.domain, entry.type, val_str, entry.description))
+			count = count + 1
+		end
+	end
+
+	print(string.format("[DEBUG_SETTINGS] %d setting(s) shown", count))
+end
+
+--- Reset all settings to their schema defaults.
+function Debug_ResetSettings()
+	for _, entry in ipairs(_SETTINGS_SCHEMA) do
+		if entry.type == "table" then
+			local copy = {}
+			for k, v in pairs(entry.default) do copy[k] = v end
+			_DEBUG_SETTINGS[entry.key] = copy
+		else
+			_DEBUG_SETTINGS[entry.key] = entry.default
+		end
+	end
+	print("[DEBUG_SETTINGS] All settings restored to defaults.")
+end
+
+--- Get the schema entry for a setting (for programmatic introspection).
+-- @param key  string
+-- @return table|nil  Schema entry {key, default, type, domain, description}
+function Debug_GetSettingSchema(key)
+	return _SETTINGS_INDEX[key]
+end
+
+--- Return the full schema table (for manifest export / tooling).
+-- @return table  Array of schema entries
+function Debug_GetAllSettingSchemas()
+	return _SETTINGS_SCHEMA
+end
+
+---------------------------------------------------------------------------------------------------
+-- Backward-Compatibility Shims
+-- Legacy globals remain readable/writable from console. The shims bridge reads into
+-- the registry so new code can use Debug_GetSetting() while old code still works.
+--
+-- Phase 1: Legacy globals are populated FROM settings at load time.
+--          Runtime reads in cba.scar still use the globals directly.
+--          Subsequent phases will migrate callsites to the accessor API.
+---------------------------------------------------------------------------------------------------
+
+-- Core flags synced into _cba_debug later (after cba_debug_core.scar creates the table).
+-- Leaver flags: globals exist in cba.scar; we do NOT re-declare them here to avoid
+-- double-write conflicts. Instead, cba.scar's declarations will migrate in a later phase.
+-- For now, the registry holds the canonical defaults and the globals remain authoritative.

@@ -1,0 +1,36 @@
+---------------------------------------------------------------------------------------------------
+-- CBA AI Player — Module Init (Import Chain)
+-- Single entry point that replaces the monolithic cba_ai_player.scar.
+-- Import order matters: config and state first, then logic modules, then
+-- lifecycle (which registers the module and rules), then debug last.
+---------------------------------------------------------------------------------------------------
+
+-- Foundation: constants, state, utility
+import("cba_ai/config.scar")
+import("cba_ai/state.scar")
+import("cba_ai/utility.scar")
+
+-- Core systems
+import("cba_ai/economy.scar")
+import("cba_ai/building.scar")
+import("cba_ai/production.scar")
+import("cba_ai/army.scar")
+import("cba_ai/villager.scar")
+import("cba_ai/outpost.scar")
+import("cba_ai/outside_chain.scar")
+
+-- Combat subsystems
+import("cba_ai/maa.scar")
+import("cba_ai/patrol.scar")
+
+-- Health & progression
+import("cba_ai/sanity.scar")
+import("cba_ai/events.scar")
+
+-- Lifecycle (registers module + rules — must come after all function definitions)
+import("cba_ai/lifecycle.scar")
+
+-- Debug (console commands — safe to load last)
+import("cba_ai/debug/status.scar")
+import("cba_ai/debug/inspection.scar")
+import("cba_ai/debug/commands.scar")

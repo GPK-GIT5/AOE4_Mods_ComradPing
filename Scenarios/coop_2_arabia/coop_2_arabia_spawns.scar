@@ -1,0 +1,248 @@
+--[[
+	Filename: coop_2_arabia_spawns.scar
+	Description: Wave scheduling, spawn logic, reinforcements, and patrols
+	Last Modified: 2026-02-28
+]]
+
+-- ============================================================
+-- SPAWN HELPERS (DLC-safe civ-aware deployment)
+-- ============================================================
+
+-- Deploy starting squad using CIV_MELEE_MAP / CIV_RANGED_MAP lookup (DLC-safe)
+function Deploy_Squad_CivAware(player, civ, sg_target, role, spawn_marker)
+	local map = (role == "melee") and CIV_MELEE_MAP or CIV_RANGED_MAP
+	local default = (role == "melee") and "start_player1" or "start_player2"
+	local key = ResolveCivMapKey(map, civ, default)
+	UnitEntry_DeploySquads(player, sg_target, Unit_Types[key], spawn_marker)
+end
+
+-- Deploy reinforcements using REINFORCE_MELEE_MAP / REINFORCE_RANGED_MAP lookup (DLC-safe)
+function Deploy_Reinforcement_CivAware(player, civ, sg_target, role, spawn_marker)
+	local map = (role == "melee") and REINFORCE_MELEE_MAP or REINFORCE_RANGED_MAP
+	local default = (role == "melee") and "units_player1_reinforce" or "units_player2_reinforce"
+	local key = ResolveCivMapKey(map, civ, default)
+	UnitEntry_DeploySquads(player, sg_target, Unit_Types[key], spawn_marker)
+end
+
+-- Deploy mining camp reward using MININGCAMP map lookup (DLC-safe)
+function Deploy_MiningReward_CivAware(player, civ, sg_target, role, spawn_marker)
+	local map = (role == "melee") and MININGCAMP_MELEE_MAP or MININGCAMP_RANGED_MAP
+	local default = (role == "melee") and "units_player1" or "units_player2"
+	local key = ResolveCivMapKey(map, civ, default)
+	UnitEntry_DeploySquads(player, sg_target, Unit_Types[key], spawn_marker)
+end
+
+-- Stepped depletion thresholds for pre-capture reinforcements (70%, then 25%)
+PRECAPTURE_THRESHOLDS = {0.7, 0.25}
+
+-- Per-player reinforcement budgets (set in Start_Setup from DC.reinforcement_squad_count)
+player1_precapture_remaining = 0
+player1_precapture_index = 1
+player2_precapture_remaining = 0
+player2_precapture_index = 1
+
+-- Spawn marker for post-capture reinforcements (set in World Builder: tc_spawn)
+-- tc_spawn is a marker placed in the scenario, do not reassign
+
+-- Settlement capture flag (controls spawn location switch)
+settlement_captured = false
+
+-- ============================================================
+-- MAIN SPAWN SETUP
+-- ============================================================
+
+-- Mark settlement as captured (triggers spawn location switch for reinforcements)
+function Arabia_MarkSettlementCaptured()
+	settlement_captured = true
+end
+
+-- Setup starter inits for all players, extra settings before launch
+function Start_Setup()
+	
+	-- Spawn players using civ-aware map lookup (supports all DLC civs automatically)
+	Deploy_Squad_CivAware(player1, Player_GetRaceName(player1), sg_player1_start, "melee", mkr_player1_spawn01)
+	Deploy_Squad_CivAware(player2, Player_GetRaceName(player2), sg_player2_start, "ranged", mkr_player2_spawn01)
+	
+	count_start_player1 = SGroup_Count(sg_player1_start) -- Setup Reinforcements_Player1
+	count_start_player2 = SGroup_Count(sg_player2_start) -- Setup Reinforcements_Player2
+	-- tc_spawn marker already exists in World Builder - do not reassign
+	-- Use full reinforcement budget (no pre/post split) - spawn location changes on capture
+	player1_precapture_remaining = DC.reinforcement_squad_count
+	player1_precapture_index = 1
+	player2_precapture_remaining = DC.reinforcement_squad_count
+	player2_precapture_index = 1
+	
+	Rule_AddInterval(Reinforcements_Player1, 1)
+	Rule_AddInterval(Reinforcements_Player2, 1)
+	if DC.trader_reinforcements then
+		Rule_Add(Reinforcements_Trader)
+	end 
+	-- Difficulty: Starting guards difficulty
+	if DC.camp_strength == "easy" then
+		-- Gates Camp /  MAA, Spearman, Archers / 26x
+		UnitEntry_DeploySquads(player3, sg_wave1_mining02, Unit_Types.units_camp, mkr_gates_camp)
+		-- Gates Base /  MAA, Spearman, Archers / 26x
+		UnitEntry_DeploySquads(player3, sg_start_gate01, Unit_Types.units_camp, mkr_gates_base)
+		-- Trade Post /  MAA, Spearman, Archers / 26x (1)
+		UnitEntry_DeploySquads(player3, sg_start_camp01, Unit_Types.units_camp, mkr_start_trader1)
+		-- Patrol /  MAA, Spearman, Archers / 20x (3)
+		UnitEntry_DeploySquads(player3, sg_start_patrol01, Unit_Types.units_patrol, mkr_start_mining2)
+		
+	else
+		-- Gates Camp 
+		UnitEntry_DeploySquads(player3, sg_wave1_mining02, Unit_Types.units_camp_hard, mkr_gates_camp)
+		-- Gates Base
+		UnitEntry_DeploySquads(player3, sg_start_gate01, Unit_Types.units_camp_hard, mkr_gates_base)
+		-- Trade Post 
+		UnitEntry_DeploySquads(player3, sg_start_camp01, Unit_Types.units_camp_hard, mkr_start_trader1)
+		-- Patrol / 
+		-- UnitEntry_DeploySquads(player3, sg_start_patrol01, Unit_Types.units_patrol_hard, mkr_start_mining2)
+		
+	end -- DC.camp_strength
+	count_enemey01_camp = SGroup_Count(sg_start_camp01) -- used for Reinforcements_Trader
+	
+	
+	-- Mining Camp /  MAA, Spearman, Archers / 26x (2)
+	UnitEntry_DeploySquads(player3, sg_start_mining_def, Unit_Types.units_camp, mkr_start_mining1)
+	count_start_mining_def = SGroup_Count(sg_start_mining_def) -- used for Reinforcements Players
+	-- Enable Patrol_Cycle for (1,2,3)
+	Rule_AddInterval(Patrol_Cycle, 25, { sgroup = sg_start_camp01, spawn_loc = mkr_start_trader1, dest_loc = mkr_start_trader2, sgroup_all = sg_start_troops, count = count_start_troop }) -- Count check only required once
+	Rule_AddInterval(Patrol_Cycle, 45, { sgroup = sg_start_mining_def, spawn_loc = mkr_start_mining1, dest_loc = mkr_start_mining2 })
+	Rule_AddInterval(Patrol_Cycle, 90, { sgroup = sg_start_patrol01, spawn_loc = mkr_start_mining2, dest_loc = mkr_start_trader1 })
+	-- Disable Patrol_Cycle when all units eliminated
+	sg_start_troops = SGroup_CreateIfNotFound("sg_start_troops")
+	SGroup_AddGroup(sg_start_troops, sg_start_camp01)
+	SGroup_AddGroup(sg_start_troops, sg_start_patrol01)
+	SGroup_AddGroup(sg_start_troops, sg_start_mining_def)
+	count_start_troop = SGroup_Count(sg_start_troops)
+	-- Start Wave attacks
+	Unit_Path_Data() -- Init path data	
+end
+
+-- ============================================================
+-- REINFORCEMENTS
+-- ============================================================
+
+-- Enemy trader QRF
+function Reinforcements_Trader()
+	if SGroup_Count(sg_start_camp01) < 0.3 * count_enemey01_camp then
+			sg_enemey_qrf_trade = SGroup_CreateIfNotFound("sg_enemey_qrf_trade")
+			UnitEntry_DeploySquads(player3, sg_enemey_qrf_trade, Unit_Types.units_reinforcement_trade, mkr_city_reinforcements)
+			Cmd_FormationAttackMove(sg_enemey_qrf_trade, mkr_start_trader1)
+			Cmd_FormationAttackMove(sg_enemey_qrf_trade, mkr_start_trader2, true)
+			Rule_RemoveMe()
+	end
+end 
+
+function Reinforcements_Player1()
+	-- Stepped thresholds (70%, 25%) with spawn location based on capture state
+	if player1_precapture_remaining > 0 and player1_precapture_index <= #PRECAPTURE_THRESHOLDS then
+		local threshold = PRECAPTURE_THRESHOLDS[player1_precapture_index]
+		if SGroup_Count(sg_player1_start) < threshold * count_start_player1 then
+			if DC.reinforcement_pre_capture then
+				-- Spawn at original location before capture, settlement after capture
+				local spawn_marker = settlement_captured and tc_spawn or mkr_player1_spawn01
+				Deploy_Reinforcement_CivAware(player1, Player_GetRaceName(player1), sg_player1_reinforcements, "melee", spawn_marker)
+				SendReinforceNotification(spawn_marker, "$42813") -- Reinforcements have arrived!
+				-- Post-capture: attack-move reinforcements to settlement
+				if settlement_captured then
+					Cmd_FormationAttackMove(sg_player1_reinforcements, mkr_settlement_start)
+				end
+			end
+			player1_precapture_index = player1_precapture_index + 1
+			player1_precapture_remaining = player1_precapture_remaining - 1
+		end
+	end
+	
+	-- Clean up when reinforcement budget exhausted
+	if player1_precapture_remaining == 0 then
+		Rule_RemoveMe()
+	end
+end 
+
+function Reinforcements_Player2()
+	-- Stepped thresholds (70%, 25%) with spawn location based on capture state
+	if player2_precapture_remaining > 0 and player2_precapture_index <= #PRECAPTURE_THRESHOLDS then
+		local threshold = PRECAPTURE_THRESHOLDS[player2_precapture_index]
+		if SGroup_Count(sg_player2_start) < threshold * count_start_player2 then
+			if DC.reinforcement_pre_capture then
+				-- Spawn at original location before capture, settlement after capture
+				local spawn_marker = settlement_captured and tc_spawn or mkr_player2_spawn01
+				Deploy_Reinforcement_CivAware(player2, Player_GetRaceName(player2), sg_player2_reinforcements, "ranged", spawn_marker)
+				SendReinforceNotification(spawn_marker, "$42813") -- Reinforcements have arrived!
+				-- Post-capture: attack-move reinforcements to settlement
+				if settlement_captured then
+					Cmd_FormationAttackMove(sg_player2_reinforcements, mkr_settlement_start)
+				end
+			end
+			player2_precapture_index = player2_precapture_index + 1
+			player2_precapture_remaining = player2_precapture_remaining - 1
+		end
+	end
+	
+	-- Clean up when reinforcement budget exhausted
+	if player2_precapture_remaining == 0 then
+		Rule_RemoveMe()
+	end
+end
+
+function Reinforcements_Siege()
+	-- Spawn Siege Reinforcements for players
+	UnitEntry_DeploySquads(player1, sg_player1_siege, Unit_Types.units_siege, tc_spawn)
+	Cmd_FormationAttackMove(sg_player1_siege, mkr_start_mining1)
+	-- Spawn Siege Reinforcements for players
+	UnitEntry_DeploySquads(player2, sg_player2_siege, Unit_Types.units_siege, tc_spawn)
+	Cmd_FormationAttackMove(sg_player2_siege, mkr_start_mining1)
+end -- Reinforcements_Siege
+
+-- ============================================================
+-- PATROL & WAVE DEPLOYMENT
+-- ============================================================
+
+-- Group all player units for Proximity Marker
+function SGroup_Tracker(context, data)
+	
+	local player = data.player 
+	
+	Player_GetAll(player)
+	SGroup_Filter(sg_allsquads, "military", FILTER_KEEP)
+	SGroup_AddGroup(sg_player_team, sg_allsquads)
+	
+	
+end -- used for CaptureMine_Reinforcements() > Rule_EnterProximity 
+-- Patrol_Cycle & Units Deploy / Thanks to Foxplot
+function Patrol_Cycle(context, data) -- Used to cycle units between waypoints
+	
+	local sgroup = data.sgroup 
+	local spawn_loc = data.spawn_loc
+	local dest_loc = data.dest_loc
+	local sgroup_all = data.sgroup_all
+	local count = data.count
+	-- Removed SGroup_IsIdle check because we use Rule_AddInterval
+		Cmd_FormationAttackMove(sgroup, spawn_loc)
+		Cmd_FormationAttackMove(sgroup, dest_loc, true)		
+
+	if SGroup_Count(sg_start_troops) < 0.1 * count_start_troop  then
+		Rule_RemoveMe()
+	end
+	
+end
+-- Deploy_Unit & Gaurdian_Raid combined & renamed
+function Units_Deploy(context, data) -- Used to spawn units / attack groups
+
+	local player = data.player
+	local sgroup = data.sgroup
+	local unit_type = data.unit_type
+	local spawn_loc = data.spawn_loc
+	local path = data.path 
+
+
+	UnitEntry_DeploySquads(player, sgroup, unit_type, spawn_loc)
+	Cmd_FormationAttackMove(sgroup, path[1])
+	for index, mkr in pairs(path) do
+		if index > 1 then
+			Cmd_FormationAttackMove(sgroup, mkr, true)
+		end
+	end
+
+end

@@ -1,0 +1,48 @@
+-----------------------------------------------------------------------
+-- PlayerUI Initialization Framework
+-- Manages lifecycle (Initialize/Reset/Stop) for all registered modules.
+-- Iterates _PlayerUI_HumanPlayers (set by playerui.scar at init).
+-----------------------------------------------------------------------
+
+PlayerUiInitialization = {
+	Initializables = {},
+}
+
+function PlayerUiInitialization:AddInitializable(initializable)
+	table.insert(self.Initializables, initializable)
+end
+
+function PlayerUiInitialization:Initialize()
+	self:_Do("Initialize")
+end
+
+function PlayerUiInitialization:Reset()
+	self:_Do("Reset")
+end
+
+function PlayerUiInitialization:Stop()
+	self:_Do("Stop")
+end
+
+function PlayerUiInitialization:_Do(method)
+	local humanPlayers = _PlayerUI_HumanPlayers
+	if humanPlayers == nil then
+		return
+	end
+	local playerCount = #humanPlayers
+
+	for i = 1, #self.Initializables do
+		local initializable = self.Initializables[i]
+		local methodOfInitializable = initializable[method]
+		local methodPerPlayerOfInitializable = initializable[method .. "PerPlayer"]
+
+		if methodOfInitializable then
+			methodOfInitializable(initializable)
+		end
+		if methodPerPlayerOfInitializable then
+			for playerIndex = 1, playerCount do
+				methodPerPlayerOfInitializable(initializable, playerIndex)
+			end
+		end
+	end
+end

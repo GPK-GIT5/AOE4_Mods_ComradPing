@@ -1,0 +1,303 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — Module Registry
+-- Declarative module manifests with dependency tracking, auto-discovery, and namespace population.
+-- Loaded after cba_debug_settings.scar, before cba_debug_core.scar — so core itself can register.
+--
+-- Each debug file calls Debug_RegisterModule(meta, handlers) at its bottom.
+-- The registry collects manifests, validates dependencies, and populates the debug.* namespace
+-- automatically — replacing the manual `if debug then ... end` pattern.
+--
+-- Console quick-reference:
+--   Debug_ListModules()                   -- show all registered modules
+--   Debug_ListModules("siege")            -- filter by name/tag substring
+--   Debug_ModuleInfo("leaver")            -- detailed manifest for one module
+--   Debug_DependencyGraph()               -- print topological dependency edges
+--   Debug_ValidateModules()               -- check for missing deps / duplicate tags
+---------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------
+-- Internal Storage
+---------------------------------------------------------------------------------------------------
+
+-- Array of registered module manifests (insertion order preserved for diagnostics)
+local _MODULE_LIST = {}
+
+-- name → manifest lookup (fast access)
+local _MODULE_INDEX = {}
+
+-- tag → {module_name, handler} for tag-based dispatch integration
+local _TAG_HANDLERS = {}
+
+-- Deferred validation flag (set true after all imports complete)
+local _MODULES_SEALED = false
+
+---------------------------------------------------------------------------------------------------
+-- Module Manifest Contract
+--
+-- meta = {
+--   name              string   REQUIRED  Unique module name (e.g. "leaver", "siege_test")
+--   tags              table    OPTIONAL  Array of dispatch tags this module provides
+--   tier              number   OPTIONAL  Default tier for tags (1=quick, 2=medium, 3=heavy). Default 2.
+--   depends           table    OPTIONAL  Array of module names this module requires
+--   state_tables      table    OPTIONAL  Array of global table names this module reads/writes
+--   required_game     table    OPTIONAL  Array of globals required at runtime (e.g. "PLAYERS", "_mod")
+--   namespace         string   OPTIONAL  debug.* sub-table to populate (e.g. "siege", "leaver")
+--   description       string   OPTIONAL  One-line description
+-- }
+--
+-- handlers = {
+--   [function_name] = function,  -- each entry is registered into debug.<namespace>.<function_name>
+-- }
+---------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------
+-- Public API — Registration
+---------------------------------------------------------------------------------------------------
+
+--- Register a debug module and its handlers.
+-- Call at the bottom of each debug domain file.
+-- @param meta      table  Module manifest (see contract above)
+-- @param handlers  table|nil  Map of function_name → function to populate debug.<namespace>
+function Debug_RegisterModule(meta, handlers)
+	-- Validate required fields
+	if type(meta) ~= "table" or type(meta.name) ~= "string" then
+		print("[DEBUG_REGISTRY] RegisterModule requires meta.name (string)")
+		return
+	end
+
+	local name = meta.name
+
+	-- Duplicate check
+	if _MODULE_INDEX[name] ~= nil then
+		print(string.format("[DEBUG_REGISTRY] WARNING: module '%s' already registered — overwriting", name))
+	end
+
+	-- Normalize optional fields
+	meta.tags           = meta.tags or {}
+	meta.tier           = meta.tier or 2
+	meta.depends        = meta.depends or {}
+	meta.state_tables   = meta.state_tables or {}
+	meta.required_game  = meta.required_game or {}
+	meta.namespace      = meta.namespace or nil
+	meta.description    = meta.description or ""
+	meta._handler_count = 0
+
+	-- Store manifest
+	_MODULE_INDEX[name] = meta
+	table.insert(_MODULE_LIST, meta)
+
+	-- Register tags into the tag dispatch system
+	for _, tag in ipairs(meta.tags) do
+		if _TAG_HANDLERS[tag] ~= nil and _TAG_HANDLERS[tag].module ~= name then
+			print(string.format("[DEBUG_REGISTRY] WARNING: tag '%s' claimed by '%s', now overwritten by '%s'",
+				tag, _TAG_HANDLERS[tag].module, name))
+		end
+		-- Tags need handlers; these are wired up below or via debug._register in the domain file
+		_TAG_HANDLERS[tag] = { module = name, handler = nil }
+	end
+
+	-- Populate debug.<namespace> sub-table with handlers
+	if handlers and meta.namespace then
+		-- Ensure the debug global exists (it's created in cba_debug_core.scar, but guard for load order)
+		if debug == nil then debug = {} end
+		if debug[meta.namespace] == nil then
+			debug[meta.namespace] = {}
+		end
+		for fn_name, fn in pairs(handlers) do
+			if type(fn) == "function" then
+				debug[meta.namespace][fn_name] = fn
+				meta._handler_count = meta._handler_count + 1
+			end
+		end
+	elseif handlers then
+		-- No namespace — just count handlers for diagnostics
+		for _, fn in pairs(handlers) do
+			if type(fn) == "function" then
+				meta._handler_count = meta._handler_count + 1
+			end
+		end
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Public API — Discovery
+---------------------------------------------------------------------------------------------------
+
+--- List all registered modules, optionally filtered by name/tag/description substring.
+-- @param filter  string|nil  Case-insensitive substring match
+function Debug_ListModules(filter)
+	print("[DEBUG_REGISTRY] --- Registered Modules ---")
+	local count = 0
+
+	-- Sort by name for stable output
+	local sorted = {}
+	for _, meta in ipairs(_MODULE_LIST) do
+		table.insert(sorted, meta)
+	end
+	table.sort(sorted, function(a, b) return a.name < b.name end)
+
+	for _, meta in ipairs(sorted) do
+		local searchable = string.lower(meta.name .. " " .. table.concat(meta.tags, " ") .. " " .. meta.description)
+		if filter == nil or string.find(searchable, string.lower(filter)) then
+			local tags_str = #meta.tags > 0 and table.concat(meta.tags, ",") or "(none)"
+			local deps_str = #meta.depends > 0 and table.concat(meta.depends, ",") or "(none)"
+			print(string.format("  %-28s T%d  tags=[%s]  deps=[%s]  handlers=%d",
+				meta.name, meta.tier, tags_str, deps_str, meta._handler_count))
+			if meta.description ~= "" then
+				print(string.format("    %s", meta.description))
+			end
+			count = count + 1
+		end
+	end
+
+	print(string.format("[DEBUG_REGISTRY] %d module(s) shown, %d total registered", count, #_MODULE_LIST))
+end
+
+--- Print detailed manifest for a single module.
+-- @param name  string  Module name
+function Debug_ModuleInfo(name)
+	local meta = _MODULE_INDEX[name]
+	if meta == nil then
+		print(string.format("[DEBUG_REGISTRY] Module '%s' not found. Use Debug_ListModules()", tostring(name)))
+		return
+	end
+
+	print(string.format("[DEBUG_REGISTRY] === %s ===", meta.name))
+	print(string.format("  Tier:           %d", meta.tier))
+	print(string.format("  Description:    %s", meta.description))
+	print(string.format("  Tags:           %s", #meta.tags > 0 and table.concat(meta.tags, ", ") or "(none)"))
+	print(string.format("  Dependencies:   %s", #meta.depends > 0 and table.concat(meta.depends, ", ") or "(none)"))
+	print(string.format("  State tables:   %s", #meta.state_tables > 0 and table.concat(meta.state_tables, ", ") or "(none)"))
+	print(string.format("  Required game:  %s", #meta.required_game > 0 and table.concat(meta.required_game, ", ") or "(none)"))
+	print(string.format("  Namespace:      %s", meta.namespace or "(global)"))
+	print(string.format("  Handlers:       %d", meta._handler_count))
+end
+
+--- Print the dependency graph: each module and what it depends on.
+function Debug_DependencyGraph()
+	print("[DEBUG_REGISTRY] --- Dependency Graph ---")
+
+	local sorted = {}
+	for _, meta in ipairs(_MODULE_LIST) do
+		table.insert(sorted, meta)
+	end
+	table.sort(sorted, function(a, b) return a.name < b.name end)
+
+	local edge_count = 0
+	for _, meta in ipairs(sorted) do
+		if #meta.depends > 0 then
+			for _, dep in ipairs(meta.depends) do
+				local status = _MODULE_INDEX[dep] and "OK" or "MISSING"
+				print(string.format("  %s → %s [%s]", meta.name, dep, status))
+				edge_count = edge_count + 1
+			end
+		end
+	end
+
+	if edge_count == 0 then
+		print("  (no dependencies declared)")
+	end
+	print(string.format("[DEBUG_REGISTRY] %d edge(s)", edge_count))
+end
+
+--- Validate all module manifests: check for missing dependencies, duplicate tags, and orphan tags.
+-- Returns (issues_count, issues_list) for programmatic use.
+-- @return number, table
+function Debug_ValidateModules(silent)
+	if not silent then
+		print("[DEBUG_REGISTRY] --- Validation ---")
+	end
+	local issues = {}
+
+	-- Check missing dependencies
+	for _, meta in ipairs(_MODULE_LIST) do
+		for _, dep in ipairs(meta.depends) do
+			if _MODULE_INDEX[dep] == nil then
+				local msg = string.format("Module '%s' depends on '%s' which is not registered", meta.name, dep)
+				table.insert(issues, msg)
+				if not silent then
+					print(string.format("  [FAIL] %s", msg))
+				end
+			end
+		end
+	end
+
+	-- Check for tags registered in _TAG_HANDLERS but with no matching debug._register() entry
+	-- (This is advisory — domain files may use debug._register() directly instead of the manifest)
+	if debug and debug._registry then
+		for tag, entry in pairs(_TAG_HANDLERS) do
+			if debug._registry[tag] == nil then
+				-- Not an issue per se — the domain file may not have loaded yet, or may use legacy path
+				-- Just note it for diagnostics
+			end
+		end
+	end
+
+	-- Check for duplicate module names (already guarded at registration time, but verify)
+	local seen_names = {}
+	for _, meta in ipairs(_MODULE_LIST) do
+		if seen_names[meta.name] then
+			local msg = string.format("Duplicate module name: '%s'", meta.name)
+			table.insert(issues, msg)
+			if not silent then
+				print(string.format("  [FAIL] %s", msg))
+			end
+		end
+		seen_names[meta.name] = true
+	end
+
+	if not silent then
+		if #issues == 0 then
+			print("  [PASS] All modules validated — 0 issues")
+		else
+			print(string.format("  [FAIL] %d issue(s) found", #issues))
+		end
+		print(string.format("[DEBUG_REGISTRY] %d module(s) checked, %d issue(s)", #_MODULE_LIST, #issues))
+	end
+	return #issues, issues
+end
+
+---------------------------------------------------------------------------------------------------
+-- Sealing & Deferred Validation
+---------------------------------------------------------------------------------------------------
+
+--- Seal the registry and run deferred validation.
+-- Called once after all debug imports are complete (from cba_debug.scar entry point).
+function Debug_SealModuleRegistry()
+	if _MODULES_SEALED then return end
+	_MODULES_SEALED = true
+
+	-- Run validation silently at boot; explicit console calls still print full output.
+	local issue_count, issues = Debug_ValidateModules(true)
+	if issue_count > 0 then
+		print(string.format("[DEBUG_REGISTRY] WARNING: %d issue(s) detected at seal time", issue_count))
+	end
+end
+
+--- Check if the registry is sealed (all imports complete).
+-- @return boolean
+function Debug_IsRegistrySealed()
+	return _MODULES_SEALED
+end
+
+---------------------------------------------------------------------------------------------------
+-- Manifest Export (for AI tooling / offline scripts)
+---------------------------------------------------------------------------------------------------
+
+--- Return the full module list as an array of manifests (for Debug_ExportManifest serializer).
+-- @return table  Array of manifest tables
+function Debug_GetAllModuleManifests()
+	return _MODULE_LIST
+end
+
+--- Return the tag → module mapping (for debugging dispatch routing).
+-- @return table
+function Debug_GetTagModuleMap()
+	return _TAG_HANDLERS
+end
+
+--- Return the count of registered modules.
+-- @return number
+function Debug_GetModuleCount()
+	return #_MODULE_LIST
+end

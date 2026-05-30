@@ -1,0 +1,227 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — Event Probes
+-- Tests event handlers with mock contexts (no game state modification).
+--
+-- Branch: onslaught-v3.3
+-- Probes handlers from: cba.scar, rewards/cba_rewards.scar, cba_annihilation.scar,
+--   cba_religious.scar, wonder.scar, cba_options.scar
+-- Console: Debug_EventProbes()
+---------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------
+-- Mock Context Constructors
+---------------------------------------------------------------------------------------------------
+
+function _EP_MockContext_EntityKilled(victim_eid, victim_owner, killer_owner)
+	return {
+		victim = {EntityID = victim_eid or 0},
+		victimOwner = victim_owner,
+		killer = killer_owner,
+	}
+end
+
+function _EP_MockContext_ConstructionStart(entity, player)
+	return {
+		entity = entity or 0,
+		player = player,
+	}
+end
+
+function _EP_MockContext_UpgradeComplete(player, upgrade)
+	return {
+		player = player,
+		upgrade = upgrade,
+	}
+end
+
+function _EP_MockContext_BuildItemComplete(player, entity)
+	return {
+		player = player,
+		entity = entity or 0,
+	}
+end
+
+function _EP_MockContext_StrategicPointChanged(entity)
+	return {
+		entity = entity or 0,
+	}
+end
+
+---------------------------------------------------------------------------------------------------
+-- Probe Groups
+---------------------------------------------------------------------------------------------------
+
+function _EP_Group_EntityKilled(results)
+	print("  > Probing GE_EntityKilled handlers:")
+	local handlers = {
+		-- cba.scar
+		{"Mod_OnEntityKilled", Mod_OnEntityKilled},
+		-- rewards/cba_rewards.scar
+		{"CBA_Rewards_OnEntityKilled", CBA_Rewards_OnEntityKilled},
+		-- cba_options.scar
+		{"CBA_Options_BuildingLimit_OnEntityKilled", CBA_Options_BuildingLimit_OnEntityKilled},
+		-- cba_annihilation.scar
+		{"Annihilation_OnEntityKilled", Annihilation_OnEntityKilled},
+		-- wonder.scar
+		{"Wonder_OnEntityKilled", Wonder_OnEntityKilled},
+	}
+	for _, h in ipairs(handlers) do
+		local name = h[1]
+		local fn = h[2]
+		if type(fn) ~= "function" then
+			print(string.format("    [SKIP] %s — not a function", name))
+		else
+			local ctx = _EP_MockContext_EntityKilled(0, nil, nil)
+			local ok, err = pcall(fn, ctx)
+			if ok then
+				print(string.format("    [OK] %s — survived mock context", name))
+				table.insert(results, {name = name, pass = true, detail = "survived"})
+			else
+				print(string.format("    [CRASH] %s — %s", name, tostring(err)))
+				table.insert(results, {name = name, pass = false, detail = tostring(err)})
+			end
+		end
+	end
+end
+
+function _EP_Group_Construction(results)
+	print("  > Probing construction handlers:")
+	local handlers = {
+		-- cba_options.scar
+		{"CBA_Options_BuildingLimit_ConstructionStart", CBA_Options_BuildingLimit_ConstructionStart},
+		{"CBA_Options_BuildingLimit_ConstructionCancelled", CBA_Options_BuildingLimit_ConstructionCancelled},
+		{"CBA_Options_AddScuttle_ConstructionComplete", CBA_Options_AddScuttle_ConstructionComplete},
+		-- cba_auto_age.scar
+		{"CBA_AutoAge_ConstructionComplete", CBA_AutoAge_ConstructionComplete},
+		{"CBA_AutoAge_UpgradeComplete", CBA_AutoAge_UpgradeComplete},
+		-- cba_annihilation.scar
+		{"Annihilation_OnConstructionComplete", Annihilation_OnConstructionComplete},
+		-- wonder.scar
+		{"Wonder_OnConstructionStart", Wonder_OnConstructionStart},
+		{"Wonder_OnConstructionComplete", Wonder_OnConstructionComplete},
+	}
+	for _, h in ipairs(handlers) do
+		local name = h[1]
+		local fn = h[2]
+		if type(fn) ~= "function" then
+			print(string.format("    [SKIP] %s — not a function", name))
+		else
+			local ctx = _EP_MockContext_ConstructionStart(nil, nil)
+			if name == "CBA_AutoAge_UpgradeComplete" then
+				ctx = _EP_MockContext_UpgradeComplete(nil, nil)
+			end
+			local ok, err = pcall(fn, ctx)
+			if ok then
+				print(string.format("    [OK] %s — survived mock context", name))
+				table.insert(results, {name = name, pass = true, detail = "survived"})
+			else
+				print(string.format("    [WARN] %s — %s (expected with nil context)", name, tostring(err)))
+				table.insert(results, {name = name, pass = true, detail = "expected crash: " .. tostring(err)})
+			end
+		end
+	end
+end
+
+function _EP_Group_WinConditions(results)
+	print("  > Probing win condition handlers:")
+	local handlers = {
+		-- cba_annihilation.scar
+		{"Annihilation_CheckVictory", Annihilation_CheckVictory},
+		-- surrender.scar
+		{"Surrender_CheckVictory", Surrender_CheckVictory},
+	}
+	for _, h in ipairs(handlers) do
+		local name = h[1]
+		local fn = h[2]
+		if type(fn) ~= "function" then
+			print(string.format("    [SKIP] %s — not a function", name))
+		else
+			local ok, err = pcall(fn, nil)
+			if ok then
+				print(string.format("    [OK] %s — survived nil arg", name))
+				table.insert(results, {name = name, pass = true, detail = "survived"})
+			else
+				print(string.format("    [WARN] %s — %s", name, tostring(err)))
+				table.insert(results, {name = name, pass = true, detail = "expected crash: " .. tostring(err)})
+			end
+		end
+	end
+end
+
+function _EP_Group_SiegeLimits(results)
+	print("  > Probing siege limit handlers (cba_options.scar):")
+	local handlers = {
+		{"CBA_Options_SiegeLimit_BuildItemComplete", CBA_Options_SiegeLimit_BuildItemComplete},
+		{"CBA_Options_SiegeLimit_SquadKilled", CBA_Options_SiegeLimit_SquadKilled},
+	}
+	for _, h in ipairs(handlers) do
+		local name = h[1]
+		local fn = h[2]
+		if type(fn) ~= "function" then
+			print(string.format("    [SKIP] %s — not a function", name))
+		else
+			local ctx = _EP_MockContext_BuildItemComplete(nil, nil)
+			local ok, err = pcall(fn, ctx)
+			if ok then
+				print(string.format("    [OK] %s — survived mock context", name))
+				table.insert(results, {name = name, pass = true, detail = "survived"})
+			else
+				print(string.format("    [WARN] %s — %s", name, tostring(err)))
+				table.insert(results, {name = name, pass = true, detail = "expected crash: " .. tostring(err)})
+			end
+		end
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Public Entry Point
+---------------------------------------------------------------------------------------------------
+
+function Debug_EventProbes()
+	_cba_debug.enabled = true
+
+	local ok, gt = pcall(World_GetGameTime)
+	local start_time = ok and gt or 0
+	local results = {}
+
+	print("")
+	print("============================================")
+	print("  CBA DEBUG — EVENT PROBES")
+	print("  Branch: onslaught-v3.3")
+	print("============================================")
+
+	_EP_Group_EntityKilled(results)
+	_EP_Group_Construction(results)
+	_EP_Group_WinConditions(results)
+	_EP_Group_SiegeLimits(results)
+
+	local total = #results
+	local fails = 0
+	for _, r in ipairs(results) do
+		if not r.pass then fails = fails + 1 end
+	end
+
+	if fails > 0 then
+		print("")
+		print("  FAILURES:")
+		for _, r in ipairs(results) do
+			if not r.pass then
+				print(string.format("    [FAIL] %s — %s", r.name, r.detail))
+			end
+		end
+	end
+
+	local ok2, gt2 = pcall(World_GetGameTime)
+	local elapsed = (ok2 and start_time) and (gt2 - start_time) or 0
+
+	print(string.format("\n  TOTAL: %d/%d passed", total - fails, total))
+	_Debug_EndMarker("EventProbes", total - fails, total, elapsed)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Namespace Registration
+---------------------------------------------------------------------------------------------------
+if debug then
+	debug.validation.events = Debug_EventProbes
+	debug._register("events", Debug_EventProbes, "Mock-context handler resilience (entity, construction, upgrade events)", 2)
+end

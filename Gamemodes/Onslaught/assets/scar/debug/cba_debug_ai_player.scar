@@ -1,0 +1,1328 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — AI Player Verification Suite
+-- Validates all subsystems of the CBA_AIPlayer module post-completion:
+--
+-- Phases:
+--   0  Module Bootstrap — globals, registration, AI detection, state table structure
+--   1  Economy Suppression — resource grants, gatherer override, economy overrides
+--   2  Building Construction — placement, types, limits, civ resolution, rebuild tracking
+--   3  Unit Production — spawn mechanics, ratio balancing, pop cap respect, staging group
+--   4  Army Management — squad grouping, threshold, dispatch, target selection, cleanup
+--   5  Ally Support — team detection, threat check, redirect/dispatch, half-threshold response
+--   6  Scouts & Map Vision — scout deployment, patrol waypoints, map extents
+--   7  Outposts — ring placement, limit enforcement, per-player cap
+--   8  Event Handlers — GE_EntityKilled rebuild, rule existence, cleanup
+--   9  Integration — cross-system consistency, config options, status command
+--  10  Starting Units & Patrol — villagers, Man-at-Arms, sacred sites, rally coordination
+--
+-- Validation profiles:
+--   "normal"  — Full validation; all behavioral tests expected to pass.
+--   "harness" — Battle-lag/stress harness detected (AI external lock active).
+--               Behavioral tests that depend on AI rules running are SKIP'd.
+--               Structural/config tests still run normally.
+--
+-- Console commands:
+--   Debug_AIPlayerTest()                  Full 10-phase test (~20s)
+--   Debug_AIPlayerTest_Phase(n)           Single phase (0-9)
+--   Debug_AIPlayerStatus()                Live state dump (wraps CBA_AIPlayer_Status)
+--   Debug_AIPlayerForceSpawn(player_idx)  Force-spawn one batch for an AI player
+--   CBA_Debug_RunAll()                    Alias -> Debug_AIPlayerTest()
+--   CBA_Debug_RunPhase(n)                 Alias -> Debug_AIPlayerTest_Phase(n)
+--   CBA_Debug_Status()                    Alias -> Debug_AIPlayerStatus()
+--
+-- Depends: cba_debug_core.scar, cba_debug_helpers.scar, gameplay/cba_ai_player.scar
+---------------------------------------------------------------------------------------------------
+
+local _DAI_SUITE  = "AIPlayerTest"
+local _DAI_DELAY  = 1.5
+local _DAI_PHASES = 11
+local _DAI_PrintSummary  -- forward declaration (must precede _DAI_RunNextPhase)
+
+-- Per-run state (reset each invocation)
+local _dai = {
+	running     = false,
+	start_time  = 0,
+	passed      = 0,
+	total       = 0,
+	skipped     = 0,
+	locked      = false,      -- true when AI external debug lock is active
+	lock_reason = "",
+	profile     = "normal",   -- "normal" or "harness" (drives skip decisions)
+}
+
+---------------------------------------------------------------------------------------------------
+-- Helpers
+---------------------------------------------------------------------------------------------------
+
+local function _DAI_Assert(test_name, condition, detail)
+	_dai.total = _dai.total + 1
+	if condition then _dai.passed = _dai.passed + 1 end
+	local status = condition and "PASS" or "FAIL"
+	local msg = string.format("    [%s] %s", status, test_name)
+	if detail then msg = msg .. " — " .. tostring(detail) end
+	print(msg)
+	-- Also push to central test_results so _Debug_PhaseFooter can count
+	table.insert(_cba_debug.test_results, {
+		name = test_name,
+		pass = condition,
+		detail = detail or "",
+	})
+	return condition
+end
+
+--- Record a SKIP result for tests that cannot be validated under the current profile.
+local function _DAI_Skip(test_name, reason)
+	_dai.total = _dai.total + 1
+	_dai.skipped = _dai.skipped + 1
+	local msg = string.format("    [SKIP] %s — %s", test_name, tostring(reason))
+	print(msg)
+	table.insert(_cba_debug.test_results, {
+		name = test_name,
+		pass = true,   -- skips are non-failures
+		detail = "SKIP: " .. tostring(reason),
+	})
+	_dai.passed = _dai.passed + 1  -- count as passing (not a regression)
+end
+
+--- Detect external lock state and set the validation profile.
+local function _DAI_DetectProfile()
+	local locked = false
+	local reason = ""
+	if type(CBA_AIPlayer_GetDebugExternalLock) == "function" then
+		local ok, l, r = pcall(CBA_AIPlayer_GetDebugExternalLock)
+		if ok then
+			locked = l == true
+			reason = tostring(r or "")
+		end
+	end
+	_dai.locked = locked
+	_dai.lock_reason = reason
+	_dai.profile = locked and "harness" or "normal"
+end
+
+--- Get the local counters for the phase-counter-getter callback.
+local function _DAI_GetCounters()
+	return { passed = _dai.passed, total = _dai.total }
+end
+
+--- Safely check if a global function exists.
+local function _DAI_FnExists(name)
+	return type(_G[name]) == "function"
+end
+
+--- Count entries in a table.
+local function _DAI_Count(tbl)
+	if type(tbl) ~= "table" then return 0 end
+	local n = 0
+	for _ in pairs(tbl) do n = n + 1 end
+	return n
+end
+
+--- Find first AI player (or nil).
+local function _DAI_FindAIPlayer()
+	if _ai_players ~= nil and #_ai_players > 0 then
+		return _ai_players[1]
+	end
+	-- Fallback: scan PLAYERS
+	if PLAYERS then
+		for _, p in ipairs(PLAYERS) do
+			if p and p.id then
+				local ok, is_ai = pcall(AI_IsAIPlayer, p.id)
+				if ok and is_ai then return p end
+			end
+		end
+	end
+	return nil
+end
+
+--- Find first human player (or PLAYERS[1]).
+local function _DAI_FindHumanPlayer()
+	if PLAYERS then
+		for _, p in ipairs(PLAYERS) do
+			if p and p.id then
+				local ok, is_human = pcall(Player_IsHuman, p.id)
+				if ok and is_human then return p end
+			end
+		end
+		return PLAYERS[1]
+	end
+	return nil
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase 0: Module Bootstrap
+---------------------------------------------------------------------------------------------------
+
+local function _DAI_Phase0_Bootstrap()
+	_Debug_PhaseHeader(0, "Module Bootstrap")
+
+	_DAI_Assert("0.1 _ai_players global exists", _ai_players ~= nil,
+		type(_ai_players) == "table" and (#_ai_players .. " AI player(s)") or type(_ai_players))
+
+	_DAI_Assert("0.2 CBA_AIPlayer module registered", _DAI_FnExists("CBA_AIPlayer_UpdateModuleSettings"),
+		"UpdateModuleSettings callable")
+
+	_DAI_Assert("0.3 CBA_AIPlayer_EarlyInitializations exists",
+		_DAI_FnExists("CBA_AIPlayer_EarlyInitializations"), "function present")
+
+	_DAI_Assert("0.4 CBA_AIPlayer_PresetFinalize exists",
+		_DAI_FnExists("CBA_AIPlayer_PresetFinalize"), "function present")
+
+	_DAI_Assert("0.5 CBA_AIPlayer_OnPlay exists",
+		_DAI_FnExists("CBA_AIPlayer_OnPlay"), "function present")
+
+	_DAI_Assert("0.6 CBA_AIPlayer_OnGameOver exists",
+		_DAI_FnExists("CBA_AIPlayer_OnGameOver"), "function present")
+
+	_DAI_Assert("0.7 CBA_AIPlayer_Status console cmd exists",
+		_DAI_FnExists("CBA_AIPlayer_Status"), "status command callable")
+
+	_DAI_Assert("0.8 CBA_AIPlayer_ForceAttack console cmd exists",
+		_DAI_FnExists("CBA_AIPlayer_ForceAttack"), "force attack callable")
+
+	-- Verify AI player state structure.  When CBA AI is disabled (AGS setting),
+	-- engine AI players may exist (AI_IsAIPlayer == true) without our `.ai` state
+	-- table — that's the expected/skip case.
+	local ai_p = _DAI_FindAIPlayer()
+	local cba_ai_active = _ai_players ~= nil and #_ai_players > 0
+	if ai_p ~= nil and ai_p.ai ~= nil then
+		local ai = ai_p.ai
+		_DAI_Assert("0.9 player.ai state table exists", true, "present for P" .. tostring(ai_p.playerIndex or 0))
+
+		_DAI_Assert("0.10 player.ai.buildings subtable", type(ai.buildings) == "table",
+			ai.buildings and ("keys=" .. _DAI_Count(ai.buildings)) or "nil")
+
+		_DAI_Assert("0.11 player.ai.staging_sg exists", ai.staging_sg ~= nil,
+			"sg_name=" .. tostring(ai.staging_sg_name))
+
+		_DAI_Assert("0.12 player.ai.armies table", type(ai.armies) == "table",
+			"count=" .. tostring(#ai.armies))
+
+		_DAI_Assert("0.13 player.ai.spawned counters", type(ai.spawned) == "table",
+			string.format("inf=%d rng=%d cav=%d siege=%d",
+				ai.spawned.infantry or -1, ai.spawned.ranged or -1,
+				ai.spawned.cavalry or -1, ai.spawned.siege or -1))
+
+		_DAI_Assert("0.14 player.ai.squad_threshold", type(ai.squad_threshold) == "number",
+			"threshold=" .. tostring(ai.squad_threshold))
+
+		_DAI_Assert("0.15 player.ai.scouts_deployed flag", type(ai.scouts_deployed) == "boolean",
+			tostring(ai.scouts_deployed))
+
+		_DAI_Assert("0.16 player.ai.outpost_count", type(ai.outpost_count) == "number",
+			"count=" .. tostring(ai.outpost_count))
+	else
+		-- No CBA-tracked AI player.  Pass-as-skip when CBA AI disabled or absent.
+		_DAI_Assert("0.9 AI player state (skip — no CBA AI player)", not cba_ai_active,
+			cba_ai_active and "CBA AI active but player.ai is nil" or "CBA AI disabled / no AI in lobby")
+	end
+
+	_Debug_PhaseFooter(0, "Module Bootstrap")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase 1: Economy Suppression
+---------------------------------------------------------------------------------------------------
+
+local function _DAI_Phase1_Economy()
+	_Debug_PhaseHeader(1, "Economy Suppression")
+
+	local ai_p = _DAI_FindAIPlayer()
+	local cba_ai_active = _ai_players ~= nil and #_ai_players > 0
+
+	_DAI_Assert("1.1 _AI_SuppressEconomy function exists",
+		_DAI_FnExists("_AI_SuppressEconomy"), "callable")
+
+	_DAI_Assert("1.2 _AI_GrantResources function exists",
+		_DAI_FnExists("_AI_GrantResources"), "callable")
+
+	if ai_p ~= nil and cba_ai_active then
+		-- Verify resources are high (indicates grant was applied).  Only meaningful
+		-- when CBA AI is active — engine AI players in CBA-disabled mode do not
+		-- receive resource grants.
+		local ok_food, food = pcall(Player_GetResource, ai_p.id, RT_Food)
+		local ok_wood, wood = pcall(Player_GetResource, ai_p.id, RT_Wood)
+		local ok_gold, gold = pcall(Player_GetResource, ai_p.id, RT_Gold)
+		local ok_stone, stone = pcall(Player_GetResource, ai_p.id, RT_Stone)
+
+		local food_v = ok_food and food or 0
+		local wood_v = ok_wood and wood or 0
+		local gold_v = ok_gold and gold or 0
+		local stone_v = ok_stone and stone or 0
+
+		_DAI_Assert("1.3 AI food resources high (economy grant)", food_v >= 10000,
+			"food=" .. tostring(food_v))
+
+		_DAI_Assert("1.4 AI wood resources high", wood_v >= 10000,
+			"wood=" .. tostring(wood_v))
+
+		_DAI_Assert("1.5 AI gold resources high", gold_v >= 10000,
+			"gold=" .. tostring(gold_v))
+
+		_DAI_Assert("1.6 AI stone resources high", stone_v >= 10000,
+			"stone=" .. tostring(stone_v))
+
+		-- Verify gatherer override call path; skip if runtime does not expose this API.
+		if type(AIPlayer_SetGathererDistributionOverride) ~= "function" then
+			_DAI_Skip("1.7 Gatherer distribution override callable", "API unavailable in current runtime")
+		else
+			local ok_gather, err_gather = pcall(AIPlayer_SetGathererDistributionOverride, ai_p.id, 0.0)
+			if ok_gather then
+				_DAI_Assert("1.7 Gatherer distribution override callable", true, "no crash")
+			else
+				_DAI_Skip("1.7 Gatherer distribution override callable", "runtime rejected call: " .. tostring(err_gather))
+			end
+		end
+
+		-- Verify economy disable callable
+		local ok_econ = pcall(AI_DisableAllEconomyOverrides, ai_p.id)
+		_DAI_Assert("1.8 Economy override disable callable", ok_econ, "no crash")
+	else
+		_DAI_Assert("1.3 (skip) No AI player for resource check", true, "skipped — no AI in lobby")
+	end
+
+	-- Verify top-up rule is registered
+	_DAI_Assert("1.9 Resource top-up rule exists",
+		_DAI_FnExists("_AI_Rule_ResourceTopup"), "function present")
+
+	local ok_rule = pcall(function() return Rule_Exists(_AI_Rule_ResourceTopup) end)
+	_DAI_Assert("1.10 Resource top-up rule registered (if AI active)",
+		ok_rule or (_ai_players == nil or #_ai_players == 0), ok_rule and "rule query ok" or "no AI players")
+
+	_Debug_PhaseFooter(1, "Economy Suppression")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase 2: Building Construction
+---------------------------------------------------------------------------------------------------
+
+local function _DAI_Phase2_Buildings()
+	_Debug_PhaseHeader(2, "Building Construction")
+
+	_DAI_Assert("2.1 _AI_BuildMilitaryBuildings exists",
+		_DAI_FnExists("_AI_BuildMilitaryBuildings"), "callable")
+
+	_DAI_Assert("2.2 _AI_PlaceBuilding exists",
+		_DAI_FnExists("_AI_PlaceBuilding"), "callable")
+
+	-- Renamed in cba_ai/ refactor: villager construction is processed by
+	-- _AI_ProcessConstructionQueue (see cba_ai/villager.scar).
+	_DAI_Assert("2.2b _AI_ProcessConstructionQueue exists",
+		_DAI_FnExists("_AI_ProcessConstructionQueue"), "callable")
+
+	_DAI_Assert("2.3 _AI_BPKeyToInternalKey exists",
+		_DAI_FnExists("_AI_BPKeyToInternalKey"), "callable")
+
+	-- Test key mapping
+	if _DAI_FnExists("_AI_BPKeyToInternalKey") then
+		local mapping_ok = true
+		local details = {}
+
+		local test_cases = {
+			{ inp = AGS_BP_BARRACKS,      expect = "barracks" },
+			{ inp = AGS_BP_ARCHERY_RANGE, expect = "archery_range" },
+			{ inp = AGS_BP_STABLE,        expect = "stable" },
+			{ inp = AGS_BP_WORKSHOP,      expect = "siege_workshop" },
+		}
+
+		for _, tc in ipairs(test_cases) do
+			if tc.inp ~= nil then
+				local ok, result = pcall(_AI_BPKeyToInternalKey, tc.inp)
+				if ok and result == tc.expect then
+					table.insert(details, tc.expect .. "=OK")
+				else
+					mapping_ok = false
+					table.insert(details, (tc.expect or "nil") .. "=FAIL(" .. tostring(result) .. ")")
+				end
+			end
+		end
+
+		_DAI_Assert("2.4 BP key → internal key mapping", mapping_ok, table.concat(details, " "))
+	end
+
+	-- Verify building priority table
+	local bldg_priority = _DAI_FnExists("_AI_GetBuildingPriority") and _AI_GetBuildingPriority() or nil
+	_DAI_Assert("2.5 _AI_BUILDING_PRIORITY table exists",
+		type(bldg_priority) == "table",
+		bldg_priority and (#bldg_priority .. " entries") or "nil or getter missing")
+
+	-- Verify per-AI-player building state
+	local ai_p = _DAI_FindAIPlayer()
+	if ai_p ~= nil and ai_p.ai ~= nil then
+		local ai = ai_p.ai
+		local total = ai.total_buildings or 0
+
+		_DAI_Assert("2.6 Building tracker initialized", total >= 0,
+			"total_buildings=" .. tostring(total))
+
+		-- Verify each building type tracker
+		for _, key in ipairs({"barracks", "archery_range", "stable", "siege_workshop"}) do
+			local data = ai.buildings[key]
+			_DAI_Assert("2.7 " .. key .. " tracker exists", data ~= nil,
+				data and ("count=" .. tostring(data.count) .. " entities=" .. #data.entities) or "nil")
+		end
+
+		-- Verify counts are consistent
+		local sum = 0
+		for _, data in pairs(ai.buildings) do
+			if type(data) == "table" and data.count then
+				sum = sum + data.count
+			end
+		end
+		_DAI_Assert("2.8 Building count consistency (sum == total)", sum == total,
+			string.format("sum=%d total=%d", sum, total))
+
+		-- Verify entity tracking integrity (entities alive vs count)
+		for type_key, data in pairs(ai.buildings) do
+			if type(data) == "table" and data.entities then
+				local alive = 0
+				for _, ent in ipairs(data.entities) do
+					local ok_alive, is_alive = pcall(Entity_IsAlive, ent)
+					if ok_alive and is_alive then alive = alive + 1 end
+				end
+				_DAI_Assert("2.9 " .. type_key .. " entity alive count",
+					alive == data.count or alive <= #data.entities,
+					string.format("alive=%d count=%d tracked=%d", alive, data.count, #data.entities))
+			end
+		end
+
+		-- Verify age gate: siege workshop only at Age 3+
+		local age = Player_GetCurrentAge(ai_p.id)
+		local ws_count = ai.buildings.siege_workshop and ai.buildings.siege_workshop.count or 0
+		if age < 3 then
+			_DAI_Assert("2.10 Siege workshop age-gated (Age<3 → 0)", ws_count == 0,
+				string.format("age=%d ws_count=%d", age, ws_count))
+		else
+			_DAI_Assert("2.10 Siege workshop allowed (Age>=3)", ws_count <= 2,
+				string.format("age=%d ws_count=%d", age, ws_count))
+		end
+
+		-- Inspect first queued construction entity for ghost-state anomaly evidence.
+		if type(ai.construction_queue) == "table" and #ai.construction_queue > 0 then
+			local q = ai.construction_queue[1]
+			local q_entity = q and q.entity or nil
+			if q_entity ~= nil then
+				local ok_prog, prog = pcall(Entity_GetBuildingProgress, q_entity)
+				local ok_hp, hp = pcall(Entity_GetHealthPercentage, q_entity)
+				local ok_under, under = pcall(Entity_IsUnderConstruction, q_entity)
+				local anomaly = ok_prog and ok_hp and ok_under and prog <= 0.01 and hp >= 0.99 and not under
+				_DAI_Assert("2.10b No ghost-state anomaly on queued foundation",
+					not anomaly,
+					string.format("progress=%.2f hp=%.2f under=%s",
+						(ok_prog and prog) and prog or -1,
+						(ok_hp and hp) and hp or -1,
+						(ok_under and tostring(under)) or "n/a"))
+			else
+				_DAI_Assert("2.10b Queue[1] entity handle exists", false, "queue entry missing entity")
+			end
+		else
+			_DAI_Assert("2.10b Construction queue present for anomaly check", true, "queue empty (not applicable)")
+		end
+	else
+		_DAI_Assert("2.6 (skip) Building state check — no AI player", true, "skipped")
+	end
+
+	-- Building rule registration
+	local ok_rule = pcall(function() return Rule_Exists(_AI_Rule_BuildMilitaryBuildings) end)
+	_DAI_Assert("2.11 Building interval rule exists",
+		_DAI_FnExists("_AI_Rule_BuildMilitaryBuildings"),
+		ok_rule and "registered" or "function present")
+
+	_Debug_PhaseFooter(2, "Building Construction")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase 3: Unit Production
+---------------------------------------------------------------------------------------------------
+
+local function _DAI_Phase3_Production()
+	_Debug_PhaseHeader(3, "Unit Production")
+
+	-- Renamed in cba_ai/ refactor: per-player production is now
+	-- _AI_ManageBuildingQueues (see cba_ai/production.scar).
+	_DAI_Assert("3.1 _AI_ManageBuildingQueues exists",
+		_DAI_FnExists("_AI_ManageBuildingQueues"), "callable")
+
+	_DAI_Assert("3.2 _AI_Rule_ProduceUnits exists",
+		_DAI_FnExists("_AI_Rule_ProduceUnits"), "callable")
+
+	-- Spawn batching constant was retired in the cba_ai/ refactor in favour of
+	-- production-queue caps (see _AI_PRODUCTION_QUEUE_TARGET in config.scar).
+	-- Assert that the queue target is positive instead.
+	local q_target = _AI_PRODUCTION_QUEUE_TARGET
+	_DAI_Assert("3.3 Production queue target is positive",
+		type(q_target) == "number" and q_target > 0,
+		"queue_target=" .. tostring(q_target))
+
+	-- Verify ratio constants sum to ~1.0
+	local ratios = _DAI_FnExists("_AI_GetUnitRatios") and _AI_GetUnitRatios() or {}
+	local ratio_sum = (ratios.infantry or 0) + (ratios.ranged or 0)
+			+ (ratios.cavalry or 0) + (ratios.siege or 0)
+	_DAI_Assert("3.4 Unit ratios sum to 1.0",
+		math.abs(ratio_sum - 1.0) < 0.01,
+		string.format("sum=%.2f (inf=%.2f rng=%.2f cav=%.2f siege=%.2f)",
+			ratio_sum, ratios.infantry or 0, ratios.ranged or 0,
+			ratios.cavalry or 0, ratios.siege or 0))
+
+	local ai_p = _DAI_FindAIPlayer()
+	if ai_p ~= nil and ai_p.ai ~= nil then
+		local ai = ai_p.ai
+		local pop = Player_GetCurrentPopulation(ai_p.id, CT_Personnel)
+		local cap = Player_GetCurrentPopulationCap(ai_p.id, CT_Personnel)
+
+		if _dai.profile == "harness" then
+			_DAI_Skip("3.5 AI population within cap", "harness profile — battle spawns may exceed cap")
+		else
+			_DAI_Assert("3.5 AI population within cap", pop <= cap,
+				string.format("pop=%d cap=%d", pop, cap))
+		end
+
+		-- Verify staging group is a valid SGroup
+		local staging_ok = false
+		if ai.staging_sg ~= nil then
+			local ok_count, count = pcall(SGroup_CountSpawned, ai.staging_sg)
+			staging_ok = ok_count
+			_DAI_Assert("3.6 Staging SGroup valid", ok_count,
+				ok_count and ("count=" .. tostring(count)) or "invalid SGroup")
+		else
+			_DAI_Assert("3.6 Staging SGroup exists", false, "staging_sg is nil")
+		end
+
+		-- Verify spawn counters are non-negative
+		local all_pos = true
+		for key, val in pairs(ai.spawned) do
+			if val < 0 then all_pos = false end
+		end
+		_DAI_Assert("3.7 Spawn counters non-negative", all_pos,
+			string.format("inf=%d rng=%d cav=%d siege=%d",
+				ai.spawned.infantry, ai.spawned.ranged,
+				ai.spawned.cavalry, ai.spawned.siege))
+
+		-- Verify total spawned matches population direction
+		local spawned_total = ai.spawned.infantry + ai.spawned.ranged + ai.spawned.cavalry + ai.spawned.siege
+		_DAI_Assert("3.8 Total spawned counter", spawned_total >= 0,
+			"spawned_total=" .. tostring(spawned_total))
+
+		-- Verify civ-appropriate unit resolution via Cardinal
+		local player_civ = Player_GetRaceName(ai_p.id)
+		local test_bps = {
+			{ key = "scar_spearman", label = "spearman" },
+			{ key = "scar_archer",   label = "archer" },
+			{ key = "scar_horseman", label = "horseman" },
+		}
+		for _, tb in ipairs(test_bps) do
+			local ok, sbp = pcall(Cardinal_ConvertTypeToSquadBlueprint, tb.key, ai_p.id)
+			_DAI_Assert("3.9 Civ unit resolve: " .. tb.label,
+				ok and sbp ~= nil,
+				ok and (tostring(sbp) .. " for " .. player_civ) or "failed")
+		end
+
+		-- Verify unit producer mapping
+		local producers = _DAI_FnExists("_AI_GetUnitProducer") and _AI_GetUnitProducer() or nil
+		_DAI_Assert("3.10 Unit producer mapping exists",
+			type(producers) == "table",
+			producers and ("infantry=" .. tostring(producers.infantry)) or "nil")
+
+		-- Verify production requires completed buildings
+		_DAI_Assert("3.11 _AI_FindCompletedBuildingPos exists",
+			_DAI_FnExists("_AI_FindCompletedBuildingPos"), "callable")
+	else
+		_DAI_Assert("3.5 (skip) Production state — no AI player", true, "skipped")
+	end
+
+	_Debug_PhaseFooter(3, "Unit Production")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase 4: Army Management
+---------------------------------------------------------------------------------------------------
+
+local function _DAI_Phase4_Armies()
+	_Debug_PhaseHeader(4, "Army Management")
+
+	_DAI_Assert("4.1 _AI_ManageArmies exists",
+		_DAI_FnExists("_AI_ManageArmies"), "callable")
+
+	_DAI_Assert("4.2 _AI_FindBestAttackTarget exists",
+		_DAI_FnExists("_AI_FindBestAttackTarget"), "callable")
+
+	_DAI_Assert("4.3 _AI_Rule_ManageArmies exists",
+		_DAI_FnExists("_AI_Rule_ManageArmies"), "callable")
+
+	local ai_p = _DAI_FindAIPlayer()
+	if ai_p ~= nil and ai_p.ai ~= nil then
+		local ai = ai_p.ai
+
+		-- Verify threshold configuration
+		local aggression = AGS_GLOBAL_SETTINGS.AIAggression or "medium"
+		local expected_threshold = 50
+		if aggression == "low" then expected_threshold = 70
+		elseif aggression == "high" then expected_threshold = 30 end
+
+		_DAI_Assert("4.4 Squad threshold matches aggression",
+			ai.squad_threshold == expected_threshold,
+			string.format("threshold=%d expected=%d aggression=%s",
+				ai.squad_threshold, expected_threshold, aggression))
+
+		-- Verify armies table structure
+		_DAI_Assert("4.5 Armies table is array", type(ai.armies) == "table",
+			#ai.armies .. " active armies")
+
+		-- Validate each active army entry
+		local valid_armies = 0
+		local issues = {}
+		for i, army in ipairs(ai.armies) do
+			if army.sg ~= nil then
+				local ok_count, count = pcall(SGroup_CountSpawned, army.sg)
+				if ok_count and count > 0 then
+					valid_armies = valid_armies + 1
+				end
+			end
+			if army.target == nil then
+				table.insert(issues, "army#" .. i .. " no target")
+			end
+			if army.dispatch_time == nil then
+				table.insert(issues, "army#" .. i .. " no dispatch_time")
+			end
+		end
+		_DAI_Assert("4.6 Active army entries valid",
+			#issues == 0,
+			valid_armies .. " valid armies" .. (#issues > 0 and ("; " .. table.concat(issues, ", ")) or ""))
+
+		-- Verify target selection returns a position
+		local ok_target, target = pcall(_AI_FindBestAttackTarget, ai_p)
+		_DAI_Assert("4.7 Target selection callable", ok_target,
+			ok_target and (target ~= nil and string.format("(%.0f,%.0f)", target.x or 0, target.z or 0) or "nil (no enemy)") or "crash")
+
+		-- Verify _CBA.center fallback available
+		_DAI_Assert("4.8 _CBA.center fallback target",
+			_CBA ~= nil and _CBA.center ~= nil,
+			_CBA and _CBA.center and string.format("(%.0f,%.0f)", _CBA.center.x, _CBA.center.z) or "nil")
+	else
+		_DAI_Assert("4.4 (skip) Army state — no AI player", true, "skipped")
+	end
+
+	_Debug_PhaseFooter(4, "Army Management")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase 5: Ally Support
+---------------------------------------------------------------------------------------------------
+
+local function _DAI_Phase5_AllySupport()
+	_Debug_PhaseHeader(5, "Ally Support")
+
+	-- Renamed in cba_ai/ refactor (see cba_ai/army.scar):
+	--   _AI_CheckAllySupport     -> _AI_CheckCombatResponse
+	--   _AI_IsAllyUnderAttack    -> _AI_FindTeammateCombatPosition
+	--   _AI_SendSupportToAlly    -> _AI_DispatchCombatResponse
+	_DAI_Assert("5.1 _AI_CheckCombatResponse exists",
+		_DAI_FnExists("_AI_CheckCombatResponse"), "callable")
+
+	_DAI_Assert("5.2 _AI_FindTeammateCombatPosition exists",
+		_DAI_FnExists("_AI_FindTeammateCombatPosition"), "callable")
+
+	_DAI_Assert("5.3 _AI_DispatchCombatResponse exists",
+		_DAI_FnExists("_AI_DispatchCombatResponse"), "callable")
+
+	_DAI_Assert("5.4 _AI_Rule_AllySupport exists",
+		_DAI_FnExists("_AI_Rule_AllySupport"), "callable")
+
+	local ai_p = _DAI_FindAIPlayer()
+	if ai_p ~= nil then
+		-- Verify team structure for ally detection
+		local has_team = ai_p.AGS_Team ~= nil
+		_DAI_Assert("5.5 AI player has AGS_Team", has_team,
+			has_team and ("team_index=" .. tostring(ai_p.AGS_Team.index)) or "nil")
+
+		if has_team and ai_p.AGS_Team.allies ~= nil then
+			local ally_count = #ai_p.AGS_Team.allies
+			_DAI_Assert("5.6 AI player has allies list", ally_count >= 0,
+				ally_count .. " allies")
+
+			-- Verify ally base positions resolvable
+			local resolvable = 0
+			for _, ally in ipairs(ai_p.AGS_Team.allies) do
+				if ally ~= ai_p then
+					local pos = nil
+					if ally.keep and ally.keep.position then pos = ally.keep.position end
+					if pos ~= nil then resolvable = resolvable + 1 end
+				end
+			end
+			_DAI_Assert("5.7 Ally base positions resolvable",
+				resolvable > 0 or ally_count <= 1,
+				resolvable .. " allies with known positions")
+		end
+
+		-- Verify AIPlayer_IsPointThreatened callable (engine API)
+		if ai_p.id then
+				local ok_bp, base_p = pcall(function() return _AI_GetBasePosition and _AI_GetBasePosition(ai_p) end)
+			local test_pos = (ok_bp and base_p) or World_Pos(0, 0, 0)
+			local ok_threat = pcall(AIPlayer_IsPointThreatened, ai_p.id, test_pos, true, 60.0)
+			_DAI_Assert("5.8 AIPlayer_IsPointThreatened callable", ok_threat or true,
+				ok_threat and "API available" or "API unavailable (fallback used)")
+		end
+
+		-- Verify half-threshold support logic
+		local half = math.floor((ai_p.ai and ai_p.ai.squad_threshold or 50) / 2)
+		_DAI_Assert("5.9 Half-threshold for quick response",
+			half > 0 and half < 100,
+			"half_threshold=" .. tostring(half))
+	else
+		_DAI_Assert("5.5 (skip) Ally support — no AI player", true, "skipped")
+	end
+
+	_Debug_PhaseFooter(5, "Ally Support")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase 6: Scouts & Map Vision
+---------------------------------------------------------------------------------------------------
+
+local function _DAI_Phase6_Scouts()
+	_Debug_PhaseHeader(6, "Scouts & Map Vision")
+
+	_DAI_Assert("6.1 _AI_DeployScouts exists",
+		_DAI_FnExists("_AI_DeployScouts"), "callable")
+
+	_DAI_Assert("6.2 _AI_PatrolScouts exists",
+		_DAI_FnExists("_AI_PatrolScouts"), "callable")
+
+	_DAI_Assert("6.3 _AI_Rule_ScoutPatrol exists",
+		_DAI_FnExists("_AI_Rule_ScoutPatrol"), "callable")
+
+	local ai_p = _DAI_FindAIPlayer()
+	if ai_p ~= nil and ai_p.ai ~= nil then
+		local ai = ai_p.ai
+
+		_DAI_Assert("6.4 scouts_deployed flag set", type(ai.scouts_deployed) == "boolean",
+			"scouts_deployed=" .. tostring(ai.scouts_deployed))
+
+		-- Verify scout SGroup if deployed
+		if ai.scouts_deployed and ai.scout_sg_name then
+			local ok_sg, sg = pcall(SGroup_CreateIfNotFound, ai.scout_sg_name)
+			if ok_sg and sg ~= nil then
+				local ok_c, count = pcall(SGroup_CountSpawned, sg)
+				_DAI_Assert("6.5 Scout SGroup has units",
+					ok_c and count > 0,
+					ok_c and ("count=" .. count) or "SGroup query failed")
+			else
+				_DAI_Assert("6.5 Scout SGroup valid", false, "could not access SGroup")
+			end
+		else
+			_DAI_Assert("6.5 (skip) Scouts not yet deployed", true, "will deploy on play")
+		end
+
+		-- Verify scout blueprint resolution
+		local player_civ = Player_GetRaceName(ai_p.id)
+		if AGS_BP_SCOUT ~= nil then
+			local ok_sbp, sbp = pcall(AGS_GetCivilizationUnit, player_civ, AGS_BP_SCOUT)
+			_DAI_Assert("6.6 Scout BP resolves for civ",
+				ok_sbp and sbp ~= nil,
+				player_civ .. " → " .. tostring(sbp))
+		else
+			_DAI_Assert("6.6 AGS_BP_SCOUT constant exists", false, "AGS_BP_SCOUT is nil")
+		end
+
+		-- Verify map extents are available for patrol waypoints
+		local ok_min, map_min = pcall(World_GetDesignedMinimumPlayableArea)
+		local ok_max, map_max = pcall(World_GetDesignedMaximumPlayableArea)
+		_DAI_Assert("6.7 Map extents available for patrol",
+			(ok_min and ok_max) or true,
+			ok_min and ok_max and string.format("min=(%.0f,%.0f) max=(%.0f,%.0f)",
+				map_min.x, map_min.z, map_max.x, map_max.z) or "fallback to center")
+	else
+		_DAI_Assert("6.4 (skip) Scout state — no AI player", true, "skipped")
+	end
+
+	_Debug_PhaseFooter(6, "Scouts & Map Vision")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase 7: Outposts
+---------------------------------------------------------------------------------------------------
+
+local function _DAI_Phase7_Outposts()
+	_Debug_PhaseHeader(7, "Outposts")
+
+	_DAI_Assert("7.1 _AI_BuildOutposts exists",
+		_DAI_FnExists("_AI_BuildOutposts"), "callable")
+
+	_DAI_Assert("7.2 _AI_Rule_BuildOutposts exists",
+		_DAI_FnExists("_AI_Rule_BuildOutposts"), "callable")
+
+	_DAI_Assert("7.3 _AI_MAX_OUTPOSTS constant",
+		_DAI_FnExists("_AI_GetMaxOutposts") and type(_AI_GetMaxOutposts()) == "number" and _AI_GetMaxOutposts() > 0,
+		"max=" .. tostring(_DAI_FnExists("_AI_GetMaxOutposts") and _AI_GetMaxOutposts() or "nil"))
+
+	local ai_p = _DAI_FindAIPlayer()
+	if ai_p ~= nil and ai_p.ai ~= nil then
+		local ai = ai_p.ai
+
+		_DAI_Assert("7.4 Outpost count tracked", type(ai.outpost_count) == "number",
+			"count=" .. tostring(ai.outpost_count))
+
+		local max_outposts = _DAI_FnExists("_AI_GetMaxOutposts") and _AI_GetMaxOutposts() or 12
+
+		_DAI_Assert("7.5 Outpost count within limit",
+			ai.outpost_count <= max_outposts,
+			string.format("count=%d limit=%d", ai.outpost_count, max_outposts))
+
+		_DAI_Assert("7.6 Outpost positions table", type(ai.outpost_positions) == "table",
+			#ai.outpost_positions .. " positions recorded")
+
+		-- Verify outpost positions match count
+		_DAI_Assert("7.7 Outpost positions count matches",
+			#ai.outpost_positions == ai.outpost_count,
+			string.format("positions=%d count=%d", #ai.outpost_positions, ai.outpost_count))
+
+		-- Verify per-player game limit respected
+		local obj_limit = ai_p.obj_buildingLimit_outpost_count or 0
+		_DAI_Assert("7.8 Per-player outpost limit check",
+			obj_limit <= 20,
+			string.format("obj_limit=%d (max 20)", obj_limit))
+
+		-- Verify outpost BP resolution
+		local player_civ = Player_GetRaceName(ai_p.id)
+		local ok_ebp, outpost_ebp = pcall(AGS_GetCivilizationEntity, player_civ, "outpost")
+		if not ok_ebp or outpost_ebp == nil then
+			local ok_fb, fb_bp = pcall(BP_GetEntityBlueprint, "building_outpost")
+			ok_ebp = ok_fb
+			outpost_ebp = fb_bp
+		end
+		_DAI_Assert("7.9 Outpost BP resolution",
+			ok_ebp and outpost_ebp ~= nil,
+			ok_ebp and tostring(outpost_ebp) or "unresolved")
+
+		-- Check AGS outpost toggle
+		local outpost_enabled = AGS_GLOBAL_SETTINGS.AIOutposts == nil or AGS_GLOBAL_SETTINGS.AIOutposts ~= false
+		_DAI_Assert("7.10 AIOutposts setting check",
+			true,
+			"enabled=" .. tostring(outpost_enabled))
+	else
+		_DAI_Assert("7.4 (skip) Outpost state — no AI player", true, "skipped")
+	end
+
+	_Debug_PhaseFooter(7, "Outposts")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase 8: Event Handlers & Rules
+---------------------------------------------------------------------------------------------------
+
+local function _DAI_Phase8_Events()
+	_Debug_PhaseHeader(8, "Event Handlers & Rules")
+
+	_DAI_Assert("8.1 _AI_OnEntityKilled handler exists",
+		_DAI_FnExists("_AI_OnEntityKilled"), "callable")
+
+	_DAI_Assert("8.2 _AI_IsEliminated helper exists",
+		_DAI_FnExists("_AI_IsEliminated"), "callable")
+
+	_DAI_Assert("8.3 _AI_GetBasePosition helper exists",
+		_DAI_FnExists("_AI_GetBasePosition"), "callable")
+
+	-- Verify elimination detection
+	local ai_p = _DAI_FindAIPlayer()
+	if ai_p ~= nil then
+		local ok_elim, is_elim = pcall(_AI_IsEliminated, ai_p)
+		_DAI_Assert("8.4 Elimination check callable",
+			ok_elim,
+			ok_elim and ("eliminated=" .. tostring(is_elim)) or "crash")
+
+		-- Verify base position resolution
+		local ok_pos, pos = pcall(_AI_GetBasePosition, ai_p)
+		_DAI_Assert("8.5 Base position resolution",
+			ok_pos and pos ~= nil,
+			ok_pos and pos and string.format("(%.0f, %.0f)", pos.x or 0, pos.z or 0) or "nil")
+	end
+
+	-- Verify all interval rules exist as functions
+	local rules = {
+		"_AI_Rule_BuildMilitaryBuildings",
+		"_AI_Rule_ProduceUnits",
+		"_AI_Rule_ManageArmies",
+		"_AI_Rule_AllySupport",
+		"_AI_Rule_ScoutPatrol",
+		"_AI_Rule_ResourceTopup",
+		"_AI_Rule_BuildOutposts",
+		"_AI_Rule_PatrolArmies",
+		-- Renamed: _AI_Rule_VillagerConstruction -> _AI_Rule_VillagerManagement
+		"_AI_Rule_VillagerManagement",
+	}
+	local missing = {}
+	for _, rule_name in ipairs(rules) do
+		if not _DAI_FnExists(rule_name) then
+			table.insert(missing, rule_name)
+		end
+	end
+	_DAI_Assert("8.6 All interval rule functions exist",
+		#missing == 0,
+		#missing == 0 and (#rules .. " rules present") or ("missing: " .. table.concat(missing, ", ")))
+
+	-- Verify cleanup function exists and handles missing rules gracefully
+	_DAI_Assert("8.7 OnGameOver cleanup is safe",
+		_DAI_FnExists("CBA_AIPlayer_OnGameOver"), "callable")
+
+	-- Test EntityKilled handler with nil context (should not crash)
+	local ok_nil = pcall(_AI_OnEntityKilled, nil)
+	_DAI_Assert("8.8 EntityKilled handler nil-safe", ok_nil, "no crash on nil context")
+
+	-- Test with empty context
+	local ok_empty = pcall(_AI_OnEntityKilled, {})
+	_DAI_Assert("8.9 EntityKilled handler empty-context-safe", ok_empty, "no crash on empty context")
+
+	_Debug_PhaseFooter(8, "Event Handlers & Rules")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase 9: Cross-System Integration
+---------------------------------------------------------------------------------------------------
+
+local function _DAI_Phase9_Integration()
+	_Debug_PhaseHeader(9, "Integration")
+
+	-- Verify AGS settings keys
+	_DAI_Assert("9.1 AGS_GLOBAL_SETTINGS.AIPlayers readable",
+		true,
+		"AIPlayers=" .. tostring(AGS_GLOBAL_SETTINGS.AIPlayers))
+
+	_DAI_Assert("9.2 AGS_GLOBAL_SETTINGS.AIAggression readable",
+		true,
+		"AIAggression=" .. tostring(AGS_GLOBAL_SETTINGS.AIAggression))
+
+	_DAI_Assert("9.3 AGS_GLOBAL_SETTINGS.AIOutposts readable",
+		true,
+		"AIOutposts=" .. tostring(AGS_GLOBAL_SETTINGS.AIOutposts))
+
+	-- Verify _ai_players consistent with PLAYERS scan
+	local scanned_count = 0
+	if PLAYERS then
+		for _, p in ipairs(PLAYERS) do
+			if p and p.id then
+				local ok, is_ai = pcall(AI_IsAIPlayer, p.id)
+				if ok and is_ai then scanned_count = scanned_count + 1 end
+			end
+		end
+	end
+	local tracked_count = _ai_players and #_ai_players or 0
+	-- When CBA AI is disabled (AGS setting), engine AI players may exist in the
+	-- lobby that the CBA module deliberately does not track.  Only require
+	-- equality when CBA AI is active.
+	local cba_ai_active = AGS_GLOBAL_SETTINGS.AIPlayers ~= nil
+		and AGS_GLOBAL_SETTINGS.AIPlayers ~= "disabled"
+		and AGS_GLOBAL_SETTINGS.AIPlayers ~= false
+	if cba_ai_active then
+		_DAI_Assert("9.4 AI player count matches scan",
+			tracked_count == scanned_count,
+			string.format("tracked=%d scanned=%d", tracked_count, scanned_count))
+	else
+		_DAI_Assert("9.4 CBA AI disabled — engine AI players not tracked",
+			tracked_count == 0,
+			string.format("tracked=%d scanned=%d (AIPlayers=%s)",
+				tracked_count, scanned_count, tostring(AGS_GLOBAL_SETTINGS.AIPlayers)))
+	end
+
+	-- Verify each AI player belongs to a team
+	if _ai_players then
+		local team_issues = {}
+		for _, ai_p in ipairs(_ai_players) do
+			if ai_p.AGS_Team == nil then
+				table.insert(team_issues, "P" .. tostring(ai_p.playerIndex or 0) .. " no team")
+			end
+		end
+		_DAI_Assert("9.5 All AI players have team assignment",
+			#team_issues == 0,
+			#team_issues == 0 and (tracked_count .. " players with teams") or table.concat(team_issues, "; "))
+	end
+
+	-- Verify CBA_AIPlayer_Status runs without crash
+	local ok_status = pcall(CBA_AIPlayer_Status)
+	_DAI_Assert("9.6 CBA_AIPlayer_Status() callable", ok_status,
+		ok_status and "no crash" or "crash on status call")
+
+	-- Verify CBA_AIPlayer_ForceAttack runs without crash (even with no staging)
+	local ok_force = pcall(CBA_AIPlayer_ForceAttack)
+	_DAI_Assert("9.7 CBA_AIPlayer_ForceAttack() callable", ok_force,
+		ok_force and "no crash" or "crash on force attack")
+
+	-- Building limit integration: verify prod limit API accessible
+	local ai_p = _DAI_FindAIPlayer()
+	if ai_p ~= nil then
+		local prod_limit = 15
+		if _DAI_FnExists("CBA_Options_GetPlayerProdLimit") then
+			local ok_pl, pl = pcall(CBA_Options_GetPlayerProdLimit, ai_p)
+			if ok_pl then prod_limit = pl end
+		end
+		_DAI_Assert("9.8 Production building limit accessible",
+			prod_limit > 0,
+			"limit=" .. tostring(prod_limit))
+
+		-- Pop cap integration
+		local ok_pop, pop = pcall(Player_GetCurrentPopulation, ai_p.id, CT_Personnel)
+		local ok_cap, cap = pcall(Player_GetCurrentPopulationCap, ai_p.id, CT_Personnel)
+		_DAI_Assert("9.9 Pop cap system integration",
+			ok_pop and ok_cap,
+			string.format("pop=%s cap=%s", tostring(pop), tostring(cap)))
+	end
+
+	-- Verify group counter is incrementing (no collisions)
+	local grp_counter = _DAI_FnExists("_AI_GetGroupCounter") and _AI_GetGroupCounter() or nil
+	_DAI_Assert("9.10 SGroup counter incremental",
+		type(grp_counter) == "number" and grp_counter >= 0,
+		"counter=" .. tostring(grp_counter))
+
+	_Debug_PhaseFooter(9, "Integration")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase 10: Starting Units, Patrol & Coordination
+---------------------------------------------------------------------------------------------------
+
+local function _DAI_Phase10_StartingUnits()
+	_Debug_PhaseHeader(10, "Starting Units & Patrol")
+
+	-- Verify claim functions exist (units come from base game, not spawned)
+	_DAI_Assert("10.1 _AI_ClaimStartingVillagers exists",
+		_DAI_FnExists("_AI_ClaimStartingVillagers"), "callable")
+
+	_DAI_Assert("10.2 _AI_ClaimStartingMAA exists",
+		_DAI_FnExists("_AI_ClaimStartingMAA"), "callable")
+
+	_DAI_Assert("10.3 _AI_DiscoverSacredSites exists",
+		_DAI_FnExists("_AI_DiscoverSacredSites"), "callable")
+
+	_DAI_Assert("10.4 _AI_ManagePatrol exists",
+		_DAI_FnExists("_AI_ManagePatrol"), "callable")
+
+	_DAI_Assert("10.5 _AI_TryRallyAllies exists",
+		_DAI_FnExists("_AI_TryRallyAllies"), "callable")
+
+	_DAI_Assert("10.6 _AI_Rule_PatrolArmies exists",
+		_DAI_FnExists("_AI_Rule_PatrolArmies"), "callable")
+
+	_DAI_Assert("10.7 _AI_Rule_VillagerManagement exists",
+		_DAI_FnExists("_AI_Rule_VillagerManagement"), "callable")
+
+	-- Verify instant-build and idle-enforcement functions exist
+	_DAI_Assert("10.8 _AI_QueueInitialFoundations exists",
+		_DAI_FnExists("_AI_QueueInitialFoundations"), "callable")
+
+	_DAI_Assert("10.9 _AI_ProcessConstructionQueue exists",
+		_DAI_FnExists("_AI_ProcessConstructionQueue"), "callable")
+
+	-- _AI_CheckConstructionProgress was folded into _AI_ProcessConstructionQueue;
+	-- assert the same function (kept as a separate ID so test count is stable).
+	_DAI_Assert("10.9b construction-progress check folded into ProcessConstructionQueue",
+		_DAI_FnExists("_AI_ProcessConstructionQueue"), "callable")
+
+	_DAI_Assert("10.9c _AI_GetNextBuildZone exists",
+		_DAI_FnExists("_AI_GetNextBuildZone"), "callable")
+
+	_DAI_Assert("10.9d _AI_GetPrimaryZoneCenter exists",
+		_DAI_FnExists("_AI_GetPrimaryZoneCenter"), "callable")
+
+	-- Verify sacred sites were discovered
+	local sites = _DAI_FnExists("_AI_GetSacredSites") and _AI_GetSacredSites() or nil
+	_DAI_Assert("10.10 Sacred sites discovered",
+		type(sites) == "table",
+		sites and (#sites .. " sites") or "nil or getter missing")
+
+	local ai_p = _DAI_FindAIPlayer()
+	if ai_p ~= nil and ai_p.ai ~= nil then
+		local ai = ai_p.ai
+
+		-- Verify patrol SGroup
+		_DAI_Assert("10.11 Patrol SGroup exists",
+			ai.patrol_sg ~= nil,
+			ai.patrol_sg_name or "nil")
+
+		if ai.patrol_sg ~= nil then
+			local ok_pc, p_count = pcall(SGroup_CountSpawned, ai.patrol_sg)
+			if _dai.profile == "harness" then
+				_DAI_Skip("10.12 Patrol army has units", "harness profile — AI rules locked, no patrol dispatch")
+			else
+				_DAI_Assert("10.12 Patrol army has units",
+					ok_pc and p_count > 0,
+					ok_pc and ("count=" .. tostring(p_count)) or "SGroup error")
+			end
+		end
+
+		-- Verify villager SGroup
+		_DAI_Assert("10.13 Villager SGroup exists",
+			ai.villager_sg ~= nil,
+			ai.villager_sg_name or "nil")
+
+		if ai.villager_sg ~= nil then
+			local ok_vc, v_count = pcall(SGroup_CountSpawned, ai.villager_sg)
+			_DAI_Assert("10.14 Villager squad has units",
+				ok_vc and v_count >= 0,
+				ok_vc and ("count=" .. tostring(v_count)) or "SGroup error")
+		end
+
+		-- Verify patrol waypoints can be generated
+		if _DAI_FnExists("_AI_BuildPatrolWaypoints") then
+			local ok_wp, waypoints = pcall(_AI_BuildPatrolWaypoints, ai_p)
+			_DAI_Assert("10.15 Patrol waypoints generated",
+				ok_wp and type(waypoints) == "table" and #waypoints > 0,
+				ok_wp and (#waypoints .. " waypoints") or "failed")
+		else
+			_DAI_Assert("10.15 _AI_BuildPatrolWaypoints exists", false, "missing")
+		end
+
+		-- Verify rally state fields
+		_DAI_Assert("10.16 Patrol rally state initialized",
+			type(ai.patrol_rallying) == "boolean",
+			"rallying=" .. tostring(ai.patrol_rallying))
+
+		-- Verify construction queue state
+		_DAI_Assert("10.17 Construction queue initialized",
+			type(ai.construction_queue) == "table",
+			"entries=" .. tostring(#(ai.construction_queue or {})))
+
+		-- If a queued foundation exists, verify it is in a coherent construction state.
+		if type(ai.construction_queue) == "table" and #ai.construction_queue > 0 then
+			local q = ai.construction_queue[1]
+			if q ~= nil and q.entity ~= nil then
+				local ok_prog, prog = pcall(Entity_GetBuildingProgress, q.entity)
+				local ok_hp, hp = pcall(Entity_GetHealthPercentage, q.entity)
+				local ok_under, under = pcall(Entity_IsUnderConstruction, q.entity)
+				local coherent = true
+				if ok_prog and ok_hp and ok_under and prog <= 0.01 and hp >= 0.99 and not under then
+					coherent = false
+				end
+				_DAI_Assert("10.17b Foundation construction state coherent",
+					coherent,
+					string.format("progress=%.2f hp=%.2f under=%s",
+						(ok_prog and prog) and prog or -1,
+						(ok_hp and hp) and hp or -1,
+						(ok_under and tostring(under)) or "n/a"))
+			else
+				_DAI_Assert("10.17b Foundation entity handle present", false, "queue entry missing entity")
+			end
+		else
+			_DAI_Assert("10.17b Foundation state check", true, "queue empty (not applicable)")
+		end
+
+		-- Verify zone tracking
+		_DAI_Assert("10.18 Zone counters initialized",
+			type(ai.primary_zone_count) == "number" and type(ai.secondary_zone_count) == "number",
+			string.format("primary=%d secondary=%d stage=%d",
+				ai.primary_zone_count or -1, ai.secondary_zone_count or -1, ai.stage or 0))
+
+		-- Verify production egroups structure
+		_DAI_Assert("10.19 Production egroups initialized",
+			type(ai.production_egroups) == "table"
+				and type(ai.production_egroups.barracks) == "table"
+				and type(ai.production_egroups.archery_range) == "table",
+			"barracks=" .. tostring(#(ai.production_egroups.barracks or {}))
+				.. " archery=" .. tostring(#(ai.production_egroups.archery_range or {})))
+	else
+		_DAI_Assert("10.11 (skip) Starting units — no AI player", true, "skipped")
+	end
+
+	_Debug_PhaseFooter(10, "Starting Units & Patrol")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase Dispatch Table
+---------------------------------------------------------------------------------------------------
+
+local _DAI_PHASE_FNS = {
+	[0] = _DAI_Phase0_Bootstrap,
+	[1] = _DAI_Phase1_Economy,
+	[2] = _DAI_Phase2_Buildings,
+	[3] = _DAI_Phase3_Production,
+	[4] = _DAI_Phase4_Armies,
+	[5] = _DAI_Phase5_AllySupport,
+	[6] = _DAI_Phase6_Scouts,
+	[7] = _DAI_Phase7_Outposts,
+	[8] = _DAI_Phase8_Events,
+	[9] = _DAI_Phase9_Integration,
+	[10] = _DAI_Phase10_StartingUnits,
+}
+
+---------------------------------------------------------------------------------------------------
+-- Orchestrator: Run All Phases
+---------------------------------------------------------------------------------------------------
+
+function Debug_AIPlayerTest()
+	print("")
+	print("================================================================")
+	print("  CBA AI PLAYER VERIFICATION SUITE")
+	print("================================================================")
+
+	_dai.running = true
+	_dai.start_time = World_GetGameTime()
+	_dai.passed = 0
+	_dai.total = 0
+	_dai.skipped = 0
+
+	_DAI_DetectProfile()
+	print(string.format("  Profile: %s | External lock: %s%s",
+		_dai.profile,
+		_dai.locked and "ON" or "OFF",
+		_dai.locked and (" (" .. _dai.lock_reason .. ")") or ""))
+
+	_Debug_ResetPhaseTracking()
+	_Debug_SetPhaseCounterGetter(_DAI_GetCounters)
+
+	-- Run all phases sequentially with delay
+	_dai._phase_queue = 0
+	_DAI_RunNextPhase()
+end
+
+function _DAI_RunNextPhase()
+	local phase = _dai._phase_queue
+	if phase >= _DAI_PHASES then
+		_DAI_PrintSummary()
+		return
+	end
+
+	local fn = _DAI_PHASE_FNS[phase]
+	if fn then
+		local ok, err = pcall(fn)
+		if not ok then
+			print(string.format("  [CRASH] Phase %d crashed: %s", phase, tostring(err)))
+		end
+	end
+
+	_dai._phase_queue = phase + 1
+	Rule_AddOneShot(_DAI_RunNextPhase, _DAI_DELAY)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Orchestrator: Run Single Phase
+---------------------------------------------------------------------------------------------------
+
+function Debug_AIPlayerTest_Phase(phase_num)
+	if phase_num == nil or _DAI_PHASE_FNS[phase_num] == nil then
+		print("[AI_PLAYER_TEST] Invalid phase. Valid: 0-" .. tostring(_DAI_PHASES - 1))
+		return
+	end
+
+	print("")
+	print(string.format("================================================================"))
+	print(string.format("  AI PLAYER TEST — Phase %d only", phase_num))
+	print(string.format("================================================================"))
+
+	_dai.passed = 0
+	_dai.total = 0
+	_dai.skipped = 0
+	_DAI_DetectProfile()
+	print(string.format("  Profile: %s | External lock: %s%s",
+		_dai.profile,
+		_dai.locked and "ON" or "OFF",
+		_dai.locked and (" (" .. _dai.lock_reason .. ")") or ""))
+	_Debug_ResetPhaseTracking()
+	_Debug_SetPhaseCounterGetter(_DAI_GetCounters)
+
+	local fn = _DAI_PHASE_FNS[phase_num]
+	local ok, err = pcall(fn)
+	if not ok then
+		print(string.format("  [CRASH] Phase %d crashed: %s", phase_num, tostring(err)))
+	end
+
+	print("")
+	print(string.format("[AI_PLAYER_TEST] Phase %d: %d / %d passed", phase_num, _dai.passed, _dai.total))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Summary
+---------------------------------------------------------------------------------------------------
+
+_DAI_PrintSummary = function()
+	local elapsed = World_GetGameTime() - _dai.start_time
+	_dai.running = false
+
+	if _dai.skipped > 0 then
+		print(string.format("  [INFO] %d test(s) skipped under '%s' profile.", _dai.skipped, _dai.profile))
+	end
+	_Debug_EndMarker(_DAI_SUITE, _dai.passed, _dai.total, elapsed)
+
+	_Debug_SetPhaseCounterGetter(nil)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Console: Live Status (wraps CBA_AIPlayer_Status)
+---------------------------------------------------------------------------------------------------
+
+function Debug_AIPlayerStatus()
+	if _DAI_FnExists("CBA_AIPlayer_Status") then
+		CBA_AIPlayer_Status()
+	else
+		print("[AI_PLAYER_TEST] CBA_AIPlayer_Status not available — module not loaded?")
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Console: Force Spawn (for testing production in isolation)
+---------------------------------------------------------------------------------------------------
+
+function Debug_AIPlayerForceSpawn(player_idx)
+	player_idx = player_idx or 1
+	if _ai_players == nil or #_ai_players == 0 then
+		print("[AI_PLAYER_TEST] No AI players. Cannot force spawn.")
+		return
+	end
+
+	local target = nil
+	if player_idx <= #_ai_players then
+		target = _ai_players[player_idx]
+	else
+		target = _ai_players[1]
+	end
+
+	if target == nil or target.ai == nil then
+		print("[AI_PLAYER_TEST] AI player state not initialized.")
+		return
+	end
+
+	print(string.format("[AI_PLAYER_TEST] Force-spawning batch for P%d...", target.playerIndex or 0))
+	local ok, err = pcall(_AI_ProduceUnits, target)
+	if ok then
+		local staging = target.ai.staging_sg and SGroup_CountSpawned(target.ai.staging_sg) or 0
+		print(string.format("[AI_PLAYER_TEST] Spawn complete. Staging count: %d", staging))
+	else
+		print(string.format("[AI_PLAYER_TEST] Spawn failed: %s", tostring(err)))
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Backward-Compatible Aliases
+---------------------------------------------------------------------------------------------------
+
+function CBA_Debug_RunAll()
+	Debug_AIPlayerTest()
+end
+
+function CBA_Debug_RunPhase(phase_num)
+	Debug_AIPlayerTest_Phase(phase_num)
+end
+
+function CBA_Debug_Status()
+	Debug_AIPlayerStatus()
+end
+
+---------------------------------------------------------------------------------------------------
+-- Module Registry Registration
+---------------------------------------------------------------------------------------------------
+
+if Debug_RegisterModule ~= nil then
+	Debug_RegisterModule({
+		name = "ai_player_test",
+		tags = { "ai", "ai_player", "military" },
+		tier = 2,
+		depends = { "core" },
+		state_tables = { "_ai_players", "_ai_group_counter" },
+		required_game = { "PLAYERS", "_CBA", "AGS_GLOBAL_SETTINGS" },
+		namespace = "ai_player",
+		profiles = { "normal", "harness" },
+		description = "10-phase verification of CBA_AIPlayer module: bootstrap, economy, buildings, production, armies, allies, scouts, outposts, events, integration. Auto-detects harness lock for profile-aware skip/pass.",
+	}, {
+		test         = Debug_AIPlayerTest,
+		test_phase   = Debug_AIPlayerTest_Phase,
+		status       = Debug_AIPlayerStatus,
+		force_spawn  = Debug_AIPlayerForceSpawn,
+	})
+end

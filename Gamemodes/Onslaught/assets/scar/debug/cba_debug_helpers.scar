@@ -1,0 +1,1398 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — Helpers
+-- Ad-hoc console commands: baseline resources, spawn, age, keep diagnostic, precache, smoke tests.
+--
+-- Branch: onslaught-v3.3
+-- Uses: rewards/cba_rewards.scar, cba_annihilation.scar, cba_religious.scar
+---------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------
+-- Resource Baseline
+---------------------------------------------------------------------------------------------------
+
+function Debug_SetBaseline(amount)
+	amount = amount or 500
+	for i, player in ipairs(PLAYERS) do
+		Player_SetResource(player.id, RT_Food, amount)
+		Player_SetResource(player.id, RT_Wood, amount)
+		Player_SetResource(player.id, RT_Gold, amount)
+		Player_SetResource(player.id, RT_Stone, amount)
+	end
+	print(string.format("[CBA_DEBUG] Baseline set to %d for %d players", amount, #PLAYERS))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Kill Score Inspector
+---------------------------------------------------------------------------------------------------
+
+function Debug_GetKillScore(player_idx)
+	player_idx = player_idx or 1
+	local player = PLAYERS[player_idx]
+	if player == nil then
+		print(string.format("[CBA_DEBUG] Invalid player_idx=%d", player_idx))
+		return
+	end
+	local kills = player.killed_number or "nil"
+	local req = player.obj_kill_requirement or "nil"
+	local civ = _Debug_GetPlayerCiv(player)
+	print(string.format("[CBA_DEBUG] P%d (%s): kills=%s next_req=%s",
+		player_idx, civ, tostring(kills), tostring(req)))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Auto-Age Status
+---------------------------------------------------------------------------------------------------
+
+function Debug_GetAutoAgeStatus()
+	if _autoage == nil then
+		print("[CBA_DEBUG] AutoAge module not loaded (_autoage is nil)")
+		return
+	end
+	print("[CBA_DEBUG] AutoAge state:")
+	print(string.format("  AGS_GLOBAL_SETTINGS.AutoAge = %s", tostring(AGS_GLOBAL_SETTINGS.AutoAge)))
+	print(string.format("  _autoage.module = %s", tostring(_autoage.module)))
+	for i, player in ipairs(PLAYERS) do
+		local age = 0
+		local ok, a = pcall(Player_GetCurrentAge, player.id)
+		if ok then age = a end
+		print(string.format("  P%d: age=%d build_count=%s",
+			i, age, tostring(player.obj_build_count)))
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Population Inspector
+---------------------------------------------------------------------------------------------------
+
+function Debug_GetPopCap(player_idx)
+	player_idx = player_idx or 1
+	local player = PLAYERS[player_idx]
+	if player == nil then
+		print(string.format("[CBA_DEBUG] Invalid player_idx=%d", player_idx))
+		return
+	end
+	local ok_pop, pop = pcall(Player_GetCurrentPopulation, player.id, CT_Personnel)
+	local ok_cap, cap = pcall(Player_GetCurrentPopulationCap, player.id, CT_Personnel)
+	local ok_max, max = pcall(Player_GetMaxPopulationCap, player.id, CT_Personnel)
+	print(string.format("[CBA_DEBUG] P%d pop: current=%s cap=%s max=%s",
+		player_idx,
+		ok_pop and tostring(pop) or "ERR",
+		ok_cap and tostring(cap) or "ERR",
+		ok_max and tostring(max) or "ERR"))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Population Sync Audit
+-- Prints a per-player summary showing whether effective pop cap matches the tracked base
+-- plus all known external modifiers (leaver grants, team-balance bonus, innate correction).
+-- Flags any residual that doesn't come from an authorized source.
+-- Safe to call at any point in-game (reads from module-level tables, never writes).
+---------------------------------------------------------------------------------------------------
+
+function Debug_PopAudit()
+	print("[POP_AUDIT] ============================================")
+	if _AGS_AutoPop_Caps == nil or next(_AGS_AutoPop_Caps) == nil then
+		print("[POP_AUDIT] _AGS_AutoPop_Caps is empty — auto-pop disabled or not yet initialized")
+		print("[POP_AUDIT] ============================================")
+		return
+	end
+	local issues = 0
+	for i, player in ipairs(PLAYERS) do
+		local civ = tostring(player.raceName or "?")
+		local ok_eff, effective = pcall(Player_GetCurrentPopulationCap, player.id, CT_Personnel)
+		if not ok_eff then effective = 0 end
+		local tracked    = _AGS_AutoPop_Caps[player.id] or 0
+		local tb         = player.teamBalance_popBonus or 0
+		local innate     = (_AGS_AutoPop_InnateCorrected ~= nil) and (_AGS_AutoPop_InnateCorrected[player.id] or 0) or 0
+		local accounted  = tb
+		local residual   = effective - tracked - accounted
+		local status     = (math.abs(residual) <= 5) and "[OK]" or string.format("[UNEXPECTED %+d]", residual)
+		if math.abs(residual) > 5 then issues = issues + 1 end
+		print(string.format("[POP_AUDIT] P%d [%s] cap=%d/%d delta=%+d (tb=%+d innate=%+d) %s",
+			i, civ, effective, tracked, effective - tracked, tb, innate, status))
+	end
+	local summary = (issues == 0) and "All players OK" or string.format("%d player(s) have unexpected pop modifiers", issues)
+	print("[POP_AUDIT] " .. summary)
+	print("[POP_AUDIT] ============================================")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Keep Diagnostic
+---------------------------------------------------------------------------------------------------
+
+function Debug_KeepDiagnostic()
+	print("[CBA_DEBUG] Keep Diagnostic:")
+	for i, player in ipairs(PLAYERS) do
+		if player.keep then
+			local hp = "?"
+			local max_hp = "?"
+			if player.keep.entity then
+				local ok1, h = pcall(Entity_GetHealth, player.keep.entity)
+				local ok2, m = pcall(Entity_GetHealthMax, player.keep.entity)
+				if ok1 then hp = tostring(h) end
+				if ok2 then max_hp = tostring(m) end
+			end
+			local civ = _Debug_GetPlayerCiv(player)
+			local alive = "?"
+			if player.keep.entity then
+				local ok, a = pcall(Entity_IsAlive, player.keep.entity)
+				if ok then alive = tostring(a) end
+			end
+			print(string.format("  P%d (%s): alive=%s hp=%s/%s",
+				i, civ, alive, hp, max_hp))
+		else
+			print(string.format("  P%d: NO KEEP DATA", i))
+		end
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Precache Status
+---------------------------------------------------------------------------------------------------
+
+function Debug_PrecacheStatus()
+	print("[CBA_DEBUG] Precache Status:")
+	if AGS_ENTITY_TABLE == nil then
+		print("  AGS_ENTITY_TABLE is nil")
+		return
+	end
+	local resolved = 0
+	local failed = {}
+	for civ_name, civ_data in pairs(AGS_ENTITY_TABLE) do
+		if civ_name ~= "neutral" and civ_data.castle ~= nil and civ_data.castle ~= false then
+			local ok, ebp = pcall(BP_GetEntityBlueprint, civ_data.castle)
+			if ok and ebp ~= nil then
+				resolved = resolved + 1
+			else
+				table.insert(failed, civ_name .. "=" .. tostring(civ_data.castle))
+			end
+		end
+	end
+	print(string.format("  Resolved: %d  Failed: %d", resolved, #failed))
+	for _, f in ipairs(failed) do
+		print("  [FAIL] " .. f)
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Spawn Helper
+---------------------------------------------------------------------------------------------------
+
+function Debug_Spawn(bp_name, player_idx, count)
+	player_idx = player_idx or 1
+	count = count or 1
+	local player = PLAYERS[player_idx]
+	if player == nil then
+		print(string.format("[CBA_DEBUG] Invalid player_idx=%d", player_idx))
+		return
+	end
+	local pos = _Debug_GetPlayerSpawnAnchor(player)
+	if pos == nil then
+		print("[CBA_DEBUG] No spawn anchor for player")
+		return
+	end
+	local ok_sbp, sbp = pcall(BP_GetSquadBlueprint, bp_name)
+	if ok_sbp and sbp then
+		for n = 1, count do
+			local ok, err = pcall(function()
+				local sg = SGroup_CreateUnique()
+				UnitEntry_DeploySquads(player.id, sg, {{sbp = sbp, numSquads = 1}}, pos)
+			end)
+			if not ok then
+				print(string.format("[CBA_DEBUG] Spawn error: %s", tostring(err)))
+				return
+			end
+		end
+		print(string.format("[CBA_DEBUG] Spawned %d x %s for P%d", count, bp_name, player_idx))
+	else
+		print(string.format("[CBA_DEBUG] Cannot resolve SBP: %s", bp_name))
+	end
+end
+
+function _Debug_GetPlayerSpawnAnchor(player)
+	if player.keep and player.keep.position then
+		return player.keep.position
+	end
+	return nil
+end
+
+-- Clamp a position candidate to playable bounds using a configurable margin.
+function _Debug_ClampToPlayableBounds(base_pos, dx, dz, margin)
+	margin = margin or 30
+	local x = (base_pos and base_pos.x or 0) + (dx or 0)
+	local z = (base_pos and base_pos.z or 0) + (dz or 0)
+	local y = (base_pos and base_pos.y or 0)
+
+	local ok_w, world_w = pcall(World_GetWidth)
+	local ok_l, world_l = pcall(World_GetLength)
+	if ok_w and ok_l and type(world_w) == "number" and type(world_l) == "number" and world_w > 0 and world_l > 0 then
+		local half_w = world_w * 0.5
+		local half_l = world_l * 0.5
+		local min_x = -half_w + margin
+		local max_x = half_w - margin
+		local min_z = -half_l + margin
+		local max_z = half_l - margin
+		x = math.max(min_x, math.min(max_x, x))
+		z = math.max(min_z, math.min(max_z, z))
+	end
+
+	local ok_h, h = pcall(World_GetHeightAt, x, z)
+	if ok_h and type(h) == "number" then
+		y = h
+	end
+	return World_Pos(x, y, z)
+end
+
+-- Resolve a spawn-safe/world-safe position near anchor using prioritized offsets.
+-- If a reference entity or blueprint is provided, uses World_GetSpawnablePosition for correction.
+function _Debug_GetSafePosFromAnchor(anchor, offsets, margin, ref_entity, ref_ebp)
+	local base = anchor or World_Pos(0, 0, 0)
+	local list = offsets or {{x = 0, z = 0}}
+	local fallback = nil
+
+	for _, off in ipairs(list) do
+		local candidate = _Debug_ClampToPlayableBounds(base, off.x or 0, off.z or 0, margin)
+		local resolved = candidate
+		local resolved_mode = "clamp"
+
+		if ref_entity ~= nil then
+			local ok_sp, sp = pcall(World_GetSpawnablePosition, candidate, ref_entity)
+			if ok_sp and sp ~= nil then
+				resolved = sp
+				resolved_mode = "spawnable_entity"
+			end
+		elseif ref_ebp ~= nil then
+			local ok_env, temp = pcall(Entity_CreateENV, ref_ebp, candidate, true)
+			if ok_env and temp ~= nil then
+				local ok_sp, sp = pcall(World_GetSpawnablePosition, candidate, temp)
+				if ok_sp and sp ~= nil then
+					resolved = sp
+					resolved_mode = "spawnable_env"
+				end
+				pcall(Entity_Destroy, temp)
+			end
+		end
+
+		fallback = fallback or resolved
+		local ok_in, in_bounds = pcall(World_PosInBounds, resolved)
+		if not ok_in or in_bounds then
+			return resolved, resolved_mode
+		end
+	end
+
+	return fallback or _Debug_ClampToPlayableBounds(base, 0, 0, margin), "fallback"
+end
+
+-- Shared helper for deterministic ram baseline checks.
+-- Returns live, pending, queued, total where total = live + pending + queued.
+function _Debug_GetRamBaselineTotals(player)
+	local live = player and (player.ramLimit_count or 0) or 0
+	local pending = player and (player.ramLimit_pending or 0) or 0
+	local queued = 0
+	if player ~= nil and CBA_Options_RamLimit_GetQueuedCount ~= nil then
+		local ok_q, q = pcall(CBA_Options_RamLimit_GetQueuedCount, player)
+		if ok_q and type(q) == "number" then
+			queued = q
+		end
+	end
+	return live, pending, queued, live + pending + queued
+end
+
+function _Debug_LogRamBaseline(player, label)
+	local live, pending, queued, total = _Debug_GetRamBaselineTotals(player)
+	print(string.format("    [BASELINE] %s: live=%d pending=%d queued=%d total=%d",
+		tostring(label or "state"), live, pending, queued, total))
+	return live, pending, queued, total
+end
+
+---------------------------------------------------------------------------------------------------
+-- Smoke Tests
+---------------------------------------------------------------------------------------------------
+
+function Debug_RunSmokeTests()
+	print("")
+	print("[CBA_DEBUG] ===== SMOKE TESTS =====")
+	local pass = 0
+	local fail = 0
+
+	-- Test 1: PLAYERS exist
+	if PLAYERS ~= nil and #PLAYERS > 0 then
+		pass = pass + 1
+		print(string.format("  [PASS] PLAYERS: %d found", #PLAYERS))
+	else
+		fail = fail + 1
+		print("  [FAIL] PLAYERS missing or empty")
+	end
+
+	-- Test 2: _mod exists with module field
+	if _mod ~= nil and _mod.module == "Mod" then
+		pass = pass + 1
+		print("  [PASS] _mod orchestrator present")
+	else
+		fail = fail + 1
+		print("  [FAIL] _mod missing or invalid")
+	end
+
+	-- Test 3: AGS_GLOBAL_SETTINGS exists
+	if AGS_GLOBAL_SETTINGS ~= nil then
+		pass = pass + 1
+		print("  [PASS] AGS_GLOBAL_SETTINGS present")
+	else
+		fail = fail + 1
+		print("  [FAIL] AGS_GLOBAL_SETTINGS missing")
+	end
+
+	-- Test 4: All players have keeps
+	local all_keeps = true
+	if PLAYERS then
+		for i, p in ipairs(PLAYERS) do
+			if p.keep == nil then
+				all_keeps = false
+				print(string.format("    P%d: NO KEEP", i))
+			end
+		end
+	end
+	if all_keeps then
+		pass = pass + 1
+		print("  [PASS] All players have keeps")
+	else
+		fail = fail + 1
+		print("  [FAIL] Not all players have keeps")
+	end
+
+	-- Test 5: Sacred site center (from rewards.scar / _CBA table)
+	if _CBA ~= nil and _CBA.center ~= nil then
+		pass = pass + 1
+		print("  [PASS] _CBA.center (sacred site center) present")
+	else
+		fail = fail + 1
+		print("  [FAIL] _CBA.center missing")
+	end
+
+	-- Test 6: Win condition modules loaded (legacy wonder module is optional)
+	local wc_ok = (_annihilation ~= nil) and (_religious ~= nil)
+	if wc_ok then
+		pass = pass + 1
+		if _wonder ~= nil then
+			print("  [PASS] Win condition modules: annihilation, religious, wonder")
+		else
+			print("  [PASS] Win condition modules: annihilation, religious (legacy wonder inactive)")
+		end
+	else
+		fail = fail + 1
+		local missing = {}
+		if _annihilation == nil then table.insert(missing, "annihilation") end
+		if _religious == nil then table.insert(missing, "religious") end
+		print("  [FAIL] Missing win condition modules: " .. table.concat(missing, ", "))
+	end
+
+	-- Test 7: Building limit module loaded
+	if _buildingLimit ~= nil then
+		pass = pass + 1
+		print("  [PASS] _buildingLimit module loaded")
+	else
+		fail = fail + 1
+		print("  [FAIL] _buildingLimit module not loaded")
+	end
+
+	print(string.format("  ===== Result: %d/%d passed =====", pass, pass + fail))
+	return pass, pass + fail
+end
+
+---------------------------------------------------------------------------------------------------
+-- Visual Validation — Pause/Confirm/Reject
+-- Pauses execution for visual inspection within the game; resumes on manual confirm,
+-- manual reject, or auto-timeout. Uses Rule_AddInterval polling since SCAR has no coroutines.
+---------------------------------------------------------------------------------------------------
+
+function Debug_WaitForVisual(description, timeout_seconds)
+	timeout_seconds = timeout_seconds or 30
+	_cba_debug._visual = {
+		description = description or "Visual check",
+		confirmed = nil,  -- nil = waiting, true = confirmed, false = rejected
+		reject_reason = nil,
+		callback = nil,
+	}
+
+	local ok, gt = pcall(World_GetGameTime)
+	_cba_debug._visual.deadline = (ok and gt or 0) + timeout_seconds
+
+	print("")
+	print(string.format("[VISUAL CHECK] %s", description))
+	print(string.format("  Call Debug_Confirm() to pass, Debug_Reject('reason') to fail."))
+	print(string.format("  Auto-resumes in %ds.", timeout_seconds))
+
+	pcall(function()
+		UI_CreateEventCue("[DEBUG] Visual Check", description, "high_priority", "", "sfx_ui_event_queue_high_priority_play", timeout_seconds)
+	end)
+
+	-- Poll every 0.5s
+	Rule_AddInterval(_Visual_PollResolution, 0.5)
+end
+
+function _Visual_PollResolution()
+	local v = _cba_debug._visual
+	if v == nil then
+		Rule_RemoveMe()
+		return
+	end
+
+	-- Check manual response
+	if v.confirmed == true then
+		Rule_RemoveMe()
+		print("[VISUAL CHECK] CONFIRMED — passed")
+		table.insert(_cba_debug.test_results, {name = "[Visual] " .. v.description, pass = true, detail = "Confirmed by user"})
+		_Visual_Resume()
+		return
+	elseif v.confirmed == false then
+		Rule_RemoveMe()
+		print(string.format("[VISUAL CHECK] REJECTED — %s", v.reject_reason or "no reason"))
+		table.insert(_cba_debug.test_results, {name = "[Visual] " .. v.description, pass = false, detail = v.reject_reason or "Rejected by user"})
+		_Visual_Resume()
+		return
+	end
+
+	-- Check timeout
+	local ok, gt = pcall(World_GetGameTime)
+	if ok and gt >= v.deadline then
+		Rule_RemoveMe()
+		print("[VISUAL CHECK] TIMEOUT — auto-resumed (assumed pass)")
+		table.insert(_cba_debug.test_results, {name = "[Visual] " .. v.description, pass = true, detail = "Timeout (assumed pass)"})
+		_Visual_Resume()
+		return
+	end
+end
+
+function _Visual_Resume()
+	local v = _cba_debug._visual
+	if v and v.callback then
+		v.callback()
+	end
+	_cba_debug._visual = nil
+end
+
+function Debug_Confirm()
+	if _cba_debug._visual == nil then
+		print("[CBA_DEBUG] No visual check pending")
+		return
+	end
+	_cba_debug._visual.confirmed = true
+end
+
+function Debug_Reject(reason)
+	if _cba_debug._visual == nil then
+		print("[CBA_DEBUG] No visual check pending")
+		return
+	end
+	_cba_debug._visual.confirmed = false
+	_cba_debug._visual.reject_reason = reason or "Manual rejection"
+end
+
+---------------------------------------------------------------------------------------------------
+-- Camera Focus Helpers
+---------------------------------------------------------------------------------------------------
+
+function Debug_FocusPlayer(player_idx)
+	player_idx = player_idx or 1
+	local player = PLAYERS[player_idx]
+	if player == nil then
+		print(string.format("[CBA_DEBUG] Invalid player_idx=%d", player_idx))
+		return
+	end
+	local pos = _Debug_GetPlayerSpawnAnchor(player)
+	if pos == nil then
+		print("[CBA_DEBUG] No spawn anchor for player")
+		return
+	end
+	pcall(Camera_MoveTo, pos, true)
+	pcall(FOW_RevealArea, pos, 50, 10.0)
+	print(string.format("[CBA_DEBUG] Camera focused on P%d", player_idx))
+end
+
+function Debug_FocusPosition(x, y, z)
+	local pos = World_Pos(x or 0, y or 0, z or 0)
+	pcall(Camera_MoveTo, pos, true)
+	pcall(FOW_RevealArea, pos, 50, 10.0)
+	print(string.format("[CBA_DEBUG] Camera focused on (%.0f, %.0f, %.0f)", x or 0, y or 0, z or 0))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Slow Motion / AI Pause / Overlays
+---------------------------------------------------------------------------------------------------
+
+function Debug_SlowMotion(enabled)
+	if enabled then
+		pcall(Game_SetSimRate, 0.25)
+		print("[CBA_DEBUG] Slow motion ON (0.25x)")
+	else
+		pcall(Game_SetSimRate, 1.0)
+		print("[CBA_DEBUG] Slow motion OFF (1.0x)")
+	end
+end
+
+function Debug_PauseAI()
+	for i, player in ipairs(PLAYERS) do
+		pcall(AI_PauseCurrentTasks, player.id, true)
+	end
+	print("[CBA_DEBUG] AI paused for all players")
+end
+
+function Debug_ResumeAI()
+	for i, player in ipairs(PLAYERS) do
+		pcall(AI_PauseCurrentTasks, player.id, false)
+	end
+	print("[CBA_DEBUG] AI resumed for all players")
+end
+
+function Debug_ToggleOverlays()
+	pcall(Sim_EntityInfo)
+	pcall(Sim_SquadInfo)
+	print("[CBA_DEBUG] Toggled entity/squad debug overlays")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Pre-built Visual Validation Sequences
+---------------------------------------------------------------------------------------------------
+
+function Debug_VisualValidation_KeepDestroy(player_idx)
+	player_idx = player_idx or 1
+	print("")
+	print("============================================")
+	print(string.format("  VISUAL VALIDATION: Keep Destroy (P%d)", player_idx))
+	print("============================================")
+
+	Debug_PauseAI()
+	Debug_FocusPlayer(player_idx)
+
+	-- Store player_idx for the named callback
+	_cba_debug._visual_keep_target = player_idx
+
+	-- Schedule destruction after brief pause for camera to settle
+	Rule_AddOneShot(_VisualKeepDestroy_Execute, 1.0)
+end
+
+function _VisualKeepDestroy_Execute()
+	local player_idx = _cba_debug._visual_keep_target or 1
+	local player = PLAYERS[player_idx]
+	if player and player.keep and player.keep.entity then
+		local ok, alive = pcall(Entity_IsAlive, player.keep.entity)
+		if ok and alive then
+			pcall(Entity_Kill, player.keep.entity)
+			print(string.format("  Keep destroyed for P%d", player_idx))
+		else
+			print(string.format("  Keep already dead for P%d", player_idx))
+		end
+	end
+
+	pcall(function()
+		UI_CreateEventCue("[DEBUG] Keep Destroyed",
+			string.format("P%d keep destroyed — observe elimination", player_idx),
+			"high_priority", "", "sfx_ui_event_queue_high_priority_play",
+			8)
+	end)
+
+	-- Schedule cleanup after observation window
+	_Debug_ScheduleNextPhase(_VisualKeepDestroy_Finish, 5.0, "KeepDestroy Finish", "VisualKeepDestroy")
+end
+
+function _VisualKeepDestroy_Finish()
+	Debug_ResumeAI()
+	_Debug_EndMarker("VisualKeepDestroy", 1, 1, 0)
+end
+
+function Debug_VisualValidation_SiegeSpawn(player_idx)
+	player_idx = player_idx or 1
+	print("")
+	print("============================================")
+	print(string.format("  VISUAL VALIDATION: Siege Spawn (P%d)", player_idx))
+	print("============================================")
+
+	Debug_FocusPlayer(player_idx)
+
+	pcall(function()
+		UI_CreateEventCue("[DEBUG] Siege Spawn", "Spawning siege units — watch limit UI",
+			"high_priority", "", "sfx_ui_event_queue_high_priority_play",
+			10)
+	end)
+
+	-- Uses spawn plan engine which has its own EndMarker
+	Debug_SpawnPlan_SiegeStress()
+end
+
+---------------------------------------------------------------------------------------------------
+-- Age Unlock Mode
+-- Returns a string describing how a given civ ages up in CBA/Onslaught.
+--   "landmark"  — standard landmark-based age-up (most civs)
+--   "direct"    — landmarks locked, age forced directly (malian, ottoman, abbasid variants)
+---------------------------------------------------------------------------------------------------
+
+local _AGE_DIRECT_CIVS = {
+	malian = true,
+	ottoman = true,
+	abbasid = true,
+	abbasid_ha_01 = true,
+}
+
+function _Debug_GetAgeUnlockMode(civ)
+	if civ == nil then return "unknown" end
+	-- Resolve DLC variant to parent if needed
+	local resolved = AGS_CIV_PARENT_MAP and AGS_CIV_PARENT_MAP[civ] or civ
+	if _AGE_DIRECT_CIVS[resolved] or _AGE_DIRECT_CIVS[civ] then
+		return "direct"
+	end
+	return "landmark"
+end
+
+---------------------------------------------------------------------------------------------------
+-- Age-Gate Coverage Validator
+-- Iterates AGS_ENTITY_TABLE and validates each civ has the expected core blueprints.
+-- Skips "neutral" (system entry with no buildings).
+-- Console: Debug_ValidateAgeGateCoverage()  or  Debug_ValidateAgeGateCoverage(true)
+---------------------------------------------------------------------------------------------------
+
+local _REQUIRED_KEYS = { "town_center_capital", "town_center", "villager", "barracks" }
+
+function Debug_ValidateAgeGateCoverage(silent)
+	if AGS_ENTITY_TABLE == nil then
+		print("[CBA_DEBUG] AGS_ENTITY_TABLE not loaded — cannot validate")
+		return false
+	end
+
+	local pass = 0
+	local fail = 0
+	local mode_summary = {}
+
+	for civ, data in pairs(AGS_ENTITY_TABLE) do
+		if civ ~= "neutral" then
+			local civ_ok = true
+
+			-- Check required keys
+			for _, key in ipairs(_REQUIRED_KEYS) do
+				if data[key] == nil then
+					civ_ok = false
+					if not silent then
+						print(string.format("  [FAIL] %s: missing required key '%s'", civ, key))
+					end
+				end
+			end
+
+			-- Castle can be false (Mongol) but should not be nil
+			if data.castle == nil then
+				civ_ok = false
+				if not silent then
+					print(string.format("  [FAIL] %s: missing 'castle' (use false for no keep)", civ))
+				end
+			end
+
+			if civ_ok then
+				pass = pass + 1
+			else
+				fail = fail + 1
+			end
+
+			-- Collect age-up mode
+			local mode = _Debug_GetAgeUnlockMode(civ)
+			mode_summary[mode] = mode_summary[mode] or {}
+			table.insert(mode_summary[mode], civ)
+		end
+	end
+
+	-- Print summary
+	if not silent then
+		print(string.format("[CBA_DEBUG] Age-gate coverage: %d/%d civs OK", pass, pass + fail))
+		for mode, civs in pairs(mode_summary) do
+			table.sort(civs)
+			print(string.format("  %s: %s", mode, table.concat(civs, ", ")))
+		end
+	end
+
+	return fail == 0
+end
+
+---------------------------------------------------------------------------------------------------
+-- Default Target Resolver
+-- Resolves optional player_idx to local human player index when omitted.
+-- Priority: explicit arg -> player.isLocal -> localPlayer.id match -> first isHuman -> 1
+---------------------------------------------------------------------------------------------------
+
+function _Debug_GetDefaultPlayerIndex(player_idx)
+	if player_idx ~= nil then
+		return player_idx
+	end
+
+	if PLAYERS == nil or #PLAYERS == 0 then
+		return 1
+	end
+
+	for i, p in ipairs(PLAYERS) do
+		if p and p.isLocal then
+			return i
+		end
+	end
+
+	if localPlayer and localPlayer.id ~= nil then
+		for i, p in ipairs(PLAYERS) do
+			if p and p.id == localPlayer.id then
+				return i
+			end
+		end
+	end
+
+	for i, p in ipairs(PLAYERS) do
+		if p and p.isHuman then
+			return i
+		end
+	end
+
+	return 1
+end
+
+---------------------------------------------------------------------------------------------------
+-- Player Slot Inspector
+-- Lists each player's runtime index/slot so tests can target correct player.
+-- Console: Debug_ListPlayerSlots()
+---------------------------------------------------------------------------------------------------
+
+function Debug_ListPlayerSlots()
+	local TAG = "[PLAYER_SLOTS]"
+	local default_idx = _Debug_GetDefaultPlayerIndex(nil)
+
+	print("")
+	print(TAG .. " ============================================")
+	print(string.format("%s Local default target index: P%d", TAG, default_idx))
+
+	if PLAYERS == nil or #PLAYERS == 0 then
+		print(TAG .. " PLAYERS is empty")
+		print(TAG .. " ============================================")
+		return
+	end
+
+	for i, player in ipairs(PLAYERS) do
+		local civ = _Debug_GetPlayerCiv(player)
+		local marker = (i == default_idx) and " <== default" or ""
+		local is_local = (player and player.isLocal) and "true" or "false"
+		local is_human = (player and player.isHuman) and "true" or "false"
+		local pid = (player and player.id ~= nil) and tostring(player.id) or "nil"
+		local team = (player and player.team ~= nil) and tostring(player.team) or "nil"
+		local pos = "n/a"
+		if player and player.keep and player.keep.position then
+			local ok, x, y, z = pcall(World_Pos_GetXyz, player.keep.position)
+			if ok then
+				pos = string.format("(%.0f, %.0f, %.0f)", x, y, z)
+			end
+		end
+		print(string.format("%s P%d: id=%s civ=%s team=%s isLocal=%s isHuman=%s keepPos=%s%s",
+			TAG, i, pid, civ, team, is_local, is_human, pos, marker))
+	end
+
+	print(TAG .. " ============================================")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Reward Playback Demo
+-- Grants +1000 kills to a player and advances thresholds to trigger the UI playback queue.
+-- Does NOT spawn reward units — only advances obj_kill_requirement so the center strip
+-- replays each crossed milestone (fill → reveal → advance).
+-- Console: Debug_Demo_RewardPlayback()   or   Debug_Demo_RewardPlayback(1, 1000)
+---------------------------------------------------------------------------------------------------
+
+function Debug_Demo_RewardPlayback(player_idx, kill_grant)
+	player_idx = _Debug_GetDefaultPlayerIndex(player_idx)
+	kill_grant = kill_grant or 1000
+	local TAG = "[REWARD_PLAYBACK_DEMO]"
+
+	print("")
+	print(TAG .. " ============================================")
+
+	-- Validate player
+	local player = PLAYERS[player_idx]
+	if player == nil then
+		print(string.format("%s Invalid player_idx=%d", TAG, player_idx))
+		print(TAG .. " ============================================")
+		return
+	end
+	local civ = _Debug_GetPlayerCiv(player)
+
+	-- Snapshot BEFORE state
+	local kills_before = player.killed_number or 0
+	local req_before = player.obj_kill_requirement or 0
+	local pb = _PlayerUI_RewardPlayback
+	local pb_queue_len = (pb and pb.queue) and #pb.queue or 0
+	local pb_phase = (pb and pb.phase) or "N/A"
+	local pb_active = (pb and pb.active) and pb.active.threshold or "none"
+
+	print(string.format("%s Player: P%d (%s)", TAG, player_idx, civ))
+	print(string.format("%s BEFORE: kills=%d  next_req=%d", TAG, kills_before, req_before))
+	print(string.format("%s Playback: phase=%s  queue=%d  active=%s",
+		TAG, pb_phase, pb_queue_len, tostring(pb_active)))
+
+	-- Grant kills (direct write, no reward spawning)
+	player.killed_number = kills_before + kill_grant
+	print(string.format("%s Granted +%d kills → killed_number=%d", TAG, kill_grant, player.killed_number))
+
+	-- Advance obj_kill_requirement through all crossed thresholds (skip reward grants)
+	local thresholds_crossed = 0
+	local player_civ = Player_GetRaceName(player.id)
+	if _CBA and _CBA.rewards and _CBA.rewards[player_civ] then
+		while player.killed_number >= player.obj_kill_requirement do
+			local nxt = CBA_Rewards_nextRequirement(player)
+			if nxt >= 133337 or nxt <= player.obj_kill_requirement then
+				break  -- no more thresholds in reward tree
+			end
+			thresholds_crossed = thresholds_crossed + 1
+			player.obj_kill_requirement = nxt
+		end
+	end
+
+	-- Snapshot AFTER state
+	print(string.format("%s AFTER:  kills=%d  next_req=%d  thresholds_crossed=%d",
+		TAG, player.killed_number, player.obj_kill_requirement, thresholds_crossed))
+
+	if thresholds_crossed == 0 then
+		print(TAG .. " WARNING: No thresholds crossed — player may already be past all rewards")
+	else
+		print(string.format("%s UI will detect req jump %d → %d on next 1.0s tick",
+			TAG, req_before, player.obj_kill_requirement))
+		print(TAG .. " Watch the center 'Next Rewards' strip for queued playback")
+	end
+
+	print(TAG .. " ============================================")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Reward Playback State Inspector
+-- Prints current state of the reward playback queue without modifying anything.
+-- Console: Debug_Get_RewardPlaybackState()
+---------------------------------------------------------------------------------------------------
+
+function Debug_Get_RewardPlaybackState(player_idx)
+	player_idx = _Debug_GetDefaultPlayerIndex(player_idx)
+	local TAG = "[REWARD_PLAYBACK_STATE]"
+
+	print("")
+	print(TAG .. " ============================================")
+
+	local player = PLAYERS[player_idx]
+	if player == nil then
+		print(string.format("%s Invalid player_idx=%d", TAG, player_idx))
+		print(TAG .. " ============================================")
+		return
+	end
+	local civ = _Debug_GetPlayerCiv(player)
+
+	print(string.format("%s Player: P%d (%s)", TAG, player_idx, civ))
+	print(string.format("%s kills=%s  next_req=%s",
+		TAG, tostring(player.killed_number), tostring(player.obj_kill_requirement)))
+
+	local pb = _PlayerUI_RewardPlayback
+	if pb == nil then
+		print(TAG .. " _PlayerUI_RewardPlayback is nil (playback system not initialized)")
+		print(TAG .. " ============================================")
+		return
+	end
+
+	print(string.format("%s phase=%s  lastObservedReq=%s",
+		TAG, tostring(pb.phase), tostring(pb.lastObservedReq)))
+	print(string.format("%s phaseStart=%.1f  playedCount=%d  queue length=%d  fillDisplay=%.2f",
+		TAG, pb.phaseStart or 0, pb.playedCount or 0, #pb.queue, pb.fillDisplay or 0))
+	print(string.format("%s zeroHoldLogged=%s  fillResumeLogged=%s",
+		TAG, tostring(pb.zeroHoldLogged or false), tostring(pb.fillResumeLogged or false)))
+
+	local animEntry = _PlayerUI_Anim["reward_progress"]
+	if animEntry then
+		print(string.format("%s anim: target=%.1f  display=%.1f  arrived=%s",
+			TAG, animEntry.target or 0, animEntry.display or 0, tostring(animEntry.arrived or false)))
+	else
+		print(TAG .. " anim: reward_progress entry not initialized")
+	end
+
+	local ctx = _PlayerUI_DataContext
+	print(string.format("%s ctx._rewardProgressBase=%s",
+		TAG, tostring(ctx._rewardProgressBase)))
+
+	if pb.active then
+		print(string.format("%s ACTIVE: threshold=%s  title=%s  prevThreshold=%s  interval=%s",
+			TAG, tostring(pb.active.threshold), tostring(pb.active.title),
+			tostring(pb.active.prevThreshold), tostring(pb.active.interval)))
+	else
+		print(TAG .. " ACTIVE: none (idle)")
+	end
+
+	for i, m in ipairs(pb.queue) do
+		print(string.format("%s QUEUE[%d]: threshold=%s  title=%s",
+			TAG, i, tostring(m.threshold), tostring(m.title)))
+	end
+
+	print(TAG .. " ============================================")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Reward Health Summary
+-- Non-destructive integrity check of reward playback state.
+-- Reports: phase validity, queue monotonicity, anim sanity, base consistency.
+-- Console: Debug_Get_RewardHealthSummary()
+---------------------------------------------------------------------------------------------------
+
+function Debug_Get_RewardHealthSummary(player_idx)
+	player_idx = _Debug_GetDefaultPlayerIndex(player_idx)
+	local TAG = "[REWARD_HEALTH]"
+	local issues = 0
+
+	print("")
+	print(TAG .. " ============================================")
+
+	local player = PLAYERS[player_idx]
+	if player == nil then
+		print(string.format("%s FAIL: Invalid player_idx=%d", TAG, player_idx))
+		print(TAG .. " ============================================")
+		return
+	end
+
+	local pb = _PlayerUI_RewardPlayback
+	if pb == nil then
+		print(TAG .. " FAIL: _PlayerUI_RewardPlayback is nil")
+		print(TAG .. " ============================================")
+		return
+	end
+
+	-- Phase validity
+	local validPhases = { idle = true, fill = true, reveal = true, advance = true }
+	if not validPhases[pb.phase] then
+		print(string.format("%s ISSUE: invalid phase='%s'", TAG, tostring(pb.phase)))
+		issues = issues + 1
+	else
+		print(string.format("%s phase=%s  OK", TAG, pb.phase))
+	end
+
+	-- Queue monotonicity: thresholds must be strictly ascending
+	local queueOk = true
+	local prevThresh = 0
+	for i, m in ipairs(pb.queue) do
+		if m.threshold == nil or m.threshold <= prevThresh then
+			print(string.format("%s ISSUE: queue[%d] threshold=%s not > prev=%s",
+				TAG, i, tostring(m.threshold), tostring(prevThresh)))
+			queueOk = false
+			issues = issues + 1
+		end
+		prevThresh = m.threshold or 0
+	end
+	if queueOk then
+		print(string.format("%s queue length=%d  monotonic=OK", TAG, #pb.queue))
+	end
+
+	-- Active milestone sanity
+	if pb.phase ~= "idle" then
+		if pb.active == nil then
+			print(TAG .. " ISSUE: phase=" .. pb.phase .. " but active=nil")
+			issues = issues + 1
+		else
+			if pb.active.interval == nil or pb.active.interval <= 0 then
+				print(TAG .. " ISSUE: active.interval=" .. tostring(pb.active.interval))
+				issues = issues + 1
+			end
+			if pb.fillDisplay ~= nil and pb.active.interval ~= nil then
+				if pb.fillDisplay < 0 or pb.fillDisplay > pb.active.interval + 1 then
+					print(string.format("%s ISSUE: fillDisplay=%.2f out of [0, %s]",
+						TAG, pb.fillDisplay, tostring(pb.active.interval)))
+					issues = issues + 1
+				end
+			end
+		end
+	end
+
+	-- Animation entry sanity
+	local animEntry = _PlayerUI_Anim["reward_progress"]
+	if animEntry then
+		local d = animEntry.display or 0
+		local t = animEntry.target or 0
+		if d < 0 then
+			print(string.format("%s ISSUE: anim display=%.1f < 0", TAG, d))
+			issues = issues + 1
+		end
+		if t < 0 then
+			print(string.format("%s ISSUE: anim target=%.1f < 0", TAG, t))
+			issues = issues + 1
+		end
+		print(string.format("%s anim: display=%.1f  target=%.1f  arrived=%s  OK",
+			TAG, d, t, tostring(animEntry.arrived or false)))
+	else
+		if pb.phase == "idle" then
+			print(TAG .. " anim: not initialized (OK for pre-first-reward)")
+		else
+			print(TAG .. " ISSUE: anim entry missing during active playback")
+			issues = issues + 1
+		end
+	end
+
+	-- Base consistency
+	local ctx = _PlayerUI_DataContext
+	local current = player.killed_number or 0
+	local next_req = player.obj_kill_requirement or 0
+	local player_civ = player.raceName or Player_GetRaceName(Game_GetLocalPlayer())
+	local prev_thresh, resolved_next, rel, interval =
+		PlayerUI_GetRewardProgressBounds(current, player_civ, next_req)
+
+	if ctx._rewardProgressBase ~= nil then
+		if ctx._rewardProgressBase ~= prev_thresh then
+			print(string.format("%s WARN: base=%s != computed prev_threshold=%s (may be mid-transition)",
+				TAG, tostring(ctx._rewardProgressBase), tostring(prev_thresh)))
+		else
+			print(string.format("%s base=%s  consistent with live state", TAG, tostring(ctx._rewardProgressBase)))
+		end
+	else
+		print(TAG .. " base=nil (will rebase on next 1.0s tick)")
+	end
+
+	-- lastObservedReq vs live
+	if pb.lastObservedReq ~= nil and pb.lastObservedReq ~= next_req and pb.phase == "idle" then
+		print(string.format("%s WARN: lastObservedReq=%s != live next_req=%s while idle",
+			TAG, tostring(pb.lastObservedReq), tostring(next_req)))
+	end
+
+	print(string.format("%s Summary: %d issue(s) found", TAG, issues))
+	print(TAG .. " ============================================")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Elimination Settle State Inspector
+-- Dumps fence cycles, defer frames, presentation readiness, and transfer suppression
+-- for all player slots that have any non-default elimination state.
+-- Console: Debug_Get_EliminationSettleState()
+---------------------------------------------------------------------------------------------------
+
+function Debug_Get_EliminationSettleState()
+	local TAG = "[ELIM_SETTLE_STATE]"
+	print("")
+	print(TAG .. " ============================================")
+
+	local mappings = PlayerUIDataContextMappings
+	if mappings == nil or mappings.PlayersByIndex == nil then
+		print(TAG .. " PlayerUIDataContextMappings not initialized")
+		print(TAG .. " ============================================")
+		return
+	end
+
+	local activeCount = 0
+	local now = World_GetGameTime()
+	for i = 1, #mappings.PlayersByIndex do
+		local data = mappings.PlayersByIndex[i]
+		if data ~= nil then
+			local fence = data._elimCompletionFenceCycles or 0
+			local defer = (data._elimSteadyDeferFrame == true)
+			local ready = (data._elimPresentationReady == true)
+			local revealed = (data._elimPresentationRevealed == true)
+			local suppressed = (data._elimTransferSuppressed == true)
+			local isElim = (data.IsEliminated == true)
+			local reason = data.eliminationReason or "alive"
+			local suppressedFor = (data._elimTransferSuppressedSince ~= nil)
+				and math.max(0, now - data._elimTransferSuppressedSince) or 0
+			local animActive = (_PlayerUI_IsEliminationAnimationActive ~= nil)
+				and _PlayerUI_IsEliminationAnimationActive(i) or false
+
+			if isElim or fence > 0 or defer or suppressed then
+				activeCount = activeCount + 1
+				print(string.format(
+					"%s [%d] elim=%s  reason=%s  fence=%d  defer=%s  ready=%s  revealed=%s  suppressed=%s(%.1fs)  animActive=%s",
+					TAG, i, tostring(isElim), reason, fence,
+					tostring(defer), tostring(ready), tostring(revealed),
+					tostring(suppressed), suppressedFor, tostring(animActive)))
+				-- Flag potential issues
+				if fence > 5 then
+					print(string.format("%s   WARN: fence=%d unusually high (>5 cycles)", TAG, fence))
+				end
+				if isElim and not ready and fence == 0 and not defer and not animActive then
+					print(string.format("%s   WARN: eliminated but not ready, no fence/defer/anim — possible stuck state", TAG))
+				end
+				if suppressed and not isElim then
+					print(string.format("%s   WARN: transferSuppressed=true but not eliminated", TAG))
+				end
+			end
+		end
+	end
+
+	-- Ranking lock state
+	local lockActive = (_PlayerUI_RankTransitionLock == true)
+	local lockElapsed = "n/a"
+	if lockActive and _PlayerUI_RankTransitionLockTime then
+		lockElapsed = string.format("%.1fs", World_GetGameTime() - _PlayerUI_RankTransitionLockTime)
+	end
+	print(string.format("%s transitionLock=%s  elapsed=%s  pending=%s",
+		TAG, tostring(lockActive), lockElapsed, tostring(_PlayerUI_RankPendingReorder)))
+
+	-- Leaver transfer state
+	local transferActive = (_leaver_transfer_state ~= nil)
+	if transferActive then
+		local st = _leaver_transfer_state
+		local phase = (st and st.phase) or "?"
+		local started = (st and st.start_time) or nil
+		local age = (started ~= nil) and math.max(0, now - started) or 0
+		print(string.format("%s leaverTransferActive=true  phase=%s  age=%.1fs", TAG, tostring(phase), age))
+	else
+		print(string.format("%s leaverTransferActive=false", TAG))
+	end
+
+	if activeCount == 0 then
+		print(TAG .. " No active elimination/settle state (all slots clean)")
+	else
+		print(string.format("%s %d slot(s) with active elimination state", TAG, activeCount))
+	end
+
+	print(TAG .. " ============================================")
+end
+
+local function _Debug_PlayerUI_ReadableName(slot)
+	if slot == nil then return "?" end
+	if type(slot.name) == "string" then
+		return slot.name
+	end
+	if type(slot.playerName) == "string" then
+		return slot.playerName
+	end
+	if type(slot.playerName) == "table" and slot.playerName.LocString ~= nil then
+		return tostring(slot.playerName.LocString)
+	end
+	if type(slot.name) == "table" and slot.name.LocString ~= nil then
+		return tostring(slot.name.LocString)
+	end
+	return "?"
+end
+
+---------------------------------------------------------------------------------------------------
+-- Ranking Animation Key Audit
+-- Checks for stale rank animation keys beyond current team size.
+-- Console: Debug_Get_RankingAnimKeyAudit()
+---------------------------------------------------------------------------------------------------
+
+function Debug_Get_RankingAnimKeyAudit()
+	local TAG = "[RANKING_KEY_AUDIT]"
+	print("")
+	print(TAG .. " ============================================")
+
+	local totalStale = 0
+	for _, teamKey in ipairs({"teamLeft", "teamRight"}) do
+		local teamSlots = PlayerUiDataContext[teamKey] or {}
+		local teamSize = #teamSlots
+		local staleForTeam = 0
+		for idx = teamSize + 1, 8 do
+			local tyKey = "rank_translateY_" .. teamKey .. "_" .. tostring(idx)
+			local scKey = "rank_scale_" .. teamKey .. "_" .. tostring(idx)
+			local hlKey = "rank_highlight_" .. teamKey .. "_" .. tostring(idx)
+			local hasTy = (_PlayerUI_AnimPositions and _PlayerUI_AnimPositions[tyKey] ~= nil)
+			local hasSc = (_PlayerUI_AnimDecay and _PlayerUI_AnimDecay[scKey] ~= nil)
+			local hasHl = (_PlayerUI_AnimDecay and _PlayerUI_AnimDecay[hlKey] ~= nil)
+			if hasTy or hasSc or hasHl then
+				staleForTeam = staleForTeam + 1
+				print(string.format("%s STALE %s idx=%d ty=%s sc=%s hl=%s",
+					TAG, teamKey, idx, tostring(hasTy), tostring(hasSc), tostring(hasHl)))
+			end
+		end
+
+		totalStale = totalStale + staleForTeam
+		if staleForTeam == 0 then
+			print(string.format("%s %s size=%d staleKeys=0 (OK)", TAG, teamKey, teamSize))
+		else
+			print(string.format("%s %s size=%d staleKeys=%d", TAG, teamKey, teamSize, staleForTeam))
+		end
+	end
+
+	print(string.format("%s Summary: totalStale=%d", TAG, totalStale))
+	print(TAG .. " ============================================")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Ranking + Elimination Combined Inspector
+-- Lightweight ranking state dump that includes elimination settle context.
+-- Extends PlayerUI_Ranking_DebugPrintState() with settle-window awareness.
+-- Console: Debug_Get_RankingOverview()
+---------------------------------------------------------------------------------------------------
+
+function Debug_Get_RankingOverview()
+	local TAG = "[RANKING_OVERVIEW]"
+	print("")
+	print(TAG .. " ============================================")
+
+	-- Ranking state summary
+	if _PlayerUI_RankState == nil then
+		print(TAG .. " RankState not initialized")
+	else
+		for _, teamKey in ipairs({"teamLeft", "teamRight"}) do
+			local state = _PlayerUI_RankState[teamKey]
+			if state ~= nil and #state > 0 then
+				print(TAG .. " " .. teamKey .. " (" .. #state .. " players)")
+				local now = World_GetGameTime()
+				for i = 1, #state do
+					local e = state[i]
+					local name = _Debug_PlayerUI_ReadableName(e.slotRef)
+					local isElim = (e.slotRef and e.slotRef.IsEliminated == true)
+					local cooldownRem = math.max(0, _RANKING_STABILITY_COOLDOWN - (now - e.lastRankChangeTime))
+					print(string.format(
+						"%s   [%d] %s  score=%d  stable=%d  visual=%d→%d  delta=%+d  cd=%.1f  elim=%s  contested=%s  top=%s",
+						TAG, i, name, e.score, e.stableScore,
+						e.visualIndex, e.targetIndex, e.rankDelta or 0,
+						cooldownRem, tostring(isElim), tostring(e.isContested), tostring(e.isTopPlayer)))
+				end
+			end
+		end
+	end
+
+	-- Lock + cooldown
+	local now = World_GetGameTime()
+	local lockActive = (_PlayerUI_RankTransitionLock == true)
+	local lockElapsed = lockActive and string.format("%.1fs", now - (_PlayerUI_RankTransitionLockTime or 0)) or "n/a"
+	local reorderCD = math.max(0, _RANKING_GLOBAL_REORDER_COOLDOWN - (now - (_PlayerUI_RankLastGlobalReorder or 0)))
+	print(string.format("%s lock=%s (elapsed=%s)  pending=%s  reorderCD=%.1fs",
+		TAG, tostring(lockActive), lockElapsed,
+		tostring(_PlayerUI_RankPendingReorder), reorderCD))
+
+	-- Settle window summary
+	local hasSettle, settleIdx, settleFence, settleDefer = _Ranking_HasActiveEliminationSettleWindow()
+	if hasSettle then
+		print(string.format("%s SETTLE ACTIVE: idx=%d  fence=%d  defer=%s",
+			TAG, settleIdx or 0, settleFence, tostring(settleDefer)))
+	else
+		print(TAG .. " settle=none")
+	end
+
+	-- Lock timeout warning
+	if lockActive and _PlayerUI_RankTransitionLockTime then
+		local elapsed = now - _PlayerUI_RankTransitionLockTime
+		if elapsed > _RANKING_TRANSITION_TIMEOUT then
+			print(string.format("%s WARN: lock held %.1fs > timeout %.1fs — may force-snap next cycle",
+				TAG, elapsed, _RANKING_TRANSITION_TIMEOUT))
+		end
+	end
+
+	print(TAG .. " ============================================")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase B One-Command Test Suite
+-- Runs a staged sequence: baseline checks -> reward demo -> mid-run checks -> final checks.
+-- Console: Debug_Run_PlayerUI_PhaseBSuite() or Debug_Run_PlayerUI_PhaseBSuite(1, 300)
+---------------------------------------------------------------------------------------------------
+
+_Debug_PlayerUI_PhaseBSuiteState = nil
+
+function _Debug_Run_PlayerUI_PhaseBSuite_Step()
+	local st = _Debug_PlayerUI_PhaseBSuiteState
+	if st == nil then return end
+
+	local TAG = "[PLAYERUI_PHASEB_SUITE]"
+	if st.step == 1 then
+		print(TAG .. " step=1 baseline checks")
+		Debug_Get_RankingAnimKeyAudit()
+		Debug_Get_EliminationSettleState()
+		Debug_Get_RankingOverview()
+		st.step = 2
+		Rule_AddOneShot(_Debug_Run_PlayerUI_PhaseBSuite_Step, 0.1)
+		return
+	end
+
+	if st.step == 2 then
+		print(TAG .. " step=2 trigger reward demo")
+		Debug_Demo_RewardPlayback(st.player_idx, st.kill_grant)
+		st.step = 3
+		Rule_AddOneShot(_Debug_Run_PlayerUI_PhaseBSuite_Step, 2.0)
+		return
+	end
+
+	if st.step == 3 then
+		print(TAG .. " step=3 mid-run checks")
+		Debug_Get_RewardPlaybackState(st.player_idx)
+		Debug_Get_RewardHealthSummary(st.player_idx)
+		Debug_Get_EliminationSettleState()
+		st.step = 4
+		Rule_AddOneShot(_Debug_Run_PlayerUI_PhaseBSuite_Step, 12.0)
+		return
+	end
+
+	if st.step == 4 then
+		print(TAG .. " step=4 final checks")
+		Debug_PlayerUI_RegressionCheck(st.player_idx)
+		Debug_Get_RankingAnimKeyAudit()
+		print(TAG .. " complete")
+		_Debug_PlayerUI_PhaseBSuiteState = nil
+		return
+	end
+end
+
+function Debug_Run_PlayerUI_PhaseBSuite(player_idx, kill_grant)
+	player_idx = _Debug_GetDefaultPlayerIndex(player_idx)
+	kill_grant = kill_grant or 300
+
+	if _Debug_PlayerUI_PhaseBSuiteState ~= nil then
+		print("[PLAYERUI_PHASEB_SUITE] already running")
+		return
+	end
+
+	_Debug_PlayerUI_PhaseBSuiteState = {
+		step = 1,
+		player_idx = player_idx,
+		kill_grant = kill_grant,
+		started = World_GetGameTime(),
+	}
+
+	print("")
+	print("[PLAYERUI_PHASEB_SUITE] start player_idx=" .. tostring(player_idx)
+		.. " kill_grant=" .. tostring(kill_grant)
+		.. " (baseline -> demo -> mid -> final)")
+	_Debug_Run_PlayerUI_PhaseBSuite_Step()
+end
+
+---------------------------------------------------------------------------------------------------
+-- PlayerUI Regression Check
+-- Runs all diagnostics in sequence and reports combined pass/fail.
+-- Console: Debug_PlayerUI_RegressionCheck()
+---------------------------------------------------------------------------------------------------
+
+function Debug_PlayerUI_RegressionCheck(player_idx)
+	player_idx = _Debug_GetDefaultPlayerIndex(player_idx)
+	local TAG = "[PLAYERUI_REGRESSION]"
+	print("")
+	print(TAG .. " ========== REGRESSION CHECK START ==========")
+
+	-- 1. Reward health
+	print(TAG .. " --- Reward Health ---")
+	Debug_Get_RewardHealthSummary(player_idx)
+
+	-- 2. Reward playback state
+	print(TAG .. " --- Reward Playback State ---")
+	Debug_Get_RewardPlaybackState(player_idx)
+
+	-- 3. Ranking overview
+	print(TAG .. " --- Ranking Overview ---")
+	Debug_Get_RankingOverview()
+
+	-- 4. Elimination settle state
+	print(TAG .. " --- Elimination Settle ---")
+	Debug_Get_EliminationSettleState()
+
+	print(TAG .. " ========== REGRESSION CHECK END ==========")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Namespace Registration
+---------------------------------------------------------------------------------------------------
+if debug then
+        debug.helpers.baseline   = Debug_SetBaseline
+        debug.helpers.spawn      = Debug_Spawn
+        debug.helpers.precache   = Debug_PrecacheStatus
+        debug.helpers.pop        = Debug_GetPopCap
+        debug.helpers.kills      = Debug_GetKillScore
+        debug.helpers.smoke      = Debug_RunSmokeTests
+        debug.helpers.keepdiag   = Debug_KeepDiagnostic
+        debug.helpers.autoage    = Debug_GetAutoAgeStatus
+        debug.helpers.popaudit   = Debug_PopAudit
+        debug.helpers.focus      = Debug_FocusPlayer
+        debug.helpers.slowmo     = Debug_SlowMotion
+	debug.helpers.playerslots = Debug_ListPlayerSlots
+        debug.helpers.reward_demo = Debug_Demo_RewardPlayback
+        debug.helpers.reward_state = Debug_Get_RewardPlaybackState
+        debug.helpers.reward_health = Debug_Get_RewardHealthSummary
+        debug.helpers.elim_settle = Debug_Get_EliminationSettleState
+        debug.helpers.ranking_overview = Debug_Get_RankingOverview
+        debug.helpers.regression = Debug_PlayerUI_RegressionCheck
+		debug.helpers.ranking_keys = Debug_Get_RankingAnimKeyAudit
+		debug.helpers.phaseb = Debug_Run_PlayerUI_PhaseBSuite
+	debug._register("helpers", Debug_RunSmokeTests, "Alias → smoke: 7-test smoke (players, keeps, limits)", 1)
+end

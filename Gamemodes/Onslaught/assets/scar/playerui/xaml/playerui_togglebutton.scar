@@ -1,0 +1,51 @@
+-----------------------------------------------------------------------
+-- PlayerUI: Toggle Button XAML
+-- Simple button in bottom-right to show/hide the PlayerUI HUD.
+-- Uses UI_CreateCommand to call PlayerUI_Toggle().
+-----------------------------------------------------------------------
+
+_PlayerUI_ToggleButtonXaml =
+[[<ToggleButton
+		xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+		xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+
+		HorizontalAlignment="Right"
+		VerticalAlignment="Bottom"
+		Margin="0,0,325,0"
+
+		Height="40"
+		Width="56"
+
+		Style="{StaticResource SecondaryRaisedContentToggleButton}"
+
+		Command="{Binding [command]}">
+	<TextBlock
+			TextAlignment="Center"
+			Style="{StaticResource HUDTitleAltTextBlockStyle}"
+			Text="HUD" />
+</ToggleButton>
+]]
+
+_PlayerUI_SwapIncomeButtonXaml =
+[[<ToggleButton
+		xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+		xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+		IsEnabled="False"
+		Visibility="Collapsed"
+
+		HorizontalAlignment="Right"
+		VerticalAlignment="Bottom"
+		Margin="0,0,325,36"
+
+		Height="36"
+		Width="36"
+
+		Style="{StaticResource SecondaryRaisedContentToggleButton}"
+
+		Command="{Binding [command]}">
+	<TextBlock
+			TextAlignment="Center"
+			Style="{StaticResource HUDTitleAltTextBlockStyle}"
+			Text="$/m" />
+</ToggleButton>
+]]

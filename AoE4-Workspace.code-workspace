@@ -1,0 +1,49 @@
+{
+	"folders": [
+		{
+			"path": "Gamemodes"
+		},
+		{
+			"path": "Scenarios"
+		},
+		{
+			"path": "docs"
+		},
+		{
+			"path": "game_data"
+		},
+		{
+			"path": "research"
+		},
+		{
+			"path": ".github/scripts"
+		},
+		{
+			"path": ".github"
+		},
+		{
+			"path": ".skills"
+		}
+	],
+	"settings": {
+		"files.associations": {
+			"*.scar": "lua"
+		},
+		"editor.tabSize": 4,
+		"editor.insertSpaces": false,
+		"search.exclude": {
+			"**/node_modules": true,
+			"Temporary/**": true
+		},
+		"files.exclude": {
+			"**/.git": true,
+			"**/.DS_Store": true
+		},
+		"editor.wordWrap": "on"
+	},
+	"extensions": {
+		"recommendations": [
+			"sumneko.lua"
+		]
+	}
+}

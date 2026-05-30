@@ -1,0 +1,355 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — Session Stress Runners
+--
+-- Two single-command stress runners that exercise the full UI surface and the
+-- full gamemode surface respectively, then emit a machine-parseable session
+-- summary that can be ingested by a fresh agent session in a later sitting.
+--
+-- Console:
+--   Debug_StressUI()        -- runs every UI-related suite end-to-end
+--   Debug_StressGamemode()  -- runs every gamemode/system suite end-to-end
+--
+-- Both commands:
+--   1. Tag the run with [STRESS_SESSION_BEGIN session=<UI|GAMEMODE>] and a
+--      single-line manifest of which sub-suites will execute.
+--   2. Use the existing _Debug_SubStart/SubEnqueue/SubLaunch orchestrator so
+--      each sub-suite runs to its own [CBA_DEBUG_END] marker before the next
+--      one starts.  Crashes inside any one suite are pcall-isolated.
+--   3. Emit a final [STRESS_SESSION_END session=<UI|GAMEMODE>] block with
+--      total/passed/failed counts and a per-suite table.
+--   4. Append the session block to scarlog:cba_debug_session.txt so it survives
+--      across game restarts and can be tailed by a future agent session.
+--
+-- Cross-session handoff:
+--   Future sessions can locate the most recent run with:
+--     Get-ChildItem "$env:USERPROFILE\Documents\My Games\Age of Empires IV\LogFiles" `
+--       -Recurse -Filter scarlog*.txt |
+--     Select-String -Pattern "STRESS_SESSION_(BEGIN|END)|STRESS_SUITE_RESULT"
+--   The persistent file scarlog:cba_debug_session.txt also accumulates results
+--   across all runs.
+--
+-- Branch: onslaught-v3.3
+-- Depends: cba_debug_core.scar (orchestrator), cba_debug_destructive.scar
+--          (ClassifyTest), cba_debug_playerui.scar, cba_debug_playerui_anim.scar,
+--          cba_debug_comprehensive_stress.scar, cba_debug_advanced_stress.scar,
+--          cba_debug_ai_stress.scar, cba_debug_ai_player.scar,
+--          cba_debug_ai_behavior.scar, cba_debug_limits_ui.scar
+--
+-- IMPORTANT: SCAR's Rule_AddOneShot REJECTS anonymous functions.  All deferred
+-- callbacks below are NAMED globals invoked through the existing orchestrator.
+---------------------------------------------------------------------------------------------------
+
+_DEBUG_SESSION_STATE = {
+	tag = nil,         -- "UI" or "GAMEMODE"
+	start_time = 0,
+	start_results = 0, -- #_cba_debug.test_results when session began
+	planned_suites = nil,
+}
+
+local _SESSION_LOG_FILE = "scarlog:cba_debug_session.txt"
+
+---------------------------------------------------------------------------------------------------
+-- Helpers
+---------------------------------------------------------------------------------------------------
+
+local function _StressSession_GameTime()
+	local ok, gt = pcall(World_GetGameTime)
+	return ok and gt or 0
+end
+
+local function _StressSession_FnExists(name)
+	return type(_G[name]) == "function"
+end
+
+local function _StressSession_Banner(tag, suite_names)
+	local manifest = table.concat(suite_names, ",")
+	print("")
+	print("================================================================")
+	print(string.format("  CBA DEBUG SESSION STRESS — %s", tag))
+	print(string.format("  Suites planned (%d): %s", #suite_names, manifest))
+	print("  Each sub-suite emits [CBA_DEBUG_END]; final summary at end.")
+	print("================================================================")
+
+	local begin_marker = string.format("[STRESS_SESSION_BEGIN] session=%s suites=%d manifest=%s",
+		tag, #suite_names, manifest)
+	print(begin_marker)
+	pcall(Misc_AppendToFile, _SESSION_LOG_FILE, begin_marker .. "\n")
+end
+
+local function _StressSession_FinalReport(tag)
+	local elapsed = _StressSession_GameTime() - (_DEBUG_SESSION_STATE.start_time or 0)
+
+	local sub = _cba_debug._sub
+	local suite_results = (sub ~= nil) and sub.results or {}
+
+	local total_passed = 0
+	local total_tests = 0
+	for _, r in ipairs(suite_results) do
+		total_passed = total_passed + (r.passed or 0)
+		total_tests = total_tests + (r.total or 0)
+	end
+
+	local status = (total_tests > 0 and total_passed == total_tests) and "PASS" or "FAIL"
+
+	print("")
+	print("================================================================")
+	print(string.format("  STRESS SESSION %s COMPLETE", tag))
+	print(string.format("  Suites: %d  Aggregate: %d/%d  Elapsed: %.1fs  Status: %s",
+		#suite_results, total_passed, total_tests, elapsed, status))
+	for _, r in ipairs(suite_results) do
+		local st = (r.passed == r.total) and "PASS" or "FAIL"
+		local line = string.format("    [%s] %s: %d/%d", st, r.suite, r.passed, r.total)
+		print(line)
+		local persist = string.format("[STRESS_SUITE_RESULT] session=%s suite=%s passed=%d total=%d status=%s",
+			tag, r.suite, r.passed, r.total, st)
+		pcall(Misc_AppendToFile, _SESSION_LOG_FILE, persist .. "\n")
+	end
+	print("================================================================")
+
+	local end_marker = string.format(
+		"[STRESS_SESSION_END] session=%s suites=%d passed=%d total=%d elapsed=%.1fs status=%s",
+		tag, #suite_results, total_passed, total_tests, elapsed, status)
+	print(end_marker)
+	pcall(Misc_AppendToFile, _SESSION_LOG_FILE, end_marker .. "\n")
+
+	-- In-game cue
+	pcall(UI_CreateEventCue,
+		string.format("[DEBUG] Stress %s Done", tag),
+		string.format("%d/%d passed in %.0fs", total_passed, total_tests, elapsed),
+		"high_priority", "", "sfx_ui_event_queue_high_priority_play",
+		8.0)
+
+	_DEBUG_SESSION_STATE.tag = nil
+end
+
+-- Named callback installed as the LAST sub-suite step.  It emits the session
+-- summary then immediately fires its own EndMarker so the orchestrator
+-- terminates cleanly.
+function _Debug_StressSession_FinalStep_UI()
+	_StressSession_FinalReport("UI")
+	_Debug_EndMarker("StressSessionUI_Final", 1, 1, 0)
+end
+
+function _Debug_StressSession_FinalStep_Gamemode()
+	_StressSession_FinalReport("GAMEMODE")
+	_Debug_EndMarker("StressSessionGamemode_Final", 1, 1, 0)
+end
+
+function _Debug_StressSession_FinalStep_GamemodeAutomated()
+	_StressSession_FinalReport("GAMEMODE_AUTO")
+	_Debug_EndMarker("StressSessionGamemodeAuto_Final", 1, 1, 0)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Debug_StressUI
+-- Single command that runs every UI-related stress and validation suite.
+---------------------------------------------------------------------------------------------------
+
+function Debug_StressUI()
+	if _cba_debug._sub ~= nil and _cba_debug._sub.running then
+		print("[STRESS_SESSION] FAIL: another sub-orchestrator already running. Wait or call Debug_StressAbort().")
+		return
+	end
+
+	_cba_debug.enabled = true
+	_DEBUG_SESSION_STATE.tag = "UI"
+	_DEBUG_SESSION_STATE.start_time = _StressSession_GameTime()
+	_DEBUG_SESSION_STATE.start_results = #_cba_debug.test_results
+
+	-- Plan: ordered list of {suite_marker, fn_name}.  We resolve at runtime so
+	-- a missing module just gets skipped with a warning instead of crashing.
+	local plan = {
+		{"PlayerUI",        "Debug_PlayerUI"},        -- 4-phase init/data/UI/ranking
+		{"PlayerUI_Anim",   "Debug_PlayerUI_Anim"},   -- 7-phase animation diagnostics
+		{"LimitsUIStress",  "Debug_LimitsUIStress"},  -- construction-menu UI stress
+		{"ClassifyTest",    "Debug_ClassifyTest_All"},-- elim/disc/surr UI mirror
+	}
+
+	local suite_names = {}
+	for _, p in ipairs(plan) do table.insert(suite_names, p[1]) end
+	_StressSession_Banner("UI", suite_names)
+
+	_Debug_SubStart("StressSessionUI")
+
+	for _, entry in ipairs(plan) do
+		local marker, fn_name = entry[1], entry[2]
+		if _StressSession_FnExists(fn_name) then
+			_Debug_SubEnqueue(_G[fn_name], marker)
+		else
+			print(string.format("[STRESS_SESSION] WARN: %s missing — skipped", fn_name))
+		end
+	end
+
+	-- Final session summary as the last sub-step
+	_Debug_SubEnqueue(_Debug_StressSession_FinalStep_UI, "StressSessionUI_Final")
+
+	_Debug_SubLaunch()
+end
+
+---------------------------------------------------------------------------------------------------
+-- Debug_StressGamemode
+-- Single command that runs every gamemode/system stress and validation suite.
+---------------------------------------------------------------------------------------------------
+
+function Debug_StressGamemode()
+	if _cba_debug._sub ~= nil and _cba_debug._sub.running then
+		print("[STRESS_SESSION] FAIL: another sub-orchestrator already running. Wait or call Debug_StressAbort().")
+		return
+	end
+
+	_cba_debug.enabled = true
+	_DEBUG_SESSION_STATE.tag = "GAMEMODE"
+	_DEBUG_SESSION_STATE.start_time = _StressSession_GameTime()
+	_DEBUG_SESSION_STATE.start_results = #_cba_debug.test_results
+
+	-- Order matters: cheap validations first, expensive/destructive last.
+	-- Comprehensive + Advanced cover overlapping ground intentionally — any
+	-- regression that survives one will surface in the other.
+	-- NOTE: Debug_RunSmokeTests itself does NOT emit [CBA_DEBUG_END]; the
+	-- _Debug_MasterRunSmoke wrapper in cba_debug_core.scar does. Enqueueing the
+	-- raw function would hang the sub-orchestrator on SmokeTests forever.
+	local plan = {
+		{"SmokeTests",          "_Debug_MasterRunSmoke"},    -- fast boot + invariant check (emits EndMarker)
+		{"Validation",          "Debug_FullValidation"},     -- every system validator
+		{"StressTest",          "Debug_StressTest"},         -- legacy stress
+		{"Coverage",            "Debug_CoverageTest"},       -- API coverage matrix
+		{"EventProbes",         "Debug_EventProbes"},        -- event pipeline probes
+		{"SiegeTest",           "Debug_SiegeTest"},          -- unified siege suite
+		{"AdvStressAll",        "Debug_AdvancedStressAll"},  -- 6 destructive scenarios
+		{"ComprehensiveStress", "Debug_ComprehensiveStress"},-- 12-category stress
+		{"AIPlayerTest",        "Debug_AIPlayerTest"},       -- 10-phase AI player
+		{"AIStressTest",        "Debug_AIStressTest"},       -- 10-category AI stress
+	}
+
+	local suite_names = {}
+	for _, p in ipairs(plan) do table.insert(suite_names, p[1]) end
+	_StressSession_Banner("GAMEMODE", suite_names)
+
+	_Debug_SubStart("StressSessionGamemode")
+
+	for _, entry in ipairs(plan) do
+		local marker, fn_name = entry[1], entry[2]
+		if _StressSession_FnExists(fn_name) then
+			_Debug_SubEnqueue(_G[fn_name], marker)
+		else
+			print(string.format("[STRESS_SESSION] WARN: %s missing — skipped", fn_name))
+		end
+	end
+
+	-- Final session summary as the last sub-step
+	_Debug_SubEnqueue(_Debug_StressSession_FinalStep_Gamemode, "StressSessionGamemode_Final")
+
+	_Debug_SubLaunch()
+end
+
+---------------------------------------------------------------------------------------------------
+-- Debug_StressGamemode_Automated
+-- Prompt-safe DEV-menu variant that excludes the interactive comprehensive run.
+---------------------------------------------------------------------------------------------------
+
+function Debug_StressGamemode_Automated()
+	if _cba_debug._sub ~= nil and _cba_debug._sub.running then
+		print("[STRESS_SESSION] FAIL: another sub-orchestrator already running. Wait or call Debug_StressAbort().")
+		return
+	end
+
+	_cba_debug.enabled = true
+	_DEBUG_SESSION_STATE.tag = "GAMEMODE_AUTO"
+	_DEBUG_SESSION_STATE.start_time = _StressSession_GameTime()
+	_DEBUG_SESSION_STATE.start_results = #_cba_debug.test_results
+
+	local plan = {
+		{"SmokeTests",   "_Debug_MasterRunSmoke"},
+		{"Validation",   "Debug_FullValidation"},
+		{"StressTest",   "Debug_StressTest"},
+		{"Coverage",     "Debug_CoverageTest"},
+		{"EventProbes",  "Debug_EventProbes"},
+		{"SiegeTest",    "Debug_SiegeTest"},
+		{"AdvStressAll", "Debug_AdvancedStressAll"},
+		{"AIPlayerTest", "Debug_AIPlayerTest"},
+		{"AIStressTest", "Debug_AIStressTest"},
+	}
+
+	local suite_names = {}
+	for _, p in ipairs(plan) do table.insert(suite_names, p[1]) end
+	_StressSession_Banner("GAMEMODE_AUTO", suite_names)
+
+	_Debug_SubStart("StressSessionGamemodeAuto")
+
+	for _, entry in ipairs(plan) do
+		local marker, fn_name = entry[1], entry[2]
+		if _StressSession_FnExists(fn_name) then
+			_Debug_SubEnqueue(_G[fn_name], marker)
+		else
+			print(string.format("[STRESS_SESSION] WARN: %s missing — skipped", fn_name))
+		end
+	end
+
+	_Debug_SubEnqueue(_Debug_StressSession_FinalStep_GamemodeAutomated, "StressSessionGamemodeAuto_Final")
+
+	_Debug_SubLaunch()
+end
+
+---------------------------------------------------------------------------------------------------
+-- Debug_StressAbort
+-- Force-clears the sub-orchestrator if a run got stuck.  Does NOT cancel any
+-- in-flight rules registered by individual suites; it only releases the queue
+-- so a fresh Debug_StressUI/Gamemode can start.
+---------------------------------------------------------------------------------------------------
+
+function Debug_StressAbort()
+	if _cba_debug._sub == nil then
+		print("[STRESS_SESSION] no sub-orchestrator active")
+		return
+	end
+	local name = _cba_debug._sub.name
+	_cba_debug._sub.running = false
+	_cba_debug._sub = nil
+	_DEBUG_SESSION_STATE.tag = nil
+	print(string.format("[STRESS_SESSION] aborted sub-orchestrator '%s'", tostring(name)))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Debug_StressStatus
+-- Quick status check.  Useful while a run is in flight.
+---------------------------------------------------------------------------------------------------
+
+function Debug_StressStatus()
+	local sub = _cba_debug._sub
+	if sub == nil or not sub.running then
+		print("[STRESS_SESSION] no run in progress")
+		if _DEBUG_SESSION_STATE.tag ~= nil then
+			print(string.format("  (last tag: %s)", _DEBUG_SESSION_STATE.tag))
+		end
+		return
+	end
+	local elapsed = _StressSession_GameTime() - (_DEBUG_SESSION_STATE.start_time or 0)
+	print(string.format("[STRESS_SESSION] running='%s' tag=%s queue=%d completed=%d elapsed=%.1fs awaiting=%s",
+		tostring(sub.name),
+		tostring(_DEBUG_SESSION_STATE.tag),
+		#sub.queue,
+		#sub.results,
+		elapsed,
+		tostring(sub.awaiting)))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Hierarchical namespace bindings
+---------------------------------------------------------------------------------------------------
+
+if debug then
+	debug.stressUI       = Debug_StressUI
+	debug.stressGamemode = Debug_StressGamemode
+	debug.stressGamemodeAutomated = Debug_StressGamemode_Automated
+	debug.stressStatus   = Debug_StressStatus
+	debug.stressAbort    = Debug_StressAbort
+
+	if debug._register then
+		debug._register("stressUI",       Debug_StressUI,
+			"Single-command UI stress: PlayerUI + Anim + LimitsUI + ClassifyTest", 0)
+		debug._register("stressGamemode", Debug_StressGamemode,
+			"Single-command gamemode stress: 10 system suites end-to-end", 0)
+		debug._register("stressGamemodeAutomated", Debug_StressGamemode_Automated,
+			"Prompt-safe gamemode stress: core system suites without interactive comprehensive", 0)
+	end
+end

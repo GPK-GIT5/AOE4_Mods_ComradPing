@@ -1,0 +1,376 @@
+--[[
+	Filename: coop_2_arabia_difficulty.scar
+	Description: Difficulty tiers and configuration for Arabia co-op scenario
+	Last Modified: 2026-02-28
+	
+	HOW IT WORKS
+	  1. The game reads the AI difficulty selected in lobby.
+	  2. GetAIDifficulty() maps lobby name to tier number.
+	  3. Difficulty_Init() picks the matching tier and stores it in DC.
+	  4. All game logic reads from DC instead of raw numbers.
+	
+	HOW TO EDIT
+	  Find the tier you want to change (Easy, Intermediate, …)
+	  and adjust the values inside it. Each field has a comment
+	  explaining what it does. Save the file and test in-game.
+	
+	TIER REFERENCE
+	  0 = Easy          Beginner-friendly, extra resources, no restrictions
+	  1 = Intermediate  Baseline difficulty (≈ TIER_DEFAULTS)
+	  2 = Hard          Standard challenge, conversion locked
+	  3 = Hardest       Extra waves, fewer resources, hard camps
+]]
+
+-- ============================================================
+-- TIER_DEFAULTS — INTERMEDIATE BASELINE
+--
+-- This block defines INTERMEDIATE difficulty (Tier 1).
+-- All tiers override only the fields that differ from this baseline.
+-- Every field used in Difficulty_Config is defined here.
+-- ============================================================
+TIER_DEFAULTS = {
+
+	-- ===== PLAYER UPGRADES =====
+	player_upgrades_bonus			= false,	-- Free melee damage I + ranged armor I (Easy only)
+	player_upgrades_extra			= true,		-- Free ranged damage I + melee armor I
+
+	-- ===== PLAYER RESTRICTIONS =====
+	restrict_keep					= true,		-- Lock keep building
+	restrict_keep_landmarks			= true,		-- Lock keep-related landmarks (data-driven table)
+	restrict_siege					= true,		-- Lock individual siege units (mangonel, ribauldequin, etc.)
+	restrict_engineers				= false,		-- Reserved flag (engineers always available in Arabia)
+	restrict_workshop				= true,		-- Lock siege workshop building (always true — captured, not built)
+	restrict_age4					= false,	-- Lock Age 4 + landmarks (Hard+ only)
+	disable_conversion				= false,	-- Block monk conversion ability
+
+	-- ===== PHASE 2 PROGRESSION =====
+	phase2_siege_profile			= "siege_available",	-- Profile applied on siege workshop capture
+	phase2_workshop_unlock			= false,				-- Whether to also unlock workshop building
+
+	-- ===== ENEMY CAMP STRENGTH =====
+	camp_strength					= "easy",	-- "easy" | "hard" starting enemy camp composition
+	city_guard_strength				= "easy",	-- "easy" | "hard" city guards after checkpoint
+
+	-- ===== REINFORCEMENTS =====
+	trader_reinforcements			= false,	-- Enable enemy QRF trader reinforcement
+	reinforcement_pre_capture		= true,		-- Allow player reinforcement before village capture
+	siege_reinforcements			= true,		-- Spawn siege for players after checkpoint
+	reinforcement_squad_count		= 2,		-- Total reinforcement events per player (Easy=3, Int=2, Hard/Hardest=1)
+
+	-- ===== TIMER =====
+	seize_city_timer				= 4800,		-- Countdown timer (seconds): 80 min
+
+	-- ===== RESOURCES (after mine capture) =====
+	starting_food					= 2500,		-- Food given after village capture
+	starting_gold					= 1500,		-- Gold given after village capture
+	starting_wood					= 1000,		-- Wood given after village capture
+
+	-- ===== ATTACK WAVES =====
+	waves_5min_flank				= true,		-- Extra flank wave at 5 min
+	waves_late_extra				= true,		-- Late waves (40m / 45m)
+	waves_hardest_extra				= false,	-- Hardest-only extra waves (3m / 15m / 30m / 35m / 40m)
+	checkpoint_wave_interval		= 480,		-- Wave respawn interval after checkpoint (seconds)
+
+	-- ===== CHECKPOINT SPAWNS =====
+	checkpoint_blockade_melee		= true,		-- Melee group defending ranged blockade
+	checkpoint_upgrades_extra		= true,		-- Extra AI upgrades after checkpoint (spearman 4, etc.)
+
+	-- ===== AI UPGRADES =====
+	ai_capture_spearman_upgrade		= true,		-- Spearman II upgrade after mine capture
+	-- ===== TRIBUTE =====
+	tribute_tax_rate					= 0.15,		-- Tribute tax rate (0.0 = free, 0.3 = 30%)
+}
+
+-- ---------------------------------------------------------
+-- _MergeTier: Shallow-copy TIER_DEFAULTS, then overlay.
+-- Returns a complete tier table ready for DC consumption.
+-- ---------------------------------------------------------
+local function _MergeTier(overrides)
+	local tier = {}
+	for k, v in pairs(TIER_DEFAULTS) do
+		tier[k] = v
+	end
+	for k, v in pairs(overrides) do
+		tier[k] = v
+	end
+	return tier
+end
+
+-- ============================================================
+-- TIER OVERRIDES
+-- ============================================================
+Difficulty_Config = {
+
+-- ===========================================
+-- TIER 0: EASY
+-- ===========================================
+[0] = _MergeTier({
+	label							= "Easy",
+
+	-- ===== PLAYER UPGRADES =====
+	player_upgrades_bonus			= true,		-- Free melee damage + ranged armor
+	player_upgrades_extra			= true,		-- Free ranged damage + melee armor
+
+	-- ===== PLAYER RESTRICTIONS =====
+	restrict_keep					= false,	-- Keep available from start
+	restrict_keep_landmarks			= false,	-- Keep landmarks available from start
+	restrict_siege					= false,		-- Siege available from start
+	restrict_engineers				= false,		-- Engineers available from start
+	restrict_workshop				= false,		-- Workshop available from start
+
+	-- ===== PHASE 2 PROGRESSION =====
+	phase2_siege_profile			= "siege_available",	-- No-op (siege already unlocked)
+	-- ===== REINFORCEMENTS =====
+	reinforcement_squad_count		= 3,		-- 3 squads per reinforcement on Easy
+
+	-- ===== ATTACK WAVES =====
+
+	waves_5min_flank				= false,	-- No early flank wave
+
+	-- ===== CHECKPOINT SPAWNS =====
+	checkpoint_blockade_melee		= false,	-- No melee blockade group
+
+	-- ===== AI UPGRADES =====
+	ai_capture_spearman_upgrade		= false,	-- No AI upgrade after mine capture
+	-- ===== TRIBUTE =====
+	tribute_tax_rate					= 0.0,		-- Free tribute on Easy
+}),
+-- ===========================================
+-- TIER 1: INTERMEDIATE
+-- ===========================================
+[1] = _MergeTier({
+	label							= "Intermediate",
+
+	-- ===== PLAYER RESTRICTIONS =====
+	restrict_workshop				= false,		-- Workshop available from start
+}),
+
+-- ===========================================
+-- TIER 2: HARD
+-- ===========================================
+[2] = _MergeTier({
+	label							= "Hard",
+
+	-- ===== PLAYER UPGRADES =====
+	player_upgrades_extra			= false,	-- No free ranged/melee upgrades
+
+	-- ===== PLAYER RESTRICTIONS =====
+	disable_conversion				= true,		-- Block monk conversion	restrict_age4					= true,		-- Lock Age 4 + landmarks
+
+	-- ===== PHASE 2 PROGRESSION =====
+	phase2_siege_profile			= "engineers_available",	-- Siege + engineers on capture
+	-- ===== REINFORCEMENTS =====
+	trader_reinforcements			= true,		-- Enable enemy trader QRF
+	siege_reinforcements			= false,	-- No siege reinforcements after checkpoint
+	-- ===== TRIBUTE =====
+	tribute_tax_rate					= 0.30,		-- 30% tax on Hard
+	-- ===== TIMER =====
+	seize_city_timer				= 3600,		-- 60 min
+
+	-- ===== RESOURCES =====
+	starting_food					= 2000,		
+	starting_gold					= 1000,		
+	starting_wood					= 1000,	
+
+	-- ===== REINFORCEMENTS =====
+	reinforcement_squad_count		= 1,		-- 1 squad per reinforcement on Hard
+
+	-- ===== ATTACK WAVES ===
+	checkpoint_wave_interval		= 260,		-- Faster wave respawn
+}),
+
+-- ===========================================
+-- TIER 3: HARDEST
+-- ===========================================
+[3] = _MergeTier({
+	label							= "Hardest",
+
+	-- ===== PLAYER UPGRADES =====
+	player_upgrades_extra			= false,	-- No free upgrades
+
+	-- ===== PLAYER RESTRICTIONS =====
+	disable_conversion				= true,		-- Block monk conversion	restrict_age4					= true,		-- Lock Age 4 + landmarks
+
+	-- ===== PHASE 2 PROGRESSION =====
+	phase2_siege_profile			= "engineers_available",	-- Siege + engineers on capture	-- ===== TRIBUTE =====
+	tribute_tax_rate					= 0.30,		-- 30% tax on Hardest
+	-- ===== ENEMY CAMP STRENGTH =====
+	camp_strength					= "hard",	-- Hard starting enemy camps
+	city_guard_strength				= "hard",	-- Hard city guards
+
+	-- ===== REINFORCEMENTS =====
+	trader_reinforcements			= true,		-- Enable enemy trader QRF
+	reinforcement_pre_capture		= false,	-- No reinforcements before capture
+	siege_reinforcements			= false,	-- No siege reinforcements after checkpoint
+
+	-- ===== TIMER =====
+	seize_city_timer				= 2700,		-- 45 min
+
+	-- ===== RESOURCES =====
+	starting_food					= 500,
+	starting_gold					= 350,
+	starting_wood					= 200,
+
+	-- ===== ATTACK WAVES =====
+	waves_late_extra				= false,	-- No standard late waves
+	waves_hardest_extra				= true,		-- Hardest-only extra waves
+	checkpoint_wave_interval		= 260,		-- Faster wave respawn
+
+	-- ===== REINFORCEMENTS =====
+	reinforcement_squad_count		= 1,		-- 1 squad per reinforcement on Hardest
+
+	-- ===== CHECKPOINT SPAWNS =====
+	checkpoint_upgrades_extra		= false,	-- AI already has upgrades
+}),
+
+-- ===========================================
+-- TIER 4: RIDICULOUS
+-- ===========================================
+[4] = _MergeTier({
+	label							= "Ridiculous",
+	-- ===== TRIBUTE =====
+	tribute_tax_rate					= 0.30,		-- 30% tax
+	-- ===== ENEMY CAMP STRENGTH =====
+	camp_strength					= "hard",
+	city_guard_strength				= "hard",
+
+	-- ===== REINFORCEMENTS =====
+	trader_reinforcements			= true,		-- Enable enemy trader QRF
+	reinforcement_pre_capture		= false,	-- No reinforcements before capture
+	siege_reinforcements			= false,	-- No siege reinforcements after checkpoint
+
+	-- ===== TIMER =====
+	seize_city_timer				= 2700,		-- 45 min
+
+	-- ===== RESOURCES =====
+	starting_food					= 500,
+	starting_gold					= 350,
+	starting_wood					= 200,
+
+	-- ===== ATTACK WAVES =====
+	waves_late_extra				= false,
+	waves_hardest_extra			= true,
+	checkpoint_wave_interval		= 240,		-- Faster than Hardest
+
+	-- ===== REINFORCEMENTS =====
+	reinforcement_squad_count		= 1,		-- 1 reinforcement event total per player
+
+	-- ===== CHECKPOINT SPAWNS =====
+	checkpoint_upgrades_extra		= false,
+}),
+
+-- ===========================================
+-- TIER 5: OUTRAGEOUS
+-- ===========================================
+[5] = _MergeTier({
+	label							= "Outrageous",
+	-- ===== TRIBUTE =====
+	tribute_tax_rate					= 0.30,		-- 30% tax
+	-- ===== ENEMY CAMP STRENGTH =====
+	camp_strength					= "hard",
+	city_guard_strength				= "hard",
+
+	-- ===== REINFORCEMENTS =====
+	trader_reinforcements			= true,
+	reinforcement_pre_capture		= false,
+	siege_reinforcements			= false,
+
+	-- ===== TIMER =====
+	seize_city_timer				= 2700,
+
+	-- ===== RESOURCES =====
+	starting_food					= 350,
+	starting_gold					= 250,
+	starting_wood					= 150,
+
+	-- ===== ATTACK WAVES =====
+	waves_late_extra				= false,
+	waves_hardest_extra			= true,
+	checkpoint_wave_interval		= 220,		-- Faster than Ridiculous
+
+	-- ===== PLAYER RESTRICTIONS =====
+	restrict_workshop				= true,
+
+	-- ===== REINFORCEMENTS =====
+	reinforcement_squad_count		= 1,
+
+	-- ===== CHECKPOINT SPAWNS =====
+	checkpoint_upgrades_extra		= false,
+}),
+
+-- ===========================================
+-- TIER 6: ABSURD
+-- ===========================================
+[6] = _MergeTier({
+	label							= "Absurd",
+	-- ===== TRIBUTE =====
+	tribute_tax_rate					= 0.30,		-- 30% tax
+	-- ===== ENEMY CAMP STRENGTH =====
+	camp_strength					= "hard",
+	city_guard_strength				= "hard",
+
+	-- ===== REINFORCEMENTS =====
+	trader_reinforcements			= true,
+	reinforcement_pre_capture		= false,
+	siege_reinforcements			= false,
+
+	-- ===== TIMER =====
+	seize_city_timer				= 2400,		-- 40 min
+
+	-- ===== RESOURCES =====
+	starting_food					= 250,
+	starting_gold					= 150,
+	starting_wood					= 100,
+
+	-- ===== ATTACK WAVES =====
+	waves_late_extra				= false,
+	waves_hardest_extra			= true,
+	checkpoint_wave_interval		= 200,
+
+	-- ===== PLAYER RESTRICTIONS =====
+	restrict_workshop				= true,
+
+	-- ===== REINFORCEMENTS =====
+	reinforcement_squad_count		= 1,
+
+	-- ===== CHECKPOINT SPAWNS =====
+	checkpoint_upgrades_extra		= false,
+}),
+
+} -- end Difficulty_Config
+
+-- ============================================================
+-- DIFFICULTY FUNCTIONS
+-- ============================================================
+
+-- Thanks to AGameAnx		
+function GetAIDifficulty(player)
+	local AIPlayerNames = {
+		[Loc_ToAnsi(1309)] = 0,     -- A.I. Easy
+		[Loc_ToAnsi(1310)] = 1,     -- A.I. Intermediate
+		[Loc_ToAnsi(1311)] = 2,     -- A.I. Hard
+		[Loc_ToAnsi(1312)] = 3,     -- A.I. Hardest
+		[Loc_ToAnsi(11250912)] = 4, -- A.I. Ridiculous
+		[Loc_ToAnsi(11250913)] = 5, -- A.I. Outrageous
+		[Loc_ToAnsi(11250914)] = 6, -- A.I. Absurd
+	}
+	-- Strip leading player slot number (e.g. "3 A.I. Intermediate" → "A.I. Intermediate")
+	local player_ansi = string.gsub(Loc_ToAnsi(Player_GetDisplayName(player)), "^%d+%s+", "")
+	local tier = AIPlayerNames[player_ansi]
+	if tier == nil then
+		print(string.format("[DIFFICULTY] WARNING: Unmapped AI name '%s', defaulting to Hard (2)", player_ansi))
+		return 2
+	end
+	return tier
+end
+
+---Difficulty_Init: Call once after AI_Difficulty is set.
+-- Sets the global DC (Difficulty Config) to the active tier.
+function Difficulty_Init()
+	DC = Difficulty_Config[AI_Difficulty]
+	if DC == nil then
+		print(string.format("[DIFFICULTY] WARNING: No config for tier %d, falling back to Hard (2)", AI_Difficulty))
+		DC = Difficulty_Config[2]
+	end
+	print(string.format("[DIFFICULTY] Initialized: %s (tier %d)", DC.label, AI_Difficulty))
+end

@@ -1,0 +1,322 @@
+---------------------------------------------------------------------------------------------------
+-- Boon Selection UI — Core Module
+-- Reusable selection panel: show N choices (up to 4), wait for click or timeout, invoke callback.
+-- Visible only to the local player. Uses XamlPresenter injected into ScarDefault.
+--
+-- Public API:
+--   BoonSelection_Show(options)  — Show the selection panel
+--   BoonSelection_Hide()         — Force-hide (cleanup)
+--   BoonSelection_IsActive()     — Returns true if panel is currently shown
+--
+-- options table:
+--   .title        : string — Header text
+--   .subtitle     : string — Subheader text (optional)
+--   .choices      : array of { title, unit, desc, icon } (1-3 entries)
+--   .on_select    : function(choice_index) — Called when player clicks a card
+--   .timeout      : number — Seconds before auto-select (0 = no timeout)
+--   .default_choice : number — Index for timeout fallback (default 1)
+--
+-- Dependencies: boonui/boon_selection_xaml.scar, boonui/boon_selection_data.scar
+---------------------------------------------------------------------------------------------------
+
+import("boonui/boon_selection_xaml.scar")
+import("boonui/boon_selection_data.scar")
+
+local _BOON_PANEL_NAME = "BoonSelectionPanel"
+
+_boon_selection = {
+	panel_created = false,
+	active = false,
+	on_select = nil,
+	timeout = 30,
+	default_choice = 1,
+	deadline = 0,
+	choice_count = 0,
+	dc = nil,
+}
+
+---------------------------------------------------------------------------------------------------
+-- Panel Lifecycle
+---------------------------------------------------------------------------------------------------
+
+local function _BoonSelection_EnsurePanel()
+	if _boon_selection.panel_created then
+		return
+	end
+
+	local dc = {
+		is_visible = false,
+		title_text = "",
+		subtitle_text = "",
+		timer_text = "",
+		-- Card 1
+		card_1_vis = false,
+		icon_1 = "",
+		title_1 = "",
+		unit_1 = "",
+		desc_1 = "",
+		-- Card 2
+		card_2_vis = false,
+		icon_2 = "",
+		title_2 = "",
+		unit_2 = "",
+		desc_2 = "",
+		-- Card 3
+		card_3_vis = false,
+		icon_3 = "",
+		title_3 = "",
+		unit_3 = "",
+		desc_3 = "",
+		-- Card 4
+		card_4_vis = false,
+		icon_4 = "",
+		title_4 = "",
+		unit_4 = "",
+		desc_4 = "",
+		-- Commands
+		cmd_1 = UI_CreateCommand("BoonSelection_OnClick1"),
+		cmd_2 = UI_CreateCommand("BoonSelection_OnClick2"),
+		cmd_3 = UI_CreateCommand("BoonSelection_OnClick3"),
+		cmd_4 = UI_CreateCommand("BoonSelection_OnClick4"),
+	}
+	_boon_selection.dc = dc
+
+	local xaml = BoonSelection_BuildXaml()
+	UI_AddChild("ScarDefault", "XamlPresenter", _BOON_PANEL_NAME, {
+		IsHitTestVisible = true,
+		Xaml = xaml,
+		DataContext = UI_CreateDataContext(dc),
+	})
+	_boon_selection.panel_created = true
+	print("[BOON_SELECTION] Panel created")
+end
+
+local function _BoonSelection_UpdateDC()
+	if _boon_selection.dc then
+		UI_SetDataContext(_BOON_PANEL_NAME, _boon_selection.dc)
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Show / Hide
+---------------------------------------------------------------------------------------------------
+
+function BoonSelection_Show(options)
+	if options == nil then
+		print("[BOON_SELECTION][WARN] BoonSelection_Show called with nil options")
+		return
+	end
+
+	_BoonSelection_EnsurePanel()
+
+	local bs = _boon_selection
+
+	-- Dismiss any active selection first
+	if bs.active then
+		print("[BOON_SELECTION] Dismissing previous selection to show new one")
+		_BoonSelection_Resolve(bs.default_choice)
+	end
+
+	local choices = options.choices or {}
+	local count = math.min(#choices, 4)
+	if count == 0 then
+		print("[BOON_SELECTION][WARN] No choices provided")
+		return
+	end
+
+	local timeout = options.timeout or 30
+	local no_timer = (timeout == 0)
+
+	local ok_gt, gt = pcall(World_GetGameTime)
+
+	bs.active = true
+	bs.on_select = options.on_select
+	bs.timeout = timeout
+	bs.default_choice = options.default_choice or 1
+	bs.deadline = no_timer and math.huge or ((ok_gt and gt or 0) + timeout)
+	bs.choice_count = count
+
+	-- Populate DataContext
+	local dc = bs.dc
+	dc.title_text = options.title or "Make a Selection"
+	dc.subtitle_text = options.subtitle or ""
+	dc.timer_text = no_timer and "" or string.format("Auto-selects in %ds", timeout)
+
+	-- Card fields
+	local card_keys = {
+		{vis = "card_1_vis", icon = "icon_1", title = "title_1", unit = "unit_1", desc = "desc_1"},
+		{vis = "card_2_vis", icon = "icon_2", title = "title_2", unit = "unit_2", desc = "desc_2"},
+		{vis = "card_3_vis", icon = "icon_3", title = "title_3", unit = "unit_3", desc = "desc_3"},
+		{vis = "card_4_vis", icon = "icon_4", title = "title_4", unit = "unit_4", desc = "desc_4"},
+	}
+
+	for i = 1, 4 do
+		local keys = card_keys[i]
+		if i <= count then
+			local c = choices[i]
+			dc[keys.vis] = true
+			dc[keys.icon] = c.icon or ""
+			dc[keys.title] = c.title or string.format("Option %d", i)
+			dc[keys.unit] = c.unit or ""
+			dc[keys.desc] = c.desc or ""
+		else
+			dc[keys.vis] = false
+			dc[keys.icon] = ""
+			dc[keys.title] = ""
+			dc[keys.unit] = ""
+			dc[keys.desc] = ""
+		end
+	end
+
+	dc.is_visible = true
+	_BoonSelection_UpdateDC()
+
+	-- Start timeout polling
+	if not no_timer then
+		Rule_AddInterval(BoonSelection_PollTimeout, 1.0)
+	end
+
+	-- Event cue for attention
+	pcall(UI_CreateEventCue, dc.title_text, dc.subtitle_text,
+		"high_priority", "", "sfx_ui_event_queue_high_priority_play",
+		no_timer and 60 or timeout)
+
+	-- Console log
+	print("")
+	print(string.format("[BOON_SELECTION] %s", dc.title_text))
+	if dc.subtitle_text ~= "" then
+		print(string.format("  %s", dc.subtitle_text))
+	end
+	for i = 1, count do
+		local c = choices[i]
+		print(string.format("  %d) %s — %s", i, c.title or "?", c.unit or ""))
+	end
+	if no_timer then
+		print("  No auto-select. Waiting for player choice.")
+	else
+		print(string.format("  Auto-selects option %d in %ds.", bs.default_choice, timeout))
+	end
+end
+
+function BoonSelection_Hide()
+	if _boon_selection.dc then
+		_boon_selection.dc.is_visible = false
+		_BoonSelection_UpdateDC()
+	end
+end
+
+function BoonSelection_IsActive()
+	return _boon_selection.active
+end
+
+---------------------------------------------------------------------------------------------------
+-- Click Handlers — Global functions (required by UI_CreateCommand)
+---------------------------------------------------------------------------------------------------
+
+function BoonSelection_OnClick1()
+	_BoonSelection_Resolve(1)
+end
+
+function BoonSelection_OnClick2()
+	_BoonSelection_Resolve(2)
+end
+
+function BoonSelection_OnClick3()
+	_BoonSelection_Resolve(3)
+end
+
+function BoonSelection_OnClick4()
+	_BoonSelection_Resolve(4)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Resolution — Process selection and invoke callback
+---------------------------------------------------------------------------------------------------
+
+function _BoonSelection_Resolve(choice_index)
+	local bs = _boon_selection
+	if not bs.active then
+		return
+	end
+
+	-- Stop timeout polling
+	pcall(Rule_Remove, BoonSelection_PollTimeout)
+	bs.active = false
+
+	-- Hide panel
+	BoonSelection_Hide()
+
+	-- Clamp index
+	local idx = choice_index or 1
+	if idx < 1 then idx = 1 end
+	if idx > bs.choice_count then idx = bs.choice_count end
+
+	print(string.format("[BOON_SELECTION] Selected option %d of %d", idx, bs.choice_count))
+
+	-- Invoke callback
+	local cb = bs.on_select
+	bs.on_select = nil
+	if cb then
+		local ok, err = pcall(cb, idx)
+		if not ok then
+			print(string.format("[BOON_SELECTION][ERROR] Callback error: %s", tostring(err)))
+		end
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Timeout Polling — Named global function (required by Rule_AddInterval)
+---------------------------------------------------------------------------------------------------
+
+function BoonSelection_PollTimeout()
+	local bs = _boon_selection
+	if not bs.active then
+		Rule_RemoveMe()
+		return
+	end
+
+	local ok, gt = pcall(World_GetGameTime)
+	if not ok then return end
+
+	local remaining = math.max(0, math.floor(bs.deadline - gt))
+	if bs.dc then
+		bs.dc.timer_text = string.format("Auto-selects in %ds", remaining)
+		_BoonSelection_UpdateDC()
+	end
+
+	if gt >= bs.deadline then
+		Rule_RemoveMe()
+		print(string.format("[BOON_SELECTION] Timeout — using default choice %d", bs.default_choice))
+		_BoonSelection_Resolve(bs.default_choice)
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Cleanup — Remove panel on game end
+---------------------------------------------------------------------------------------------------
+
+function BoonSelection_Cleanup()
+	pcall(Rule_Remove, BoonSelection_PollTimeout)
+	if _boon_selection.panel_created then
+		pcall(UI_Remove, _BOON_PANEL_NAME)
+		_boon_selection.panel_created = false
+		_boon_selection.active = false
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Console helper — Force-select while panel is active
+---------------------------------------------------------------------------------------------------
+
+function BoonSelection_ForceSelect(index)
+	if not _boon_selection.active then
+		print("[BOON_SELECTION] No selection active. Nothing to select.")
+		return
+	end
+	if type(index) ~= "number" or index < 1 or index > _boon_selection.choice_count then
+		print(string.format("[BOON_SELECTION] Invalid index: %s (expected 1-%d)",
+			tostring(index), _boon_selection.choice_count))
+		return
+	end
+	_BoonSelection_Resolve(index)
+end

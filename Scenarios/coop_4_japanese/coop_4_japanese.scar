@@ -1,0 +1,290 @@
+--[[ COOP 4 Players - Japan / JPN vs CHI
+
+- Fix villager spawn function being spammed
+- Rebalance main waves
+- Increase defences, main village
+- Remove mid patrol respawn
+
+By Comrad Ping
+
+Credits:
+AGameAnx - GetAIDifficulty
+Foxplot  - Patrol_Cycle, Units_Deploy 
+Woprock  - Advanced Game Settings functions (AGS_GetCivilizationEntity, AGS_ENTITY_TABLE)
+]]
+
+--[[ Changelog
+
+UPDATE 1.6
+- Fixed impass City 1 / Long, blockade & City 1 / Keep, walls
+- Fixed ending again
+- Fixed City #1 / Keep defenders not retreating
+- Updated 'General' UI
+
+Update 1.7
+- Fixed ending again (swapped win/lose :)
+- Full keep garrison moved from Hardest > Hard
+- Added more upgrades after 35 min / Intermediate - Hardest (Age 4)
+- Probably some other stuff that I forgot to note 
+
+Update 1.8
+- Fixed 'clear a path' objective > Finish after taking city
+- Fixed Wave: Counter attack stops @ siege workshops
+- Fixed 'Patrol Respawn' still enabled after capture 
+- Fixed restriction mangonel > FRE_DLC, ABB_DLC Buildable / ABB?
+- Added 3d UI for final general obj
+- Changes to terrain in middle to increase space a bit
+- Changed prep phase attack difficulty for Easy/Intermediate
+
+Update 2.0 - 2.3
+- Sync error caused by Phase2_CaptureSiege_Captured
+Disabled / Change ownership of Siege Workshop to player 5
+
+Update 2.4
+- Added new interactive zone during general escape 
+- replaced lumber_nrm with house (MON) 
+- Added dense tree / block line of sight for trebuchet
+
+]]
+
+import("MissionOMatic/MissionOMatic.scar")   -- this imports Cardinal.scar as well	
+import("winconditions/annihilation.scar")    -- Rules disabled (eliminates players without units left) 
+--import("winconditions/surrender.scar")	        -- Causes issues with objectives when triggered
+--import("gameplay/diplomacy.scar")		
+--import("winconditions/elimination.scar")		-- Support for player quitting or dropping (through pause menu or disconnection)  
+
+-- Scenario related
+import("scar/Coop_4_Japanese_difficulty.scar")
+import("scar/Coop_4_Japanese_data.scar")
+import("scar/Coop_4_Japanese_disconnect.scar")
+import("scar/Coop_4_Japanese_debug.scar")
+import("scar/Coop_4_Japanese_spawns.scar")
+import("scar/Coop_4_Japanese_objectives.scar")
+import("scar/Coop_4_Japanese_training.scar")
+import("scar/diplomacy/Coop_4_Japanese_tribute.scar")
+-------------------------------------------
+
+-- MissionOMatic expects this global table to exist.
+MissionRecipe = MissionRecipe or {}
+
+function Mission_SetupPlayers()
+	
+	-- Get player IDs for each player
+	player1 = World_GetPlayerAt(1) -- Players
+	player2 = World_GetPlayerAt(2) 
+	player3 = World_GetPlayerAt(3) 
+	player4 = World_GetPlayerAt(4) 
+	
+	player5 = World_GetPlayerAt(5) -- Allied AI
+	player6 = World_GetPlayerAt(6) -- Enemey AI
+	
+end
+
+-- Create any extra sgroups, egroups, and mission variables in here
+function Mission_SetupVariables()	
+	
+	-- Moved into Coop_4_Japanese_data.scar
+	SetupVariables_data()
+	
+	-- DLC Civ Resolver: generate composition maps and validate
+	GenerateCompositionMaps()
+	Validator_CivRegistry()
+	
+	-- Pre-resolve all human player civs (fail fast on unknown)
+	for _, player in ipairs(PLAYERS) do
+		GetPlayerCiv(player.id)
+	end
+	print("[DLC] All player civs resolved successfully.")
+	
+	-- Diagnostic dump (logs raw/resolved/composition per player; set DLC_DEBUG=true to see resolver trace)
+	Validator_PlayerCivDump()
+	
+end
+
+-- Set up any restrictions (i.e. locking out units, etc) in here
+-- Stage 4: Unified via ApplyRestrictionProfile() — all 22 restriction points
+-- consolidated into the 'starting' profile in data.scar
+function Mission_SetRestrictions()
+	
+	-- Apply starting profile to all 4 human players
+	for _, player in ipairs(PLAYERS) do
+		ApplyRestrictionProfile(player, "starting")
+	end
+	
+	if DLC_DEBUG then
+		print(string.format("[MISSION] All players initialized with 'starting' profile (AI_Difficulty=%d)", AI_Difficulty))
+		Validator_RestrictionState()
+	end
+	
+end
+
+-- This function will be called before the intro cinematic
+function Mission_Preset()	-- any other setup to do before the mission starts (i.e. set up rules, spawn units, etc)
+	
+	-- Setup AI
+	AI_SetPersonality(player5, "default_campaign")
+	AI_SetPersonality(player6, "default_campaign")
+	
+	-- Apply per-player setup (pop cap, resource pickups)
+	local pop_mod = Modifier_Create(MAT_Player, "personnel_cap_player_modifier", MUT_Addition, false, 50, "")
+	for _, player in ipairs(PLAYERS) do
+		Modifier_ApplyToPlayer(pop_mod, player.id, 0)
+		Player_SetStateModelBool(player.id, "player_can_interact_with_resource_pickups", true)
+	end
+	
+	-- Init Objective
+	Phase1_Village_Main_InitObjectives()
+	Phase1_Barracks_Side_InitObjectives()
+	Phase1_Village_Main_Defence_InitObjectives()
+	PrepareDefences_InitObjectives() -- Notification: Wave warning
+	Phase2_ReinforcementKeep_InitObjectives()
+	Phase2_CaptureSiege_InitObjectives()
+	Phase2_CaptureCity_InitObjectives()
+	Phase3_EliminateGeneral_InitObjectives()
+	
+	-- Initialize path data
+	Unit_Path_Data() 
+
+	-- Precache handled via Scar_AddInit in coop_4_japanese_data.scar (prematch loading phase).
+	
+	-- Starting Enemies
+	Spawn_Village_Enemey()
+	
+	-- Enable tribute
+	--Core_CallDelegateFunctions("DiplomacyEnabled", true);
+	--Core_CallDelegateFunctions("TributeEnabled", true);
+	
+end
+
+-- This function will be called after the intro cinematic, before the player takes control
+function Mission_Start()	-- this is triggered after the intro, just as control is passed to the player
+	
+	-- Per-player Mission_Start setup (TC menu, UI overrides)
+	for _, player in ipairs(PLAYERS) do
+		Player_SetStateModelFloat(player.id, "has_capital", 1)
+		UI_SetPlayerDataContext(player.id, { PopulationCapOn = false, hide_condensed_objectives_override = true })
+	end
+	
+	-- Setup AI starting age 
+	Player_SetCurrentAge(player5, AGE_CASTLE)
+	Player_SetCurrentAge(player6, AGE_CASTLE)
+	
+	-- Initialize tribute system (30% fixed tax)
+	Tribute_Init()
+	
+	-- Spawn Player units
+	Rule_AddOneShot(Start_Setup_Players, 0) -- Delay to load models from age up
+	
+	-- Start Objective
+	Objective_Start(OBJ_Phase1_Village_Main, true, false)
+	Objective_Start(OBJ_Phase1_Village_Main_side1 ,false, false)
+	Objective_Start(OBJ_Phase1_Barracks_Main, true, false)
+	Objective_Start(OBJ_Phase1_Barracks_side1, false, false)
+	
+	-- Objective / Building targeting
+	EGroup_SetTargetingType(eg_village_main_1, Targeting_None)
+	EGroup_SetTargetingType(eg_village_main_2, Targeting_None)
+	EGroup_SetTargetingType(eg_village_walls, Targeting_None)
+	EGroup_SetTargetingType(eg_village_outposts, Targeting_None)
+	EGroup_SetTargetingType(eg_city_1, Targeting_None)
+	EGroup_SetTargetingType(eg_tents_art, Targeting_Manual)
+	--[[ Disabled
+	EGroup_SetTargetingType(eg_village_player1, Targeting_None)
+	EGroup_SetTargetingType(eg_village_player2, Targeting_None)
+	EGroup_SetTargetingType(eg_village_player3, Targeting_None)
+	EGroup_SetTargetingType(eg_village_player4, Targeting_None)
+	]]
+	
+	-- Tent art / hide minimap
+	EGroup_EnableMinimapIndicator(eg_tents_art, false)
+	
+	-- Chinese outposts / Handcannon slits (see DC.outpost_handcannon_slits)
+	if DC.outpost_handcannon_slits then
+		Cmd_InstantUpgrade(eg_objective_barracks_1, UPG.CHINESE.UPGRADE_OUTPOST_HANDCANNONSLITS_CHI)
+		Cmd_InstantUpgrade(eg_objective_barracks_2, UPG.CHINESE.UPGRADE_OUTPOST_HANDCANNONSLITS_CHI)
+		Cmd_InstantUpgrade(eg_outpost_slits, UPG.CHINESE.UPGRADE_OUTPOST_HANDCANNONSLITS_CHI)
+		Cmd_InstantUpgrade(eg_outpost_siege, UPG.CHINESE.UPGRADE_OUTPOST_HANDCANNONSLITS_CHI)
+	end
+	-- Chinese outposts / Add Garrison 5x (see DC.outpost_garrison)
+	if DC.outpost_garrison then
+		local _Garrison = function(gid, idx, eid)
+			SGroup_Clear(sg_temp)
+			EGroup_Clear(eg_temp)
+			EGroup_Add(eg_temp, eid)
+			UnitEntry_DeploySquads(player6, sg_temp, {{type = "scar_archer", numSquads = 5 }}, Util_GetPosition(eg_temp))
+			Cmd_Garrison(sg_temp, eg_temp)
+		end
+		-- Select EGroups
+		EGroup_ForEach(eg_outpost_slits, _Garrison)
+		EGroup_ForEach(eg_outpost_siege, _Garrison)
+	end
+	
+	-- Add enemey upgrades early (see DC.early_phase1_upgrades)
+	if DC.early_phase1_upgrades then 
+		Difficulty_Upgrades_Phase1()
+	end
+	
+	-- Start setup
+	Spawn_TC()
+	Rule_AddOneShot(Setup_Starting_Battle, 1)
+	
+	-- Enable Training
+	Training_Init()
+	Training_ForceGoalsActive()  
+	-- Enable Hints
+	Wallingford_AddHintToRepair()
+	
+	-- Enable interactive zone 
+--	World_SetInteractionStage(0)
+	
+	-- Populate shared player slot list (used by Reset_AI)
+	ALL_PLAYER_SLOTS = { player1, player2, player3, player4, player5, player6 }
+	
+	-- Disconnect system: slots 1-4 are co-op human seats by design
+	-- (Player_IsHuman() only works for local player in multiplayer)
+	for i = 1, 4 do
+		g_original_player_types[i] = true
+	end
+	
+	-- Prevent AI takeover
+	Rule_AddGlobalEvent(Reset_AI_OnMigrated, GE_AIPlayer_Migrated)
+	Rule_AddGlobalEvent(Reset_AI_OnTakeOver, GE_AITakeOver)
+	Rule_AddInterval(Reset_AI, 1)
+	
+	-- Disable 'Annihilation' defeat condition
+	Rule_RemoveGlobalEvent(Annihilation_OnEntityKilled)
+	Rule_RemoveGlobalEvent(Annihilation_OnLandmarkDestroyed)
+	Rule_RemoveGlobalEvent(Annihilation_OnConstructionComplete)
+
+end
+
+-- End scenario
+g_gameOver = false
+
+function Defeat_Function()
+	if g_gameOver then return end
+	g_gameOver = true
+	Tribute_Cleanup()
+	for _, player in ipairs(PLAYERS) do
+		_RemoveTC_VisionSuppression(player.id)
+	end
+	Rule_RemoveGlobalEvent(Reset_AI_OnMigrated)
+	Rule_RemoveGlobalEvent(Reset_AI_OnTakeOver)
+	if Rule_Exists(Reset_AI) then Rule_Remove(Reset_AI) end
+	Core_SetTeamDefeated(TEAMS[1], Annihilation_LoserPresentation, WR_ANNIHILATION)
+	
+end
+
+function Victory_Function()
+	if g_gameOver then return end
+	g_gameOver = true
+	Tribute_Cleanup()
+	for _, player in ipairs(PLAYERS) do
+		_RemoveTC_VisionSuppression(player.id)
+	end
+	Rule_RemoveGlobalEvent(Reset_AI_OnMigrated)
+	Rule_RemoveGlobalEvent(Reset_AI_OnTakeOver)
+	if Rule_Exists(Reset_AI) then Rule_Remove(Reset_AI) end
+	Core_SetTeamDefeated(TEAMS[2], Annihilation_LoserPresentation, WR_ANNIHILATION)
+	
+end

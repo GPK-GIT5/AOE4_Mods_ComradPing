@@ -1,0 +1,114 @@
+---------------------------------------------------------------------------------------------------
+-- CBA AI Player — Economy & Resource Management
+-- Native AI disable, economy suppression, resource grants, periodic top-up.
+-- Origin: cba_ai_player.scar lines 504–596
+---------------------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------
+-- Economy Suppression
+-----------------------------------------------------------------------
+
+function _AI_EnsureNativeAIDisabled(player, reason, force)
+	if not _AI_DISABLE_NATIVE_AI_BRAIN then return false end
+	if player == nil or player.id == nil or player.ai == nil then return false end
+	if _AI_IsEliminated(player) then return false end
+
+	local ai = player.ai
+	local now = World_GetGameTime()
+	local state = ai.native_ai
+	if state == nil then
+		state = {
+			disabled = false,
+			apply_count = 0,
+			last_apply_at = -9999,
+			last_reason = "",
+		}
+		ai.native_ai = state
+	end
+
+	if state.disabled and force ~= true then
+		return false
+	end
+
+	local ok_disable = pcall(AI_Enable, player.id, false)
+	if ok_disable then
+		state.disabled = true
+		state.apply_count = (state.apply_count or 0) + 1
+		state.last_apply_at = now
+		state.last_reason = tostring(reason or "unknown")
+		_AI_DebugLog(1, string.format("[AI_PLAYER] Native AI disabled for %s reason=%s count=%d.",
+			ai.label or "P?", state.last_reason, state.apply_count))
+		return true
+	end
+
+	return false
+end
+
+function _AI_EnsureEconomySuppressed(player, reason, force)
+	if player == nil or player.id == nil or player.ai == nil then return false end
+	if _AI_IsEliminated(player) then return false end
+
+	local ai = player.ai
+	local eco = ai.economy
+	local now = World_GetGameTime()
+	if eco == nil then
+		eco = {
+			suppressed = false,
+			apply_count = 0,
+			last_apply_at = -9999,
+			last_reason = "",
+			drift_alerts = 0,
+		}
+		ai.economy = eco
+	end
+
+	local is_force = force == true
+	if eco.suppressed and not is_force then
+		return false
+	end
+	if is_force and (now - (eco.last_apply_at or -9999)) < _AI_ECONOMY_REAPPLY_COOLDOWN then
+		return false
+	end
+
+	-- Disable all economy AI overrides
+	local ok1 = pcall(AI_DisableAllEconomyOverrides, player.id)
+	-- Zero out gatherer allocation
+	local ok2 = pcall(AIPlayer_SetGathererDistributionOverride, player.id, 0.0)
+
+	if ok1 or ok2 then
+		eco.suppressed = true
+		eco.apply_count = (eco.apply_count or 0) + 1
+		eco.last_apply_at = now
+		eco.last_reason = tostring(reason or "unknown")
+		_AI_DebugLog(1, string.format("[AI_PLAYER] Economy suppressed for %s (%s) reason=%s count=%d.", 
+			player.ai and player.ai.label or "P?", Player_GetRaceName(player.id),
+			eco.last_reason, eco.apply_count))
+		return true
+	end
+
+	eco.suppressed = false
+	return false
+end
+
+function _AI_SuppressEconomy(player)
+	return _AI_EnsureEconomySuppressed(player, "legacy_call", true)
+end
+
+function _AI_GrantResources(player)
+	Player_SetResource(player.id, RT_Food,  _AI_RESOURCE_GRANT)
+	Player_SetResource(player.id, RT_Wood,  _AI_RESOURCE_GRANT)
+	Player_SetResource(player.id, RT_Gold,  _AI_RESOURCE_GRANT)
+	Player_SetResource(player.id, RT_Stone, _AI_RESOURCE_GRANT)
+end
+
+-----------------------------------------------------------------------
+-- RULE: Resource Top-up
+-----------------------------------------------------------------------
+
+function _AI_Rule_ResourceTopup()
+	for _, player in ipairs(_ai_players) do
+		if not _AI_IsEliminated(player) then
+			_AI_GrantResources(player)
+		end
+	end
+end

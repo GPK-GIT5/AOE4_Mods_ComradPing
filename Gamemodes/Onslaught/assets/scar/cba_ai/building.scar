@@ -1,0 +1,864 @@
+---------------------------------------------------------------------------------------------------
+-- CBA AI Player — Building Placement & Management
+-- Building rules & main logic, type resolution, zone layout helpers, position blacklisting,
+-- queue entity management, production egroup queries, zone reconciliation, build event logging.
+-- Origin: cba_ai_player.scar lines 598–1259
+---------------------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------
+-- RULE: Build Military Buildings
+-----------------------------------------------------------------------
+
+function _AI_Rule_BuildMilitaryBuildings()
+	if _AI_IsExternallyLocked() then return end
+	for _, player in ipairs(_ai_players) do
+		if not _AI_IsEliminated(player) then
+			-- Validate-first pattern (official wave_generator.scar style):
+			-- reconcile zone counts before attempting placement
+			_AI_ReconcileZoneCounts(player)
+			_AI_BuildMilitaryBuildings(player)
+		end
+	end
+end
+
+function _AI_BuildMilitaryBuildings(player)
+	local ai = player.ai
+	if ai == nil then return end
+	-- Avoid overlapping the generic build rule with startup villager seeding.
+	-- The startup path intentionally seeds the first barracks set; letting this
+	-- rule run beforehand creates an extra pre-seed queue entry in the same tick.
+	if not ai.villager_claim_done or not ai.startup_seed_done then
+		return
+	end
+	local player_civ = ai.civ_name or Player_GetRaceName(player.id)
+	local prod_limit = CBA_Options_GetPlayerProdLimit and CBA_Options_GetPlayerProdLimit(player) or 15
+	local current_age = Player_GetCurrentAge(player.id)
+	local now = World_GetGameTime()
+	local priority = ai.building_priority or _AI_BUILDING_PRIORITY
+
+	-- Use external building count for cap check only; do not overwrite ai.total_buildings
+	local effective_count = player.obj_buildingLimit_count or ai.total_buildings
+	if effective_count >= prod_limit then
+		return  -- at limit
+	end
+
+	-- Cap queued in-progress foundations so villagers can keep up.
+	local pending_limit = _AI_MAX_PENDING_FOUNDATIONS
+	if ai.total_buildings >= 4 then
+		pending_limit = _AI_MAX_PENDING_FOUNDATIONS_HIGH
+	end
+	-- Count all infantry-role producers for starter phase gating
+	local infantry_done = _AI_CountInfantryProducers(player)
+	local spawn_prod_done = _AI_IsSpawnProductionSetupComplete(player)
+	local starter_infantry_phase = infantry_done < _AI_STARTER_BARRACKS_TARGET
+	local starter_second_phase = (not starter_infantry_phase) and (not spawn_prod_done)
+	if not spawn_prod_done then
+		local starter_parallel_cap = math.max(1, math.min(_AI_STARTER_TEAM_TARGET, #ai.villager_teams))
+		pending_limit = math.max(pending_limit, starter_parallel_cap)
+	end
+	if _AI_CountPendingFoundations(player) >= pending_limit then
+		return
+	end
+
+	-- Primary zone only: secondary zone is managed by the outside priority chain.
+	local zone_center = _AI_GetPrimaryZoneCenter(player)
+	if zone_center == nil then return end
+	local zone = "primary"
+	if player.ai.primary_zone_count >= _AI_PRIMARY_ZONE_MAX then return end
+
+	-- Determine if any non-infantry types are available at current age
+	local has_non_infantry_available = false
+	for _, entry in ipairs(priority) do
+		if (entry.role or _AI_BPKeyToRole(entry.key)) ~= "infantry" and current_age >= (entry.min_age or 1) then
+			local ik = _AI_BPKeyToInternalKey(entry.key)
+			local td = ai.buildings[ik]
+			if td ~= nil and td.count < entry.max then
+				has_non_infantry_available = true
+				break
+			end
+		end
+	end
+
+	for _, entry in ipairs(priority) do
+		local entry_role = entry.role or _AI_BPKeyToRole(entry.key)
+
+		if starter_infantry_phase and entry_role ~= "infantry" then
+			goto next_build_type
+		end
+
+		if starter_second_phase then
+			local entry_key = _AI_BPKeyToInternalKey(entry.key)
+			local wants_second = (entry_key == _AI_STARTER_SECOND_PROD_TYPE)
+			-- If second production type is age-locked, continue infantry so villagers stay productive.
+			if not wants_second and not (entry_role == "infantry" and current_age < 2) then
+				goto next_build_type
+			end
+		end
+
+		-- Expansion types (cavalry/siege) are blocked until spawn setup is complete.
+		if not spawn_prod_done then
+			if entry_role == "cavalry" or entry_role == "siege" then
+				goto next_build_type
+			end
+		end
+
+		-- Generic age gate: skip types that require a higher age
+		if current_age < (entry.min_age or 1) then
+			-- skip: age requirement not met
+		else
+			local internal_key = _AI_BPKeyToInternalKey(entry.key)
+			local type_data = ai.buildings[internal_key]
+			local pending_type = _AI_CountPendingFoundationsByType(player, internal_key)
+
+			-- Determine effective max for this type:
+			-- infantry overflow when all non-infantry types are age-locked
+			local effective_max = entry.max
+			if entry_role == "infantry" and not has_non_infantry_available then
+				effective_max = _AI_BARRACKS_OVERFLOW_MAX
+			end
+			if entry_role == "infantry" and starter_infantry_phase then
+				effective_max = math.max(effective_max, _AI_STARTER_BARRACKS_TARGET)
+			end
+			if starter_second_phase and _AI_BPKeyToInternalKey(entry.key) == _AI_STARTER_SECOND_PROD_TYPE then
+				effective_max = math.max(effective_max, _AI_STARTER_SPAWN_PROD_TARGET)
+			end
+
+			-- Per-type cooldown (official wave_generator spawn.available_at pattern)
+			if ai.last_placed_at[internal_key] ~= nil and (now - ai.last_placed_at[internal_key]) < _AI_TYPE_COOLDOWN then
+				-- skip: too soon since last placement of this type
+			else
+				if type_data ~= nil and (type_data.count + pending_type) < effective_max and ai.total_buildings < prod_limit then
+					local ebp = AGS_GetCivilizationEntity(player_civ, entry.key)
+					if ebp ~= nil then
+						ai.telemetry.build_attempts = ai.telemetry.build_attempts + 1
+						local ok, result = pcall(_AI_PlaceBuilding, player, ebp, zone_center, entry.key, zone)
+						if ok and result then
+							ai.telemetry.build_successes = ai.telemetry.build_successes + 1
+							ai.last_placed_at[internal_key] = now
+							-- Allow a second placement per cycle when behind target to compensate for stale losses
+							if ai.total_buildings >= _AI_STARTER_SPAWN_PROD_TARGET then
+								return
+							end
+						else
+							ai.telemetry.build_failures = ai.telemetry.build_failures + 1
+						end
+					end
+				end
+			end
+		end
+		::next_build_type::
+	end
+end
+
+function _AI_BPKeyToInternalKey(bp_key)
+	if bp_key == AGS_BP_BARRACKS then return "barracks" end
+	if bp_key == AGS_BP_ARCHERY_RANGE then return "archery_range" end
+	if bp_key == AGS_BP_STABLE then return "stable" end
+	if bp_key == AGS_BP_WORKSHOP then return "siege_workshop" end
+	return bp_key
+end
+
+function _AI_CountCompletedPrimaryProductionBuildings(player)
+	local ai = player.ai
+	local total = 0
+	-- Iterate all resolved producer types (civ-aware), not just hardcoded 4
+	local priority = ai.building_priority or _AI_BUILDING_PRIORITY
+	local counted = {}
+	for _, entry in ipairs(priority) do
+		local ik = _AI_BPKeyToInternalKey(entry.key)
+		if not counted[ik] then
+			counted[ik] = true
+			local type_data = ai.buildings[ik]
+			if type_data ~= nil and type_data.entities ~= nil then
+				for _, rec in ipairs(type_data.entities) do
+					if (rec.zone or "primary") == "primary" then
+						total = total + 1
+					end
+				end
+			end
+		end
+	end
+	return total
+end
+
+-- Count all infantry-role producers (total, not zone-filtered) for starter phase gating
+function _AI_CountInfantryProducers(player)
+	local ai = player.ai
+	local count = 0
+	local priority = ai.building_priority or _AI_BUILDING_PRIORITY
+	local counted = {}
+	for _, entry in ipairs(priority) do
+		local role = entry.role or _AI_BPKeyToRole(entry.key)
+		if role == "infantry" then
+			local ik = _AI_BPKeyToInternalKey(entry.key)
+			if not counted[ik] then
+				counted[ik] = true
+				local td = ai.buildings[ik]
+				if td ~= nil then count = count + td.count end
+			end
+		end
+	end
+	return count
+end
+
+function _AI_IsSpawnProductionSetupComplete(player)
+	return _AI_CountCompletedPrimaryProductionBuildings(player) >= _AI_STARTER_SPAWN_PROD_TARGET
+end
+
+-----------------------------------------------------------------------
+-- Two-Zone Building Layout Helpers
+-----------------------------------------------------------------------
+
+-- Determine which zone needs the next building and return its center
+function _AI_GetNextBuildZone(player)
+	local ai = player.ai
+	if ai.primary_zone_count < _AI_PRIMARY_ZONE_MAX then
+		local center = _AI_GetPrimaryZoneCenter(player)
+		if center ~= nil then return "primary", center end
+	end
+	if ai.secondary_zone_count < _AI_SECONDARY_ZONE_MAX then
+		local center = _AI_GetSecondaryZoneCenter(player)
+		if center ~= nil then return "secondary", center end
+	end
+	return nil, nil
+end
+
+-- Primary zone: from keep position, offset toward map center
+function _AI_GetPrimaryZoneCenter(player)
+	local base_pos = _AI_GetBasePosition(player)
+	if base_pos == nil then return nil end
+	local center = _CBA and _CBA.center or nil
+	if center == nil or not _AI_IsValidWorldPos(center) then return base_pos end
+	return Util_GetPositionFromAtoB(base_pos, center, _AI_PRIMARY_ZONE_OFFSET)
+end
+
+-- Secondary zone: near the nearest sacred site, slightly toward own base
+function _AI_GetSecondaryZoneCenter(player)
+	if #_ai_sacred_sites == 0 then return nil end
+	local base_pos = _AI_GetBasePosition(player)
+	if base_pos == nil then return _ai_sacred_sites[1] end
+	-- Find nearest sacred site
+	local best_site = _ai_sacred_sites[1]
+	local best_dist = math.huge
+	for _, site in ipairs(_ai_sacred_sites) do
+		local ok, dist = pcall(World_DistancePointToPoint, base_pos, site)
+		if ok and dist < best_dist then
+			best_dist = dist
+			best_site = site
+		end
+	end
+	-- Offset slightly toward own base for safety
+	return Util_GetPositionFromAtoB(best_site, base_pos, _AI_SECONDARY_ZONE_RADIUS)
+end
+
+function _AI_CountPendingFoundations(player)
+	local n = 0
+	for _, entry in ipairs(player.ai.construction_queue) do
+		if not entry.completed then
+			n = n + 1
+		end
+	end
+	return n
+end
+
+function _AI_CountPendingFoundationsByType(player, type_key)
+	local n = 0
+	for _, entry in ipairs(player.ai.construction_queue) do
+		if not entry.completed and entry.type_key == type_key then
+			n = n + 1
+		end
+	end
+	return n
+end
+
+-----------------------------------------------------------------------
+-- Zone Count Reconciliation
+-- Counts actual alive buildings per zone and corrects drift.
+-- Prevents permanent zone-budget inflation from failed placements.
+-----------------------------------------------------------------------
+
+function _AI_ReconcileZoneCounts(player)
+	local ai = player.ai
+	local primary = 0
+	local secondary = 0
+
+	-- Count completed buildings by stored zone tag
+	local building_types = _AI_GetOrderedBuildingTypeKeys(player, ai.buildings)
+	for _, type_key in ipairs(building_types) do
+		local type_data = ai.buildings[type_key]
+		for _, rec in ipairs(type_data.entities) do
+			local ent = rec.entity or rec
+			local ok_alive, alive = pcall(Entity_IsAlive, ent)
+			if ok_alive and alive then
+				local zone = rec.zone or "primary"
+				if zone == "secondary" then
+					secondary = secondary + 1
+				else
+					primary = primary + 1
+				end
+			end
+		end
+	end
+
+	-- Also count pending (not yet completed) foundations
+	for _, entry in ipairs(ai.construction_queue) do
+		if not entry.completed then
+			if entry.zone == "secondary" then
+				secondary = secondary + 1
+			else
+				primary = primary + 1
+			end
+		end
+	end
+
+	-- Correct if drifted
+	if ai.primary_zone_count ~= primary then
+		local delta = ai.primary_zone_count - primary
+		if math.abs(delta) > 0 then
+			print(string.format("[AI_PLAYER] SANITY: %s primary_zone_count corrected %d -> %d (drift=%+d)",
+				ai.label or "P?", ai.primary_zone_count, primary, -delta))
+			ai.primary_zone_count = primary
+		end
+	end
+	if ai.secondary_zone_count ~= secondary then
+		local delta = ai.secondary_zone_count - secondary
+		if math.abs(delta) > 0 then
+			print(string.format("[AI_PLAYER] SANITY: %s secondary_zone_count corrected %d -> %d (drift=%+d)",
+				ai.label or "P?", ai.secondary_zone_count, secondary, -delta))
+			ai.secondary_zone_count = secondary
+		end
+	end
+end
+
+-----------------------------------------------------------------------
+-- Build Timeline Buffer
+-----------------------------------------------------------------------
+
+function _AI_RecordBuildEvent(player, event, type_key, detail)
+	local ai = player.ai
+	if ai.build_timeline == nil then ai.build_timeline = {} end
+	ai.build_timeline_idx = (ai.build_timeline_idx or 0) + 1
+	local idx = ai.build_timeline_idx
+
+	-- Circular buffer: overwrite oldest if past max
+	local slot = ((idx - 1) % _AI_BUILD_TIMELINE_MAX) + 1
+	ai.build_timeline[slot] = {
+		seq   = idx,
+		time  = World_GetGameTime(),
+		event = event,
+		type_key = type_key or "?",
+		detail = detail or "",
+	}
+end
+
+function _AI_PosKey(pos, grid)
+	if not _AI_IsValidWorldPos(pos) then return nil end
+	local g = grid or _AI_STALE_POS_KEY_GRID
+	local xk = math.floor((pos.x + (g * 0.5)) / g)
+	local zk = math.floor((pos.z + (g * 0.5)) / g)
+	return tostring(xk) .. ":" .. tostring(zk)
+end
+
+function _AI_IsPositionBlacklisted(player, pos)
+	if player == nil or player.ai == nil then return false end
+	if not _AI_IsValidWorldPos(pos) then return false end
+	local key = _AI_PosKey(pos, _AI_STALE_POS_KEY_GRID)
+	if key == nil then return false end
+	local now = World_GetGameTime()
+	local expires = player.ai.stale_pos_blacklist and player.ai.stale_pos_blacklist[key] or nil
+	if expires == nil then return false end
+	if now >= expires then
+		player.ai.stale_pos_blacklist[key] = nil
+		return false
+	end
+	return true
+end
+
+function _AI_BlacklistPosition(player, pos, ttl, reason)
+	if player == nil or player.ai == nil then return false end
+	if not _AI_IsValidWorldPos(pos) then return false end
+	local key = _AI_PosKey(pos, _AI_STALE_POS_KEY_GRID)
+	if key == nil then return false end
+	if player.ai.stale_pos_blacklist == nil then
+		player.ai.stale_pos_blacklist = {}
+	end
+	local expire_at = World_GetGameTime() + (ttl or _AI_STALE_POS_BLACKLIST_TTL)
+	player.ai.stale_pos_blacklist[key] = expire_at
+	print(string.format("[AI_PLAYER][BUILD] %s blacklisted stale pos (%.0f,%.0f) ttl=%.1fs reason=%s",
+		player.ai.label or "P?", pos.x or 0, pos.z or 0,
+		(ttl or _AI_STALE_POS_BLACKLIST_TTL), tostring(reason or "stale")))
+	return true
+end
+
+function _AI_IsEntityTrackedByOtherQueueEntry(ai, entity, current_entry)
+	if ai == nil or entity == nil then return false end
+	for _, other in ipairs(ai.construction_queue or {}) do
+		if other ~= current_entry and not other.completed and other.entity == entity then
+			return true
+		end
+	end
+	return false
+end
+
+function _AI_IsNearPendingQueuePos(ai, pos)
+	if ai == nil or not _AI_IsValidWorldPos(pos) then return false end
+	for _, entry in ipairs(ai.construction_queue or {}) do
+		if not entry.completed and _AI_IsValidWorldPos(entry.pos) then
+			local ok_dist, dist = pcall(World_DistancePointToPoint, pos, entry.pos)
+			if ok_dist and dist <= (_AI_STALE_POS_KEY_GRID * 0.75) then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+-- Mirrors missionomatic AssignVillagersToConstructBuilding helper.
+-- Uses the entry's assigned team SGroup; requires a team to be assigned.
+function _AI_IssueVillagerBuildOrder(player, entry, reason)
+	local ai = player.ai
+	if ai == nil then return false end
+
+	-- Require an assigned team — prevents full-pool commands from conflicting with busy teams
+	if entry.assigned_team == nil or entry.assigned_team.sg == nil then
+		_AI_DebugSnapshot(player, "build_order_no_team",
+			string.format("type=%s reason=%s issues=%d", tostring(entry.type_key), tostring(reason or "reissue"), entry.issue_count or 0))
+		return false
+	end
+	local cmd_sg = entry.assigned_team.sg
+	pcall(SGroup_Filter, cmd_sg, "scar_villager", FILTER_KEEP)
+	if SGroup_CountSpawned(cmd_sg) <= 0 then
+		_AI_DebugSnapshot(player, "build_order_no_villagers",
+			string.format("type=%s team=%s reason=%s", tostring(entry.type_key), tostring(entry.assigned_team.sg_name), tostring(reason or "reissue")))
+		return false
+	end
+
+	-- Pre-move villagers to build site if they are too far away
+	local ok_vpos, vill_pos = pcall(SGroup_GetPosition, cmd_sg)
+	if ok_vpos and vill_pos ~= nil and entry.pos ~= nil then
+		local ok_dist, dist = pcall(World_DistancePointToPoint, vill_pos, entry.pos)
+		if ok_dist and dist > _AI_VILLAGER_PREMOVE_DISTANCE then
+			pcall(Cmd_Move, cmd_sg, entry.pos, false)
+		end
+	end
+
+	local position = Util_GetPosition(entry.pos)
+	-- Use Cmd_Construct instead of LocalCommand_PlayerSquadConstructBuilding.
+	-- Cmd_Construct is the synchronized command path used by official scripts for
+	-- multiplayer-safe construction, while LocalCommand_* routes through local
+	-- input ownership and has been the observed frame-41 divergence surface.
+	local ok_cmd, err = pcall(Cmd_Construct, cmd_sg, entry.ebp, position, nil, false)
+	entry.last_issue_at = World_GetGameTime()
+	entry.issue_count = (entry.issue_count or 0) + 1
+	if not ok_cmd then
+		print(string.format("[AI_PLAYER] WARNING: %s villager Cmd_Construct failed for %s: %s",
+			ai.label or "P?", entry.type_key or "?", tostring(err)))
+		_AI_DebugSnapshot(player, "build_order_cmd_failed",
+			string.format("type=%s reason=%s err=%s issues=%d", tostring(entry.type_key), tostring(reason or "reissue"), tostring(err), entry.issue_count or 0))
+		return false
+	end
+	print(string.format("[AI_PLAYER][BUILD] %s order %s team=%s reason=%s issues=%d queue_age=%.1fs pos=(%.0f,%.0f)",
+		ai.label or "P?",
+		entry.type_key or "?",
+		entry.assigned_team and entry.assigned_team.sg_name or "?",
+		tostring(reason or "reissue"),
+		entry.issue_count or 0,
+		entry.queued_at and (entry.last_issue_at - entry.queued_at) or 0,
+		entry.pos and entry.pos.x or 0,
+		entry.pos and entry.pos.z or 0))
+	_AI_DebugSnapshot(player, "build_order_issued",
+		string.format("type=%s team=%s reason=%s issues=%d", tostring(entry.type_key), tostring(entry.assigned_team and entry.assigned_team.sg_name or "?"), tostring(reason or "reissue"), entry.issue_count or 0))
+	return true
+end
+
+function _AI_FindPendingEntityNearPos(player, entry)
+	local eg_all = Player_GetEntities(player.id)
+	local total = EGroup_CountSpawned(eg_all)
+	local best_entity = nil
+	local best_dist = math.huge
+	local ai = player.ai
+
+	for i = 1, total do
+		local ent = EGroup_GetSpawnedEntityAt(eg_all, i)
+		if ent ~= nil then
+			if _AI_IsEntityTrackedByOtherQueueEntry(ai, ent, entry) then
+				goto next_entity
+			end
+			local ok_alive, alive = pcall(Entity_IsAlive, ent)
+			if ok_alive and alive then
+				local ok_bp, bp = pcall(Entity_GetBlueprint, ent)
+				if ok_bp and bp == entry.ebp then
+					local ok_uc, under_construction = pcall(Entity_IsUnderConstruction, ent)
+					if ok_uc and not under_construction then
+						goto next_entity
+					end
+					local ok_pos, ent_pos = pcall(Entity_GetPosition, ent)
+					if ok_pos and ent_pos ~= nil then
+						local ok_dist, dist = pcall(World_DistancePointToPoint, ent_pos, entry.pos)
+						if ok_dist and dist < best_dist and dist <= _AI_CONSTRUCT_DISCOVERY_RADIUS then
+							best_dist = dist
+							best_entity = ent
+						end
+					end
+				end
+			end
+		end
+		::next_entity::
+	end
+
+	EGroup_Destroy(eg_all)
+	if best_entity ~= nil then
+		_AI_DebugSnapshot(player, "foundation_discovered",
+			string.format("type=%s dist=%.1f", tostring(entry.type_key), best_dist or -1))
+	end
+	return best_entity
+end
+
+function _AI_RegisterCompletedBuilding(player, entry)
+	local ai = player.ai
+	if entry.entity == nil then return false end
+
+	_ai_group_counter = _ai_group_counter + 1
+	local eg_name = "eg_ai_bld_" .. tostring(player.id) .. "_" .. tostring(_ai_group_counter)
+	local eg = EGroup_CreateIfNotFound(eg_name)
+	EGroup_Clear(eg)
+	EGroup_Add(eg, entry.entity)
+
+	if ai.production_egroups[entry.type_key] ~= nil then
+		table.insert(ai.production_egroups[entry.type_key], eg_name)
+	end
+
+	local staging_pos = _AI_GetBasePosition(player)
+	if staging_pos ~= nil and _CBA ~= nil and _CBA.center ~= nil then
+		staging_pos = Util_GetPositionFromAtoB(staging_pos, _CBA.center, 25)
+	end
+	local rally_set = false
+	if staging_pos ~= nil then
+		-- Sync safety: rally point MUST be set on every peer's simulation, not via
+		-- LocalCommand_* (which is local-input-only and is NOT sim-broadcast). The
+		-- previous AI_IsLocalAIPlayer-guarded LocalCommand_EntityPos call set the
+		-- rally only on the AI-controlling peer, causing newly-spawned production
+		-- units to walk to different positions per peer (~+1 formation on the
+		-- controlling peer per spawn) and triggering OOS within ~1s of every
+		-- production cycle. Use EGroup_SetRallyPoint, which mutates simulation
+		-- state identically on every peer (same pattern as official empirewars.scar).
+		local ok_rally = pcall(EGroup_SetRallyPoint, eg, staging_pos)
+		rally_set = ok_rally
+	end
+
+	entry.completed = true
+	_AI_RecordBuildEvent(player, "completed", entry.type_key,
+		string.format("(%.0f,%.0f) zone=%s", entry.pos.x or 0, entry.pos.z or 0, entry.zone or "primary"))
+	print(string.format("[AI_PLAYER] %s completed %s at (%.0f,%.0f) via villager command.",
+		ai.label or "P?", entry.type_key or "?", entry.pos.x or 0, entry.pos.z or 0))
+	_AI_DebugSnapshot(player, "building_completed",
+		string.format("type=%s zone=%s local_rally=%s", tostring(entry.type_key), tostring(entry.zone or "primary"), tostring(rally_set)))
+	-- Check stage advancement immediately on building completion
+	_AI_UpdateVillagerStage(player)
+	return true
+end
+
+-- Find a completed production building of a given type; return its position and entity
+function _AI_FindCompletedBuildingPos(player, building_type)
+	local ai = player.ai
+	local egroups = ai.production_egroups[building_type]
+	if egroups == nil or #egroups == 0 then return nil, nil end
+	for _, eg_name in ipairs(egroups) do
+		local eg = EGroup_CreateIfNotFound(eg_name)
+		if EGroup_Count(eg) > 0 then
+			local entity = EGroup_GetEntityAt(eg, 1)
+			if entity ~= nil then
+				local ok_alive, alive = pcall(Entity_IsAlive, entity)
+				local ok, pos = pcall(Entity_GetPosition, entity)
+				if ok_alive and alive and ok and pos ~= nil then
+					return pos, entity
+				end
+			end
+		end
+	end
+	return nil, nil
+end
+
+-- Find ALL completed production buildings of a given type; return list of {pos, entity}
+function _AI_FindAllCompletedBuildings(player, building_type)
+	local ai = player.ai
+	local results = {}
+	local egroups = ai.production_egroups[building_type]
+	if egroups == nil then return results end
+	for _, eg_name in ipairs(egroups) do
+		local eg = EGroup_CreateIfNotFound(eg_name)
+		if EGroup_Count(eg) > 0 then
+			local entity = EGroup_GetEntityAt(eg, 1)
+			if entity ~= nil then
+				local ok_alive, alive = pcall(Entity_IsAlive, entity)
+				local ok, pos = pcall(Entity_GetPosition, entity)
+				if ok_alive and alive and ok and pos ~= nil then
+					table.insert(results, { pos = pos, entity = entity })
+				end
+			end
+		end
+	end
+	return results
+end
+
+local _AI_PLACEMENT_RETRY_OFFSETS = {
+	{ x = 16, z = 0 },
+	{ x = 0, z = 16 },
+	{ x = -16, z = 0 },
+	{ x = 0, z = -16 },
+	{ x = 24, z = 24 },
+	{ x = -24, z = 24 },
+	{ x = 24, z = -24 },
+	{ x = -24, z = -24 },
+	{ x = 32, z = 0 },
+	{ x = 0, z = 32 },
+	{ x = -32, z = 0 },
+	{ x = 0, z = -32 },
+}
+
+function _AI_GetDeterministicPlacementRetry(anchor, attempt_index, clamp_margin, seed)
+	local offsets = _AI_PLACEMENT_RETRY_OFFSETS
+	local slot_seed = math.floor(math.abs(seed or 0))
+	local slot = ((slot_seed + attempt_index - 1) % #offsets) + 1
+	local offset = offsets[slot]
+	local candidate = Util_GetOffsetPosition(anchor, offset.x, offset.z)
+	return _AI_ClampToPlayableBounds(candidate, clamp_margin or 10)
+end
+
+function _AI_GetCenterBiasedPlacementAnchor(zone_center, fallback_center)
+	local center = _CBA and _CBA.center or nil
+	if _AI_IsValidWorldPos(zone_center) and _AI_IsValidWorldPos(center) then
+		return _AI_ClampToPlayableBounds(Util_GetPositionFromAtoB(zone_center, center, 24), 18)
+	end
+	if _AI_IsValidWorldPos(fallback_center) and _AI_IsValidWorldPos(center) then
+		return _AI_ClampToPlayableBounds(Util_GetPositionFromAtoB(fallback_center, center, 24), 18)
+	end
+	return fallback_center
+end
+
+function _AI_PlaceBuilding(player, ebp, zone_center, type_key, zone)
+	if not _AI_IsValidWorldPos(zone_center) then
+		print(string.format("[AI_PLAYER] WARNING: %s placement skipped (invalid_zone_center).",
+			player.ai.label or "P?"))
+		return false
+	end
+
+	local internal_key = _AI_BPKeyToInternalKey(type_key)
+	player.ai.telemetry.placement_attempts = (player.ai.telemetry.placement_attempts or 0) + 1
+	local base_pos = _AI_GetBasePosition(player)
+	local fallback_center = _AI_IsValidWorldPos(base_pos) and base_pos or zone_center
+	local inward_center = _AI_GetCenterBiasedPlacementAnchor(zone_center, fallback_center)
+
+	-- Offset from zone center to spread buildings out
+	local zone_count = (zone == "secondary") and player.ai.secondary_zone_count or player.ai.primary_zone_count
+	local angle = (zone_count * 45) % 360
+	local dist = 12 + (zone_count * 4)
+	local rad = math.rad(angle)
+	local offset_x = math.cos(rad) * dist
+	local offset_z = math.sin(rad) * dist
+	local target_pos = Util_GetOffsetPosition(zone_center, offset_x, offset_z)
+
+	-- Clamp initial target to playable bounds with margin so first attempt is viable
+	local pre_clamp = target_pos
+	target_pos = _AI_ClampToPlayableBounds(target_pos, 8)
+	if target_pos ~= pre_clamp then
+		player.ai.telemetry.placement_clamped = (player.ai.telemetry.placement_clamped or 0) + 1
+	end
+
+	-- Find a valid placement position. Try around zone center first,
+	-- then around base center, then an inward-biased center anchor.
+	local final_pos = nil
+	local reject_reason = "none"
+	local chosen_pass = 0
+	local chosen_attempt = 0
+	local reject_offmap = 0
+	local reject_calc = 0
+	local reject_blacklist = 0
+	local reject_pending = 0
+	local first_offmap_detail = nil
+	for pass = 1, 3 do
+		local anchor = zone_center
+		local clamp_margin = 10
+		if pass == 2 then
+			anchor = fallback_center
+			clamp_margin = 14
+		elseif pass == 3 then
+			anchor = inward_center
+			clamp_margin = 18
+		end
+		for attempt = 1, 6 do
+			local candidate = target_pos
+			local calc_success_detail = "not_called"
+			local should_log_attempt = (attempt <= 2 or (pass == 3 and attempt <= 2))
+			if pass > 1 and attempt == 1 then
+				candidate = _AI_ClampToPlayableBounds(anchor, clamp_margin)
+			elseif attempt > 1 then
+				local retry_index = ((pass - 1) * 6) + attempt - 1
+				local player_seed = _AI_GetPlayerOrdinal(player)
+				candidate = _AI_GetDeterministicPlacementRetry(anchor, retry_index, clamp_margin,
+					(zone_count * 13) + player_seed)
+			end
+
+			-- Pre-calc diagnostics: keep placement fully deterministic.
+			-- AI_FindConstructionLocation has produced peer-divergent outputs
+			-- (success on one peer, invalid/offset on the other) at the same tick,
+			-- so we do not consume it for gameplay decisions.
+			local candidate_before = candidate
+			local find_detail = "disabled_determinism_guard"
+			local candidate_after_find = candidate
+
+			local ok_calc, calc_result = pcall(Entity_CalcConstructionPlacement, ebp, player.id, candidate)
+			if ok_calc and type(calc_result) == "table" and calc_result.success and calc_result.position ~= nil then
+				-- Quantize x/z to the nearest integer to eliminate sub-decimal float precision
+				-- differences across CPU architectures (same class as disabled_determinism_guard
+				-- for AI_FindConstructionLocation). Engine building grid uses integer positions;
+				-- e.g. -173.999999987 and -174.000000014 both round to -174. Relic's canonical
+				-- Cmd_Construct pattern uses editor-baked marker positions (exact integers);
+				-- this replicates that precision for runtime-computed positions. y is unchanged.
+				local raw = calc_result.position
+				candidate = { x = math.floor(raw.x + 0.5), y = raw.y, z = math.floor(raw.z + 0.5) }
+				calc_success_detail = "true"
+			elseif ok_calc and type(calc_result) == "table" and calc_result.success ~= nil and not calc_result.success then
+				player.ai.telemetry.placement_rejects_calc = (player.ai.telemetry.placement_rejects_calc or 0) + 1
+				reject_calc = reject_calc + 1
+				reject_reason = "calc_rejected"
+				calc_success_detail = "false"
+			elseif ok_calc and type(calc_result) == "table" then
+				calc_success_detail = "table_missing_success"
+			elseif ok_calc then
+				calc_success_detail = string.format("non_table_%s", tostring(type(calc_result)))
+			else
+				calc_success_detail = "pcall_failed"
+			end
+
+			if _AI_IsPositionBlacklisted(player, candidate) then
+				if should_log_attempt then
+					local find_sentinel = tostring(not _AI_IsValidWorldPos(candidate_after_find))
+					print(string.format("[AI_PLAYER][DEBUG_ATTEMPT] player=%s pass=%d attempt=%d result=blacklist branch=blacklist find=%s find_sentinel=%s calc=%s cand_before=(%.1f,%.1f) cand_after_find=(%.1f,%.1f)",
+						player.ai.label or "P?", pass, attempt, find_detail, find_sentinel, calc_success_detail,
+						candidate_before and candidate_before.x or 0, candidate_before and candidate_before.z or 0,
+						candidate_after_find and candidate_after_find.x or 0, candidate_after_find and candidate_after_find.z or 0))
+				end
+				player.ai.telemetry.placement_blacklist_skips = (player.ai.telemetry.placement_blacklist_skips or 0) + 1
+				player.ai.telemetry.placement_rejects_blacklist = (player.ai.telemetry.placement_rejects_blacklist or 0) + 1
+				reject_blacklist = reject_blacklist + 1
+				reject_reason = "stale_blacklist"
+				goto next_attempt
+			end
+
+			if _AI_IsNearPendingQueuePos(player.ai, candidate) then
+				if should_log_attempt then
+					local find_sentinel = tostring(not _AI_IsValidWorldPos(candidate_after_find))
+					print(string.format("[AI_PLAYER][DEBUG_ATTEMPT] player=%s pass=%d attempt=%d result=pending branch=pending find=%s find_sentinel=%s calc=%s cand_before=(%.1f,%.1f) cand_after_find=(%.1f,%.1f)",
+						player.ai.label or "P?", pass, attempt, find_detail, find_sentinel, calc_success_detail,
+						candidate_before and candidate_before.x or 0, candidate_before and candidate_before.z or 0,
+						candidate_after_find and candidate_after_find.x or 0, candidate_after_find and candidate_after_find.z or 0))
+				end
+				player.ai.telemetry.placement_rejects_pending = (player.ai.telemetry.placement_rejects_pending or 0) + 1
+				reject_pending = reject_pending + 1
+				reject_reason = "near_pending"
+				goto next_attempt
+			end
+
+			local within_before = _AI_IsWithinPlayableBounds(candidate)
+			if not within_before then
+				local salvaged = _AI_ClampToPlayableBounds(candidate, 22)
+				if _AI_IsWithinPlayableBounds(salvaged) then
+					candidate = salvaged
+				end
+			end
+
+			local within_after = _AI_IsWithinPlayableBounds(candidate)
+			-- Per-attempt diagnostic (track all pass 1 & 2, pass 3 attempts 1-2 only to avoid spam)
+			if should_log_attempt then
+				local attempt_result = within_after and "success" or "offmap"
+				local find_sentinel = tostring(not _AI_IsValidWorldPos(candidate_after_find))
+				print(string.format("[AI_PLAYER][DEBUG_ATTEMPT] player=%s pass=%d attempt=%d result=%s branch=bounds find=%s find_sentinel=%s calc=%s within_before=%s within_after=%s cand_before=(%.1f,%.1f) cand_after_find=(%.1f,%.1f) cand_final=(%.8f,%.8f)",
+					player.ai.label or "P?", pass, attempt, attempt_result, find_detail, find_sentinel, calc_success_detail,
+					tostring(within_before), tostring(within_after),
+					candidate_before and candidate_before.x or 0, candidate_before and candidate_before.z or 0,
+					candidate_after_find and candidate_after_find.x or 0, candidate_after_find and candidate_after_find.z or 0,
+					candidate and candidate.x or 0, candidate and candidate.z or 0))
+			end
+			
+			if within_after then
+				final_pos = candidate
+				chosen_pass = pass
+				chosen_attempt = attempt
+				break
+			end
+			player.ai.telemetry.placement_rejects_offmap = (player.ai.telemetry.placement_rejects_offmap or 0) + 1
+			reject_offmap = reject_offmap + 1
+			reject_reason = "offmap"
+			if first_offmap_detail == nil then
+				local bounds_attempt = _AI_FormatPlayableBoundsInfo(_AI_GetPlayableBoundsInfo())
+				first_offmap_detail = string.format("pass=%d attempt=%d find=%s cand_before=(%.1f,%.1f) calc=%s valid=%s in_before=%s in_after=%s cand=(%.1f,%.1f) %s",
+					pass, attempt, find_detail,
+					candidate_before and candidate_before.x or 0, candidate_before and candidate_before.z or 0,
+					calc_success_detail,
+					tostring(_AI_IsValidWorldPos(candidate)), tostring(within_before), tostring(within_after),
+					candidate and candidate.x or 0, candidate and candidate.z or 0,
+					bounds_attempt)
+			end
+			::next_attempt::
+		end
+		if final_pos ~= nil then break end
+	end
+
+	if final_pos == nil then
+		player.ai.telemetry.placement_failures = (player.ai.telemetry.placement_failures or 0) + 1
+		local bounds_info = _AI_GetPlayableBoundsInfo()
+		local bounds_text = _AI_FormatPlayableBoundsInfo(bounds_info)
+		print(string.format("[AI_PLAYER] WARNING: %s placement failed (%s) for %s zone=%s zone_center=(%.0f,%.0f) fallback=(%.0f,%.0f) inward=(%.0f,%.0f) rejects(off=%d calc=%d blk=%d pending=%d) %s.",
+			player.ai.label or "P?", reject_reason, internal_key, zone or "primary",
+			zone_center.x or 0, zone_center.z or 0,
+			fallback_center.x or 0, fallback_center.z or 0,
+			inward_center and inward_center.x or 0, inward_center and inward_center.z or 0,
+			reject_offmap, reject_calc, reject_blacklist, reject_pending, bounds_text))
+		_AI_DebugSnapshot(player, "placement_failed",
+			string.format("type=%s zone=%s reason=%s zone_count=%d target=(%.0f,%.0f) fallback=(%.0f,%.0f) inward=(%.0f,%.0f) rejects(off=%d calc=%d blk=%d pending=%d) %s offmap_first=%s",
+				internal_key, tostring(zone or "primary"), reject_reason, zone_count,
+				target_pos.x or 0, target_pos.z or 0,
+				fallback_center.x or 0, fallback_center.z or 0,
+				inward_center and inward_center.x or 0, inward_center and inward_center.z or 0,
+				reject_offmap, reject_calc, reject_blacklist, reject_pending, bounds_text, tostring(first_offmap_detail or "none")))
+		return false
+	end
+
+	-- Queue entry: villager build command (Cmd_Construct)
+	-- creates the foundation through the synchronized command path and assigns villagers to it.
+	table.insert(player.ai.construction_queue, {
+		entity = nil,
+		ebp = ebp,
+		pos = final_pos,
+		type_key = internal_key,
+		zone = zone or "primary",
+		queued_at = World_GetGameTime(),
+		issue_count = 0,
+		last_issue_at = nil,
+		last_progress = 0,
+		last_progress_at = World_GetGameTime(),
+		blocked_retried = false,
+		completed = false,
+	})
+	player.ai.telemetry.queue_entries_created = (player.ai.telemetry.queue_entries_created or 0) + 1
+
+	-- Update zone count
+	if zone == "secondary" then
+		player.ai.secondary_zone_count = player.ai.secondary_zone_count + 1
+	else
+		player.ai.primary_zone_count = player.ai.primary_zone_count + 1
+	end
+
+	_AI_RecordBuildEvent(player, "queued", internal_key,
+		string.format("(%.0f,%.0f) zone=%s pending=%d", final_pos.x or 0, final_pos.z or 0,
+			zone or "primary", _AI_CountPendingFoundations(player)))
+	print(string.format("[AI_PLAYER] %s queued %s at (%.0f,%.0f) [%s zone] pending=%d",
+		player.ai.label or "P?", internal_key,
+		final_pos.x or 0, final_pos.z or 0, zone or "primary",
+		_AI_CountPendingFoundations(player)))
+	_AI_DebugSnapshot(player, "placement_queued",
+		string.format("type=%s zone=%s pos=(%.0f,%.0f) zone_count=%d pass=%d attempt=%d", internal_key, tostring(zone or "primary"), final_pos.x or 0, final_pos.z or 0, zone_count, chosen_pass, chosen_attempt))
+
+	return true
+end

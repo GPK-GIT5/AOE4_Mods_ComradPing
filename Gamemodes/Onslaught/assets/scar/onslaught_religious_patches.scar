@@ -1,0 +1,167 @@
+-----------------------------------------------------------------------
+-- Onslaught Religious Win Condition Patches
+--
+-- Minimal overrides applied AFTER winconditions/religious.scar loads.
+-- Official logic is default; only concrete Onslaught dependencies are patched.
+--
+-- Patch 1: Religious_UpdateConditions
+--   New function (not in official). Called by cba.scar init to apply the
+--   AGS options-panel religious timer setting to _religious.time_victory.
+--   Required: cba.scar calls Religious_UpdateConditions(_mod) at init;
+--   without this function the call would crash with a nil-function error.
+--
+-- Patch 2: Religious_OnGameOver override
+--   Official is missing Rule_RemoveGlobalEvent(Religious_OnHolySiteChange),
+--   leaving a GE_StrategicPointChanged listener alive after game over.
+--   Also wraps all rule removals in pcall() to prevent crashes during
+--   Onslaught teardown, and skips the music one-shot when
+--   _onslaught_teardown_detected is true.
+--
+-- Patch 3: Religious_WinnerPresentation / Religious_LoserPresentation overrides
+--   Routes end-game stingers through Onslaught_TryQueueGameOver (cba.scar)
+--   instead of Rule_AddOneShot(_gameOver_message, …) so the presentation
+--   queues correctly alongside other Onslaught end-game events.
+-----------------------------------------------------------------------
+
+local _onslaught_religious_print = print
+local function print(...)
+	local message = tostring(select(1, ...))
+	if string.find(message, "^%[TRACE%]") then
+		if type(Onslaught_ShouldLogTrace) == "function" and Onslaught_ShouldLogTrace() then
+			_onslaught_religious_print(...)
+		end
+		return
+	end
+	_onslaught_religious_print(...)
+end
+
+-----------------------------------------------------------------------
+-- Patch 1: AGS religious timer configuration
+-----------------------------------------------------------------------
+
+-- Called by cba.scar during OnInit to apply the AGS victory timer option.
+-- Reads _mod.options.section_ags_conditions.option_religious_timer and
+-- updates _religious.time_victory (in seconds) accordingly.
+function Religious_UpdateConditions(_mod)
+	local new_timer_in_minutes = -1
+	if _mod.options.section_ags_conditions and 
+		_mod.options.section_ags_conditions.option_religious_timer then
+		local opt = _mod.options.section_ags_conditions.option_religious_timer
+		if opt.enum_value == opt.enum_items.religious_5 then
+			new_timer_in_minutes = 5
+		elseif opt.enum_value == opt.enum_items.religious_10 then
+			new_timer_in_minutes = 10
+		elseif opt.enum_value == opt.enum_items.religious_15 then
+			new_timer_in_minutes = 15
+		elseif opt.enum_value == opt.enum_items.religious_20 then
+			new_timer_in_minutes = 20
+		elseif opt.enum_value == opt.enum_items.religious_25 then
+			new_timer_in_minutes = 25
+		elseif opt.enum_value == opt.enum_items.religious_30 then
+			new_timer_in_minutes = 30
+		end
+	end
+
+	if new_timer_in_minutes > 0 then
+		_religious.time_victory = new_timer_in_minutes * 60
+	end
+end
+
+-----------------------------------------------------------------------
+-- Patch 2: Religious_OnGameOver — fix missing event deregistration
+-----------------------------------------------------------------------
+
+-- Overrides official to:
+--   (a) also remove Religious_OnHolySiteChange (GE_StrategicPointChanged)
+--       which official RegisterModule registers in Religious_Start but
+--       never removes in Religious_OnGameOver — a live listener after game over.
+--   (b) wrap all removals in pcall() to prevent crashes if rules/events
+--       were already removed by another Onslaught teardown path.
+--   (c) skip the music one-shot when _onslaught_teardown_detected is true.
+function Religious_OnGameOver()
+	print("[TRACE] Religious_OnGameOver called")
+	-- Remove update rule to disable UI elements before end-of-match flow starts.
+	pcall(Rule_Remove, Religious_Update)
+
+	-- Remove both event handlers registered in Religious_Start.
+	-- Note: official only removes Religious_OnLocalPlayerChanged here —
+	-- Religious_OnHolySiteChange (GE_StrategicPointChanged) is missing from
+	-- the official implementation and must be removed explicitly.
+	pcall(Rule_RemoveGlobalEvent, Religious_OnLocalPlayerChanged)
+	pcall(Rule_RemoveGlobalEvent, Religious_OnHolySiteChange)
+
+	-- Remove late-game minimap blip/flash intervals if active.
+	pcall(Rule_Remove, Religious_HolySiteMinimapBlips)
+	pcall(Rule_Remove, Religious_FlashAllHolySites)
+
+	-- Stop music (skip during Onslaught teardown to avoid scheduling a
+	-- one-shot into an already-torn-down rule system).
+	if not _onslaught_teardown_detected then
+		Rule_AddOneShot(Religious_StopMusic, 1)
+	end
+end
+
+-----------------------------------------------------------------------
+-- Patch 3: End-game presentation — route through Onslaught queue
+-----------------------------------------------------------------------
+
+-- Overrides official Rule_AddOneShot(_gameOver_message, …) with
+-- Onslaught_TryQueueGameOver so the presentation is coordinated with
+-- other Onslaught end-game events (score screen, elimination flow, etc.).
+function Religious_WinnerPresentation(playerID)
+
+	local player = Core_GetPlayersTableEntry(playerID)
+
+	if player.isLocal then
+
+		-- Hide UI elements
+		Misc_ClearSelection()
+		Taskbar_SetVisibility(false)
+
+		-- Show objective complete popup
+		Obj_SetState(_religious.objective.control, OS_Complete)
+		Obj_CreatePopup(_religious.objective.control, 11169980, "")		-- "Control all Holy Sites"
+		Music_PlayStinger(MUS_STING_PRIMARY_OBJ_COMPLETE_ENDGAME)
+		Religious_RemoveObjectives()
+
+		-- Show victory stinger via Onslaught queue
+		Onslaught_TryQueueGameOver(
+			GAMEOVER_OBJECTIVE_TIME, {
+			_playerID = playerID,
+			_icon = _religious.icons.objective,
+			_endType = Loc_GetString(11161277),		-- "VICTORY"
+			_message = Loc_Empty(),					-- Unused
+			_sound = _religious.sfx.victory,
+			_videoURI = "stinger_victory"
+		})
+	end
+end
+
+function Religious_LoserPresentation(playerID)
+
+	local player = Core_GetPlayersTableEntry(playerID)
+
+	if player.isLocal then
+
+		-- Hide UI elements
+		Misc_ClearSelection()
+		Taskbar_SetVisibility(false)
+
+		-- Show objective failed popup
+		Obj_SetState(_religious.objective.control, OS_Failed)
+		Obj_CreatePopup(_religious.objective.control, 11183992, "")	-- "Neutralize a Holy Site"
+		Music_PlayStinger(MUS_STING_PRIMARY_OBJ_FAIL)
+		Religious_RemoveObjectives()
+
+		-- Show defeat stinger via Onslaught queue
+		Onslaught_TryQueueGameOver(
+			GAMEOVER_OBJECTIVE_TIME, {
+			_playerID = playerID,
+			_icon = _religious.icons.objective,
+			_endType = Loc_GetString(11165094),		-- "DEFEAT"
+			_message = Loc_Empty(),					-- Unused
+			_sound = _religious.sfx.defeat,
+			_videoURI = "stinger_defeat"
+		})
+	end
+end

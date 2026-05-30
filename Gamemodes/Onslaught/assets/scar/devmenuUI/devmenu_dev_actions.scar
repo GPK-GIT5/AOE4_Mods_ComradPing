@@ -1,0 +1,601 @@
+-----------------------------------------------------------------------
+-- DevMenu: Dev Debugger Actions
+--
+-- Thin named global wrappers around debug commands from cba_debug.
+-- These are called by the DEV menu. Each handler is a safe pcall wrapper
+-- that invokes the corresponding global debug function by name.
+--
+-- AI logging toggle is special: it reads/writes the AI runtime debug flags.
+--
+-- Phase 4 (MP safety): _devmenu_dev_safe_call enforces a fail-closed
+-- allowlist. Any debug entry point not in _DEVMENU_DEV_MP_SAFE is blocked
+-- when World_IsMultiplayerGame() returns true (or cannot be proven false).
+-- Read-only diagnostics + logger toggles are permitted. Sim-mutating probes
+-- must be audited, network-routed through BATTLE_LAG_START / DevMenu_NetworkDispatch,
+-- and added here ONLY after confirming all peers execute at the same lockstep tick.
+-- OOS is a critical failure. No confirm-once bypass exists in any gate mode.
+-----------------------------------------------------------------------
+
+-- Allowlist of debug entry points that are provably MP-safe (read-only,
+-- pure SCAR table inspection, or routed through synchronized commands).
+-- Entries outside this list are blocked in MP by _devmenu_dev_safe_call.
+_DEVMENU_DEV_MP_SAFE = {
+	-- Read-only audits / inspectors:
+	["Debug_FactionMapDiagnostic"]  = true,
+	["Debug_VerifyDynastiesData"]   = true,
+	["Debug_VerifyJinRuntime"]      = true,
+	["Debug_BlueprintAudit_Civ"]    = true,
+	["Debug_GetLimitsUIState"]      = true,
+	["Debug_ClassifyTest_All"]      = true,
+	["Debug_EventProbes"]           = true,
+	["Debug_InteractiveChecks"]     = true,
+	-- Determinism probe is designed to be sim-write-free; verify before re-enabling
+	-- if it ever gains a setter. Allowed today.
+	["Debug_Determinism"]           = true,
+	-- Combined MP safety audit (defined in devmenu_mp_gate.scar) is MP-aware.
+	["DevMenu_RunMPSafetyAudit"]    = true,
+	-- Cheat Actions Verifier: read-only structural checks for block-actions,
+	-- DEVMENU_BURN, spawn cam, and RefreshToggleStates (2026-05-16 bug fixes).
+	["DevMenu_RunCheatActionsVerify"] = true,
+	-- Per-state replication probes: read-only snapshots, no sim writes.
+	["DevMenu_DiagReplInvuln"]      = true,
+	["DevMenu_DiagReplFoW"]         = true,
+	["DevMenu_DiagReplInstBuild"]   = true,
+	-- Modifier account dump: read-only counter print.
+	["DevMenu_DiagModifierAccount"] = true,
+	-- Full diagnostic pass: all sub-probes are read-only API checks.
+	["DevMenu_DiagRunAll"]          = true,
+	-- UI stress: confirmed read-only (presentation layer only, no sim writes).
+	-- Verified 147/147 pass in a 2-player MP session on 2026-05-13.
+	["Debug_StressUI"]              = true,
+	-- Full automated session runner: orchestration is read-only; all sim-mutating
+	-- sub-suites (SiegeTest, SiegeCascade, RapidElimination, ConcurrentThrash,
+	-- BuildingLimitOscillation, Cat10 phases) are network-routed through
+	-- GE_BroadcastMessage so they execute on all peers at the same sim tick.
+	["Debug_StressGamemode_Automated"] = true,
+	-- Battle-lag harness: Start/Stop route through BATTLE_LAG_START/STOP on the
+	-- DevMenu lockstep network bus; all peers spawn simultaneously → no OOS.
+	-- Status/Config are read-only scarlog printers; no sim writes.
+	["Debug_BattleLagTest"]   = true,
+	["Debug_BattleLagStop"]   = true,
+	["Debug_BattleLagStatus"] = true,
+	["Debug_BattleLagConfig"] = true,
+	-- Advanced Stress All bundle: orchestrator delegates to network-routed children.
+	-- All 6 child suites use Network_CallEvent → GE_BroadcastMessage lockstep bus
+	-- (BuildingLimitOscillation, ConcurrentThrash, SiegeCascade, RapidElimination)
+	-- or are read-only (MaxPopPressure, BlueprintStorm). Verified via automated runner.
+	["Debug_AdvancedStressAll"]                  = true,
+	["Debug_AdvStress_BuildingLimitOscillation"] = true,
+	["Debug_AdvStress_MaxPopPressure"]           = true,
+	["Debug_AdvStress_BlueprintStorm"]           = true,
+	["Debug_AdvStress_ConcurrentThrash"]         = true,
+	["Debug_AdvStress_SiegeCascade"]             = true,
+	["Debug_AdvStress_RapidElimination"]         = true,
+}
+
+
+local function _devmenu_dev_safe_call(fn_name, ...)
+	-- Phase 4 fail-closed MP gate. Honors _DEVMENU_MP_GATE_MODE:
+	--   "allow" -> silent passthrough (SP-soak / explicit override only).
+	--   "warn"  -> hard block unless on _DEVMENU_DEV_MP_SAFE (same as "block").
+	--              OOS is a critical failure; no confirm-once bypass exists.
+	--   "block" -> hard block unless on safe allowlist.
+	-- To run a probe in MP: audit it, route sim writes through Network_CallEvent,
+	-- and add it to _DEVMENU_DEV_MP_SAFE. Do not use "allow" as a workaround.
+	if type(_devmenu_is_multiplayer) == "function" and _devmenu_is_multiplayer() then
+		local key = tostring(fn_name)
+		local is_safe = _DEVMENU_DEV_MP_SAFE[key] == true
+		local mode = (type(DevMenu_GetMPGateMode) == "function") and DevMenu_GetMPGateMode() or "warn"
+		if not is_safe and mode ~= "allow" then
+			local msg = "[DEVMENU-MPGATE] dev probe " .. key
+				.. " not on _DEVMENU_DEV_MP_SAFE allowlist (multiplayer session)"
+			print(msg .. " -> BLOCKED (audit + network-route, then add to _DEVMENU_DEV_MP_SAFE)")
+			if type(DevMenu_ShowToast) == "function" then
+				DevMenu_ShowToast({
+					prefix     = "dev probe: ",
+					state_word = "BLOCKED IN MP",
+					state_on   = false,
+					suffix     = " — " .. key .. " not allowlisted",
+				})
+			end
+			return
+		end
+	end
+	local fn = _G[fn_name]
+	-- Fallback: resolve dotted paths like "debug.data.run" via table traversal.
+	if type(fn) ~= "function" and type(fn_name) == "string" and string.find(fn_name, ".", 1, true) then
+		local t = _G
+		for segment in string.gmatch(fn_name, "[^%.]+") do
+			if type(t) ~= "table" then t = nil; break end
+			t = t[segment]
+		end
+		if type(t) == "function" then fn = t end
+	end
+	if type(fn) ~= "function" then
+		print("[DEVMENU] debug handler missing: " .. tostring(fn_name))
+		return
+	end
+	local ok, err = pcall(fn, ...)
+	if not ok then
+		print("[DEVMENU] " .. tostring(fn_name) .. " ERROR: " .. tostring(err))
+	end
+end
+
+-- Logging Controls
+-----------------------------------------------------------------------
+
+local function _devmenu_is_shared_logging_enabled()
+	if type(AGS_IsDebugLoggingEnabled) == "function" then
+		return AGS_IsDebugLoggingEnabled() == true
+	end
+	return AGS_DEBUG_LOGGING_ENABLED == true
+end
+
+local function _devmenu_set_shared_logging_enabled(enabled)
+	local should_enable = enabled == true
+	if type(AGS_SetDebugLoggingEnabled) == "function" then
+		AGS_SetDebugLoggingEnabled(should_enable)
+	else
+		AGS_DEBUG_LOGGING_ENABLED = should_enable
+	end
+end
+
+local function _devmenu_is_cba_debug_logging_enabled()
+	if type(CBA_Debug_IsLoggingEnabled) == "function" then
+		return CBA_Debug_IsLoggingEnabled() == true
+	end
+	return _cba_debug ~= nil and _cba_debug.logging_enabled == true
+end
+
+local function _devmenu_set_cba_debug_logging_enabled(enabled)
+	local should_enable = enabled == true
+	if type(CBA_Debug_SetLoggingEnabled) == "function" then
+		CBA_Debug_SetLoggingEnabled(should_enable)
+	elseif _cba_debug ~= nil then
+		_cba_debug.logging_enabled = should_enable
+	end
+end
+
+local function _devmenu_is_ai_logging_enabled()
+	return (_AI_DEBUG_VERBOSITY or 0) >= 1 or _AI_DEBUG_CAPTURE_PATROL_OWNERSHIP == true
+end
+
+local function _devmenu_set_ai_logging_enabled(enabled)
+	local should_enable = enabled == true
+	_AI_DEBUG_VERBOSITY = should_enable and 1 or 0
+	_AI_DEBUG_CAPTURE_PATROL_OWNERSHIP = should_enable
+	_AI_HEARTBEAT_STARTED = false
+	_AI_BUILD_HEARTBEAT_STARTED = false
+end
+
+local function _devmenu_is_onslaught_channel_enabled(override_value, default_value)
+	if override_value ~= nil then
+		return override_value == true
+	end
+	return default_value == true
+end
+
+local function _devmenu_is_trace_logging_enabled()
+	return _devmenu_is_onslaught_channel_enabled(_ONSLAUGHT_DEBUG_TRACE_OVERRIDE, _ONSLAUGHT_DEBUG_TRACE)
+end
+
+local function _devmenu_set_trace_logging_enabled(enabled)
+	_ONSLAUGHT_DEBUG_TRACE_OVERRIDE = enabled == true
+end
+
+local function _devmenu_is_force_team_positions_logging_enabled()
+	return _devmenu_is_onslaught_channel_enabled(_ONSLAUGHT_DEBUG_FORCE_TEAM_POSITIONS_OVERRIDE, _ONSLAUGHT_DEBUG_FORCE_TEAM_POSITIONS)
+end
+
+local function _devmenu_set_force_team_positions_logging_enabled(enabled)
+	_ONSLAUGHT_DEBUG_FORCE_TEAM_POSITIONS_OVERRIDE = enabled == true
+end
+
+local function _devmenu_is_keep_cap_logging_enabled()
+	return _devmenu_is_onslaught_channel_enabled(_ONSLAUGHT_DEBUG_KEEP_CAP_OVERRIDE, _ONSLAUGHT_DEBUG_KEEP_CAP)
+end
+
+local function _devmenu_set_keep_cap_logging_enabled(enabled)
+	_ONSLAUGHT_DEBUG_KEEP_CAP_OVERRIDE = enabled == true
+end
+
+local function _devmenu_is_precache_logging_enabled()
+	return _devmenu_is_onslaught_channel_enabled(_ONSLAUGHT_DEBUG_PRECACHE_OVERRIDE, _ONSLAUGHT_DEBUG_PRECACHE)
+end
+
+local function _devmenu_set_precache_logging_enabled(enabled)
+	_ONSLAUGHT_DEBUG_PRECACHE_OVERRIDE = enabled == true
+end
+
+local function _devmenu_is_autoage_info_logging_enabled()
+	if _AUTOAGE_INFO_LOGGING_ENABLED ~= nil then
+		return _AUTOAGE_INFO_LOGGING_ENABLED == true
+	end
+	return _AUTOAGE_DEBUG_LOGS == true
+end
+
+local function _devmenu_set_autoage_info_logging_enabled(enabled)
+	local should_enable = enabled == true
+	_AUTOAGE_INFO_LOGGING_ENABLED = should_enable
+	_AUTOAGE_DEBUG_LOGS = should_enable
+end
+
+local function _devmenu_is_autoage_diag_logging_enabled()
+	return _AUTOAGE_DIAG_ENABLED == true
+end
+
+local function _devmenu_set_autoage_diag_logging_enabled(enabled)
+	_AUTOAGE_DIAG_ENABLED = enabled == true
+end
+
+local function _devmenu_is_playerui_logging_enabled()
+	if type(PlayerUI_IsLoggingEnabled) == "function" then
+		return PlayerUI_IsLoggingEnabled() == true
+	end
+	return PLAYERUI_LOGGING_ENABLED == true
+end
+
+local function _devmenu_set_playerui_logging_enabled(enabled)
+	if type(PlayerUI_SetLoggingEnabled) == "function" then
+		PlayerUI_SetLoggingEnabled(enabled == true)
+	else
+		PLAYERUI_LOGGING_ENABLED = enabled == true
+	end
+end
+
+local function _devmenu_is_playerui_diagnostic_logging_enabled()
+	if type(PlayerUI_IsDiagnosticLoggingEnabled) == "function" then
+		return PlayerUI_IsDiagnosticLoggingEnabled() == true
+	end
+	return PLAYERUI_DIAGNOSTIC_LOGGING_ENABLED == true
+end
+
+local function _devmenu_set_playerui_diagnostic_logging_enabled(enabled)
+	if type(PlayerUI_SetDiagnosticLoggingEnabled) == "function" then
+		PlayerUI_SetDiagnosticLoggingEnabled(enabled == true)
+	else
+		PLAYERUI_DIAGNOSTIC_LOGGING_ENABLED = enabled == true
+	end
+end
+
+local function _devmenu_is_siege_verbose_logging_enabled()
+	local mode = nil
+	if _cba_debug ~= nil then
+		mode = _cba_debug.siege_log_mode
+		if mode == nil then
+			mode = _cba_debug.siegeLogMode
+		end
+	end
+	return string.lower(tostring(mode or "standard")) == "verbose"
+end
+
+local function _devmenu_set_siege_verbose_logging_enabled(enabled)
+	if _cba_debug == nil then
+		return
+	end
+	local mode = enabled == true and "verbose" or "standard"
+	_cba_debug.siege_log_mode = mode
+	_cba_debug.siegeLogMode = mode
+end
+
+local _devmenu_logging_controls = {
+	{ label = "Shared / AGS", getter = _devmenu_is_shared_logging_enabled, setter = _devmenu_set_shared_logging_enabled },
+	{ label = "CBA Debug", getter = _devmenu_is_cba_debug_logging_enabled, setter = _devmenu_set_cba_debug_logging_enabled },
+	{ label = "AI", getter = _devmenu_is_ai_logging_enabled, setter = _devmenu_set_ai_logging_enabled },
+	{ label = "Trace", getter = _devmenu_is_trace_logging_enabled, setter = _devmenu_set_trace_logging_enabled },
+	{ label = "Force Team Positions", getter = _devmenu_is_force_team_positions_logging_enabled, setter = _devmenu_set_force_team_positions_logging_enabled },
+	{ label = "Keep Cap", getter = _devmenu_is_keep_cap_logging_enabled, setter = _devmenu_set_keep_cap_logging_enabled },
+	{ label = "Precache", getter = _devmenu_is_precache_logging_enabled, setter = _devmenu_set_precache_logging_enabled },
+	{ label = "AutoAge Info", getter = _devmenu_is_autoage_info_logging_enabled, setter = _devmenu_set_autoage_info_logging_enabled },
+	{ label = "AutoAge Diagnostics", getter = _devmenu_is_autoage_diag_logging_enabled, setter = _devmenu_set_autoage_diag_logging_enabled },
+	{ label = "PlayerUI", getter = _devmenu_is_playerui_logging_enabled, setter = _devmenu_set_playerui_logging_enabled },
+	{ label = "PlayerUI Diagnostics", getter = _devmenu_is_playerui_diagnostic_logging_enabled, setter = _devmenu_set_playerui_diagnostic_logging_enabled },
+	{ label = "Siege Verbose", getter = _devmenu_is_siege_verbose_logging_enabled, setter = _devmenu_set_siege_verbose_logging_enabled },
+}
+
+local function _devmenu_are_all_logging_controls_enabled()
+	for _, control in ipairs(_devmenu_logging_controls) do
+		if control.getter() ~= true then
+			return false
+		end
+	end
+	return #_devmenu_logging_controls > 0
+end
+
+local function _devmenu_set_all_logging_controls(enabled)
+	for _, control in ipairs(_devmenu_logging_controls) do
+		control.setter(enabled)
+	end
+end
+
+local function _devmenu_toggle_logging_control(label, getter, setter, detail_fn)
+	local should_enable = not getter()
+	setter(should_enable)
+	local detail = ""
+	if type(detail_fn) == "function" then
+		detail = tostring(detail_fn(should_enable) or "")
+	end
+	if detail ~= "" then
+		detail = " (" .. detail .. ")"
+	end
+	print(string.format("[DEVMENU] %s %s%s", label, should_enable and "ENABLED" or "DISABLED", detail))
+end
+
+function DevMenu_GetAllLoggingEnabled()
+	return _devmenu_are_all_logging_controls_enabled()
+end
+
+function DevMenu_ToggleAllLogging()
+	local should_enable = not _devmenu_are_all_logging_controls_enabled()
+	_devmenu_set_all_logging_controls(should_enable)
+	print(string.format("[DEVMENU] All logging %s", should_enable and "ENABLED" or "DISABLED"))
+end
+
+function DevMenu_GetSharedLoggingEnabled()
+	return _devmenu_is_shared_logging_enabled()
+end
+
+function DevMenu_ToggleSharedLogging()
+	_devmenu_toggle_logging_control("Shared / AGS logging", _devmenu_is_shared_logging_enabled, _devmenu_set_shared_logging_enabled)
+end
+
+function DevMenu_GetCBADebugLoggingEnabled()
+	return _devmenu_is_cba_debug_logging_enabled()
+end
+
+function DevMenu_ToggleCBADebugLogging()
+	_devmenu_toggle_logging_control("CBA Debug logging", _devmenu_is_cba_debug_logging_enabled, _devmenu_set_cba_debug_logging_enabled)
+end
+
+function DevMenu_GetAILoggingEnabled()
+	return _devmenu_is_ai_logging_enabled()
+end
+
+function DevMenu_ToggleAILogging()
+	_devmenu_toggle_logging_control("AI logging", _devmenu_is_ai_logging_enabled, _devmenu_set_ai_logging_enabled, function()
+		return string.format("verbosity=%d, patrol_ownership_capture=%s",
+			_AI_DEBUG_VERBOSITY or 0,
+			tostring(_AI_DEBUG_CAPTURE_PATROL_OWNERSHIP == true))
+	end)
+end
+
+function DevMenu_GetTraceLoggingEnabled()
+	return _devmenu_is_trace_logging_enabled()
+end
+
+function DevMenu_ToggleTraceLogging()
+	_devmenu_toggle_logging_control("Trace logging", _devmenu_is_trace_logging_enabled, _devmenu_set_trace_logging_enabled)
+end
+
+function DevMenu_GetForceTeamPositionsLoggingEnabled()
+	return _devmenu_is_force_team_positions_logging_enabled()
+end
+
+function DevMenu_ToggleForceTeamPositionsLogging()
+	_devmenu_toggle_logging_control("Force Team Positions logging", _devmenu_is_force_team_positions_logging_enabled, _devmenu_set_force_team_positions_logging_enabled)
+end
+
+function DevMenu_GetKeepCapLoggingEnabled()
+	return _devmenu_is_keep_cap_logging_enabled()
+end
+
+function DevMenu_ToggleKeepCapLogging()
+	_devmenu_toggle_logging_control("Keep Cap logging", _devmenu_is_keep_cap_logging_enabled, _devmenu_set_keep_cap_logging_enabled)
+end
+
+function DevMenu_GetPrecacheLoggingEnabled()
+	return _devmenu_is_precache_logging_enabled()
+end
+
+function DevMenu_TogglePrecacheLogging()
+	_devmenu_toggle_logging_control("Precache logging", _devmenu_is_precache_logging_enabled, _devmenu_set_precache_logging_enabled)
+end
+
+function DevMenu_GetAutoAgeInfoLoggingEnabled()
+	return _devmenu_is_autoage_info_logging_enabled()
+end
+
+function DevMenu_ToggleAutoAgeInfoLogging()
+	_devmenu_toggle_logging_control("AutoAge info logging", _devmenu_is_autoage_info_logging_enabled, _devmenu_set_autoage_info_logging_enabled)
+end
+
+function DevMenu_GetAutoAgeDiagLoggingEnabled()
+	return _devmenu_is_autoage_diag_logging_enabled()
+end
+
+function DevMenu_ToggleAutoAgeDiagLogging()
+	_devmenu_toggle_logging_control("AutoAge diagnostics", _devmenu_is_autoage_diag_logging_enabled, _devmenu_set_autoage_diag_logging_enabled)
+end
+
+function DevMenu_GetPlayerUILoggingEnabled()
+	return _devmenu_is_playerui_logging_enabled()
+end
+
+function DevMenu_TogglePlayerUILogging()
+	_devmenu_toggle_logging_control("PlayerUI runtime logging", _devmenu_is_playerui_logging_enabled, _devmenu_set_playerui_logging_enabled)
+end
+
+function DevMenu_GetPlayerUIDiagnosticLoggingEnabled()
+	return _devmenu_is_playerui_diagnostic_logging_enabled()
+end
+
+function DevMenu_TogglePlayerUIDiagnosticLogging()
+	_devmenu_toggle_logging_control("PlayerUI diagnostics", _devmenu_is_playerui_diagnostic_logging_enabled, _devmenu_set_playerui_diagnostic_logging_enabled)
+end
+
+function DevMenu_GetSiegeVerboseLoggingEnabled()
+	return _devmenu_is_siege_verbose_logging_enabled()
+end
+
+function DevMenu_ToggleSiegeVerboseLogging()
+	_devmenu_toggle_logging_control("Siege verbose logging", _devmenu_is_siege_verbose_logging_enabled, _devmenu_set_siege_verbose_logging_enabled, function()
+		local mode = (_cba_debug and (_cba_debug.siege_log_mode or _cba_debug.siegeLogMode)) or "standard"
+		return "mode=" .. tostring(mode)
+	end)
+end
+
+-----------------------------------------------------------------------
+-- Validation Commands
+-----------------------------------------------------------------------
+
+function DevMenu_RunValidation()         _devmenu_dev_safe_call("Debug_FullValidation") end
+function DevMenu_RunDataValidation()     _devmenu_dev_safe_call("debug.data.run") end
+function DevMenu_RunFactionDiag()        _devmenu_dev_safe_call("Debug_FactionMapDiagnostic") end
+function DevMenu_RunDynastiesDiag()      _devmenu_dev_safe_call("Debug_VerifyDynastiesData") end
+function DevMenu_RunJinRuntimeValidation() _devmenu_dev_safe_call("Debug_VerifyJinRuntime") end
+function DevMenu_RunJinBlueprintAudit()  _devmenu_dev_safe_call("Debug_BlueprintAudit_Civ", "jin_dynasty") end
+
+-----------------------------------------------------------------------
+-- Stress Tests
+-----------------------------------------------------------------------
+
+function DevMenu_RunStressTest()         _devmenu_dev_safe_call("Debug_StressTest") end
+function DevMenu_RunAdvancedStress()     _devmenu_dev_safe_call("Debug_AdvancedStressAll") end
+function DevMenu_RunAdvancedStressBuildingLimitOscillation() _devmenu_dev_safe_call("Debug_AdvStress_BuildingLimitOscillation") end
+function DevMenu_RunAdvancedStressMaxPopPressure() _devmenu_dev_safe_call("Debug_AdvStress_MaxPopPressure") end
+function DevMenu_RunAdvancedStressBlueprintStorm() _devmenu_dev_safe_call("Debug_AdvStress_BlueprintStorm") end
+function DevMenu_RunAdvancedStressConcurrentThrash() _devmenu_dev_safe_call("Debug_AdvStress_ConcurrentThrash") end
+function DevMenu_RunAdvancedStressSiegeCascade() _devmenu_dev_safe_call("Debug_AdvStress_SiegeCascade") end
+function DevMenu_RunAdvancedStressRapidElimination() _devmenu_dev_safe_call("Debug_AdvStress_RapidElimination") end
+function DevMenu_RunSiegeLimitStressTest() _devmenu_dev_safe_call("Debug_SiegeLimitStressTest") end
+function DevMenu_RunSmokeTests()        _devmenu_dev_safe_call("_Debug_MasterRunSmoke") end
+function DevMenu_RunComprehensiveStress()  _devmenu_dev_safe_call("Debug_ComprehensiveStress") end
+function DevMenu_ComprehensiveStressStatus() _devmenu_dev_safe_call("Debug_ComprehensiveStressStatus") end
+function DevMenu_ComprehensiveStressStop() _devmenu_dev_safe_call("Debug_ComprehensiveStressStop") end
+function DevMenu_RunStressUIBundle()     _devmenu_dev_safe_call("Debug_StressUI") end
+function DevMenu_RunStressGamemodeBundle() _devmenu_dev_safe_call("Debug_StressGamemode_Automated") end
+function DevMenu_StressSessionAbort()    _devmenu_dev_safe_call("Debug_StressAbort") end
+function DevMenu_StressSessionStatus()   _devmenu_dev_safe_call("Debug_StressStatus") end
+function DevMenu_RunEventProbes()       _devmenu_dev_safe_call("Debug_EventProbes") end
+function DevMenu_RunAIPlayerTest()      _devmenu_dev_safe_call("Debug_AIPlayerTest") end
+function DevMenu_RunBattleLagTest()      _devmenu_dev_safe_call("Debug_BattleLagTest") end
+function DevMenu_BattleLagStop()         _devmenu_dev_safe_call("Debug_BattleLagStop") end
+function DevMenu_BattleLagStatus()       _devmenu_dev_safe_call("Debug_BattleLagStatus") end
+function DevMenu_BattleLagConfig()       _devmenu_dev_safe_call("Debug_BattleLagConfig") end
+function DevMenu_RunLimitsUIStress()     _devmenu_dev_safe_call("Debug_LimitsUIStress") end
+function DevMenu_RunClassifyTestAll()   _devmenu_dev_safe_call("Debug_ClassifyTest_All") end
+function DevMenu_RunPlayerUIAnimTest()  _devmenu_dev_safe_call("Debug_PlayerUI_Anim") end
+function DevMenu_RunPlayerUIAnimStress() _devmenu_dev_safe_call("Debug_PlayerUI_Anim_Stress") end
+function DevMenu_RunPlayerUIStagedStress() _devmenu_dev_safe_call("Debug_PlayerUI_StressTest_Staged") end
+function DevMenu_RunLeaverStress()      _devmenu_dev_safe_call("Debug_LeaverConversion_Stress") end
+
+-----------------------------------------------------------------------
+-- Combat / AI
+-----------------------------------------------------------------------
+
+function DevMenu_RunAIBehavior()         _devmenu_dev_safe_call("Debug_AIBehavior") end
+function DevMenu_RunAIStress()           _devmenu_dev_safe_call("Debug_AIStressTest") end
+
+-----------------------------------------------------------------------
+-- Military / Leaver
+-----------------------------------------------------------------------
+
+function DevMenu_RunMilitaryVerify()     _devmenu_dev_safe_call("LeaverVerify_AutoRunAll") end
+function DevMenu_RunLeaverTest()         _devmenu_dev_safe_call("Debug_LeaverConversion_Full") end
+function DevMenu_RunLeaverMatrix()       _devmenu_dev_safe_call("Debug_LeaverCrossCivMatrix") end
+
+-----------------------------------------------------------------------
+-- Coverage
+-----------------------------------------------------------------------
+
+function DevMenu_RunCoverageTest()       _devmenu_dev_safe_call("Debug_CoverageTest") end
+
+-----------------------------------------------------------------------
+-- Siege / Limits
+-----------------------------------------------------------------------
+
+function DevMenu_RunSiegeTest()          _devmenu_dev_safe_call("debug.siege.run") end
+function DevMenu_RunLimitsInspect()      _devmenu_dev_safe_call("Debug_GetLimitsUIState") end
+
+-----------------------------------------------------------------------
+-- PlayerUI / Rendering
+-----------------------------------------------------------------------
+
+function DevMenu_RunPlayerUITest()       _devmenu_dev_safe_call("debug.playerUI.run") end
+
+-----------------------------------------------------------------------
+-- Determinism
+-----------------------------------------------------------------------
+
+function DevMenu_RunDeterminismTest()    _devmenu_dev_safe_call("Debug_Determinism") end
+
+-----------------------------------------------------------------------
+-- Interactive
+-----------------------------------------------------------------------
+
+function DevMenu_RunPrompts()            _devmenu_dev_safe_call("Debug_InteractiveChecks") end
+
+-----------------------------------------------------------------------
+-- Debugger Tools
+-- Self-diagnostics, replication probes, and frame-timing brackets.
+-- All entries here are either read-only or gated through the MP-safe
+-- allowlist; none fire sim mutations directly.
+-----------------------------------------------------------------------
+
+-- Full DevMenu self-diagnostic pass (API + action probes). Defined in devmenu_diag.scar.
+function DevMenu_DiagRunAll()
+	if type(_G.DevMenu_DiagRunAll_impl) == "function" then
+		_G.DevMenu_DiagRunAll_impl()
+	elseif type(_G.DevMenu_DiagRunAll) == "function" then
+		-- devmenu_diag.scar defines DevMenu_DiagRunAll directly; call it via pcall
+		-- to catch any engine errors and print them to scarlog.
+		local ok, err = pcall(_G.DevMenu_DiagRunAll)
+		if not ok then print("[DEVMENU] DevMenu_DiagRunAll ERROR: " .. tostring(err)) end
+		return
+	end
+	print("[DEVMENU] DevMenu_DiagRunAll: devmenu_diag.scar not loaded")
+end
+
+-- Per-state replication probes: read-only, MP-safe (no sim writes).
+function DevMenu_DiagReplInvuln()
+	if type(_devmenu_is_multiplayer) == "function" and type(DevMenu_DiagReplicationProbe) == "function"
+			and type(gInvulnerableCheat) == "table" then
+		DevMenu_DiagReplicationProbe("invuln", function(p)
+			return type(Player_GetID) == "function" and gInvulnerableCheat[Player_GetID(p)]
+		end)
+	else
+		print("[DEVMENU-DIAG] DiagReplInvuln: gInvulnerableCheat not available")
+	end
+end
+
+function DevMenu_DiagReplFoW()
+	if type(DevMenu_DiagReplicationProbe) == "function" and type(gFoWCheat) == "table" then
+		DevMenu_DiagReplicationProbe("fow", function(p)
+			return type(Player_GetID) == "function" and gFoWCheat[Player_GetID(p)]
+		end)
+	else
+		print("[DEVMENU-DIAG] DiagReplFoW: gFoWCheat not available")
+	end
+end
+
+function DevMenu_DiagReplInstBuild()
+	if type(DevMenu_DiagReplicationProbe) == "function" and type(gInstantBuildCheat) == "table" then
+		DevMenu_DiagReplicationProbe("instant_build", function(p)
+			return type(Player_GetID) == "function" and gInstantBuildCheat[Player_GetID(p)]
+		end)
+	else
+		print("[DEVMENU-DIAG] DiagReplInstBuild: gInstantBuildCheat not available")
+	end
+end
+
+-- Frame-bracket probe: fires the Invuln toggle wrapped in timing markers.
+-- Useful for multi-peer scarlog diff to confirm lockstep tick alignment.
+function DevMenu_DiagFrameInvuln()
+	if type(_devmenu_frame_bracket) == "function" then
+		local player = type(Game_GetLocalPlayer) == "function" and Game_GetLocalPlayer() or nil
+		if player ~= nil and type(DevMenu_DoInvulnerableCheat) == "function" then
+			_devmenu_frame_bracket("invuln_toggle", DevMenu_DoInvulnerableCheat, player)
+		else
+			print("[DEVMENU-DIAG] DiagFrameInvuln: no local player or no action handler")
+		end
+	else
+		print("[DEVMENU-DIAG] DiagFrameInvuln: _devmenu_frame_bracket not loaded")
+	end
+end
+
+-- Cheat Action Debugger (DEVMENU_DIAG): sim-mutating, SP-only.
+-- devmenu_cheat_debugger.scar overrides this fallback when loaded successfully.
+-- NOT added to _DEVMENU_DEV_MP_SAFE (sim-mutating; blocked by the MP gate).
+function DevMenu_RunCheatsDebugger()
+	print("[DEVMENU] DevMenu_RunCheatsDebugger: devmenu_cheat_debugger.scar not loaded")
+end

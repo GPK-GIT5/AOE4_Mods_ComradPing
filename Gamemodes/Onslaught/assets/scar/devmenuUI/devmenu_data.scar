@@ -1,0 +1,178 @@
+-----------------------------------------------------------------------
+-- DevMenu Data
+--
+-- Flat list of cheat entries shown in the CHEAT menu. Each entry is a
+-- self-describing card: label, description, icon, and the NAME of the
+-- global handler in devmenu_actions.scar (string, not function ref) that
+-- should be invoked when the entry is clicked.
+--
+-- Adding a new cheat = add a new row here AND add a matching handler in
+-- devmenu_actions.scar. No other file needs to change.
+--
+-- Optional fields:
+--   `category`        — string. Used by devmenu.scar to group entries into
+--                       sections inside the CHEAT panel. Order is taken
+--                       from `_DEVMENU_CHEAT_SECTION_ORDER`.
+--   `quick_panel`     — boolean. When true, entry is mirrored into the
+--                       persistent (non-modal) Cheat Actions panel.
+--   `quick_panel_only`— boolean. When true, entry ONLY appears in the Quick
+--                       Panel sidebar; it is excluded from the modal CHEAT
+--                       panel entirely (used for contextual/selection-based
+--                       actions that require an active unit selection).
+--   `toggle_state_fn` — string. Name of a global returning bool; REQUIRED
+--                       for any entry that is a stateful toggle (i.e. has
+--                       an ON/OFF state). Without this, devmenu.scar cannot
+--                       evaluate the current toggle state and the card will
+--                       render as a plain blue "RUN NOW" action card instead
+--                       of the green/red toggle chrome. The named function
+--                       must be a public global defined in devmenu_actions.scar
+--                       following the pattern DevMenu_Get<Name>Enabled().
+--
+--                       RULE: Every entry whose label starts with "Toggle"
+--                       (or whose action toggles an on/off flag) MUST have a
+--                       matching toggle_state_fn. Entries that are truly
+--                       one-shot (spawn, age-up, kill-gaia, etc.) must NOT
+--                       have toggle_state_fn (nil = RUN NOW chrome).
+-----------------------------------------------------------------------
+
+-- Generic placeholder icon (already used elsewhere in the gamemode).
+_DEVMENU_ICON_DEFAULT = "pack://application:,,,/WPFGUI;component/images/fe/taskbar_settings.png"
+
+-- ---------------------------------------------------------------
+-- Icon palette — all paths are verified by reference from existing
+-- shipped XAML (playerui_constants.scar, observerui, ags_limits_ui,
+-- boon_selection_data.scar, playerui_hud.scar, etc.).
+-- ---------------------------------------------------------------
+local _ICN_SPEED        = "pack://application:,,,/WPFGUI;component/icons/xbox/clock.png"
+local _ICN_RES_FOOD     = "pack://application:,,,/WPFGUI;component/icons/resources/resource_food_icon.png"
+local _ICN_RES_WOOD     = "pack://application:,,,/WPFGUI;component/icons/resources/resource_wood_icon.png"
+local _ICN_RES_GOLD     = "pack://application:,,,/WPFGUI;component/icons/resources/resource_gold_icon.png"
+local _ICN_RES_STONE    = "pack://application:,,,/WPFGUI;component/icons/resources/resource_stone_icon.png"
+local _ICN_RES_ALL      = "pack://application:,,,/WPFGUI;component/icons/resources/resource_villager.png"
+local _ICN_RES_OIL      = "pack://application:,,,/WPFGUI;component/icons/races/common/units/trade_cart.png"
+local _ICN_MARKET       = "pack://application:,,,/WPFGUI;component/icons/races/common/buildings/market.png"
+local _ICN_AGE          = "pack://application:,,,/WPFGUI;component/icons/HUD/age/age_display_afford_circle_glow.png"
+local _ICN_AGE_PLAIN    = "pack://application:,,,/WPFGUI;component/icons/HUD/age/age_display_afford_circle.png"
+local _ICN_POPCAP       = "pack://application:,,,/WPFGUI;component/icons/resources/resource_popcap.png"
+local _ICN_INVULN       = "pack://application:,,,/WPFGUI;component/icons/races/common/upgrades/piety.png"
+local _ICN_MILITARY     = "pack://application:,,,/WPFGUI;component/icons/resources/resource_military.png"
+local _ICN_RELIC        = "pack://application:,,,/WPFGUI;component/icons/races/common/abilities/create_relic.png"
+local _ICN_RELIC_DROP   = "pack://application:,,,/WPFGUI;component/icons/races/common/abilities/deposit_relic.png"
+local _ICN_FOW          = "pack://application:,,,/WPFGUI;component/icons/races/sultanate/upgrades/all_seeing_eye.png"
+local _ICN_VICTORY      = "pack://application:,,,/WPFGUI;component/icons/races/common/victory_conditions/victory_condition_conquest.png"
+local _ICN_WONDER       = "pack://application:,,,/WPFGUI;component/icons/races/common/victory_conditions/victory_condition_wonder.png"
+local _ICN_RELIGIOUS    = "pack://application:,,,/WPFGUI;component/icons/races/common/victory_conditions/victory_condition_religious.png"
+local _ICN_KEEP         = "pack://application:,,,/WPFGUI;component/icons/races/common/buildings/keep.png"
+local _ICN_WORKSHOP     = "pack://application:,,,/WPFGUI;component/icons/races/common/buildings/siege_workshop.png"
+local _ICN_TOOLTIP      = "pack://application:,,,/WPFGUI;component/icons/tooltip_arrow_right.png"
+
+-- Section meta (title + subtitle) keyed by entry.category.
+_DEVMENU_CHEAT_SECTION_META = {
+	speed = {
+		title    = "SIMULATION SPEED",
+		subtitle = "Step controls for simulation rate. Range: 1.0 to 1000.0 sim steps/s.",
+	},
+	resources = {
+		title    = "RESOURCES",
+		subtitle = "Per-resource fillers and the all-resource +1000 grant.",
+	},
+	progression = {
+		title    = "PROGRESSION",
+		subtitle = "Age advance + population cap utilities.",
+	},
+	combat = {
+		title    = "COMBAT & SPAWNS",
+		subtitle = "Survivability toggles and army spawning.",
+	},
+	world = {
+		title    = "WORLD",
+		subtitle = "Map reveal, gaia controls, world-wide cheats.",
+	},
+	production = {
+		title    = "PRODUCTION & BUILD",
+		subtitle = "Construction and gather-rate multipliers.",
+	},
+	ui = {
+		title    = "UI & PANELS",
+		subtitle = "Visibility toggles, persistent Quick Panel control.",
+	},
+	misc = {
+		title    = "MISC",
+		subtitle = "Audio swaps, surrender, miscellaneous.",
+	},
+}
+
+-- Fixed render order for cheat sections. Categories not listed here are
+-- appended in first-seen order.
+_DEVMENU_CHEAT_SECTION_ORDER = {
+	"speed",
+	"resources",
+	"progression",
+	"combat",
+	"world",
+	"production",
+	"ui",
+	"misc",
+}
+
+_DEVMENU_ENTRIES = {
+	-- ===== SIMULATION SPEED =====
+	{ category = "speed",       label = "Speed -",            desc = "Halve simulation speed (floor 1.0).",            icon = _ICN_SPEED,      action = "DevMenu_SpeedDecrease", mp_locked = true },
+	{ category = "speed",       label = "Speed 1x",           desc = "Reset simulation speed to default.",             icon = _ICN_SPEED,      action = "DevMenu_SpeedDefault",  mp_locked = true },
+	{ category = "speed",       label = "Speed +",            desc = "Double simulation speed (cap 1000.0).",          icon = _ICN_SPEED,      action = "DevMenu_SpeedIncrease", mp_locked = true },
+
+	-- ===== RESOURCES =====
+	{ category = "resources",   label = "Resources +1000",    desc = "Add 1000 of each resource (CheatEconomy).",      icon = _ICN_MARKET,     action = "DevMenu_DoEconomy"        },
+	{ category = "resources",   label = "Resources MAX",      desc = "Fill all resources to cap.",                     icon = _ICN_RES_ALL,    action = "DevMenu_DoResourcesAll"   },
+	{ category = "resources",   label = "+Food",              desc = "Fill food to cap.",                              icon = _ICN_RES_FOOD,   action = "DevMenu_DoResourcesFood"  },
+	{ category = "resources",   label = "+Wood",              desc = "Fill wood to cap.",                              icon = _ICN_RES_WOOD,   action = "DevMenu_DoResourcesWood"  },
+	{ category = "resources",   label = "+Gold",              desc = "Fill gold to cap.",                              icon = _ICN_RES_GOLD,   action = "DevMenu_DoResourcesGold"  },
+	{ category = "resources",   label = "+Stone",             desc = "Fill stone to cap.",                             icon = _ICN_RES_STONE,  action = "DevMenu_DoResourcesStone" },
+	{ category = "resources",   label = "+Oil",               desc = "Fill olive oil resource to cap (Byzantine).",    icon = _ICN_RES_OIL,    action = "DevMenu_DoResourcesOil"   },
+
+	-- ===== PROGRESSION =====
+	{ category = "progression", label = "Age Up",             desc = "Advance to the next age.",                       icon = _ICN_AGE,        action = "DevMenu_DoAgeUp"          },
+	{ category = "progression", label = "Pop Cap MAX",        desc = "Set current pop cap to maximum.",                icon = _ICN_POPCAP,     action = "DevMenu_DoPopCapMax"      },
+
+	-- ===== COMBAT & SPAWNS =====
+	-- toggle_state_fn is REQUIRED for toggle entries (see header comment).
+	-- DevMenu_GetInvulnerableEnabled reads gInvulnerableCheat[playerIndex] set by ChatCheatInvulnerable.
+	{ category = "combat",      label = "Toggle Invulnerability", desc = "Toggle invulnerability for all player units.",    icon = _ICN_INVULN,     action = "DevMenu_DoInvulnerable",       toggle_state_fn = "DevMenu_GetInvulnerableEnabled" },
+	-- Selected-units variant: state depends on live selection, not a persistent flag.
+	-- No toggle_state_fn — the sidebar quick panel reflects state after each click via refresh.
+	{ category = "combat",      label = "Toggle Invulnerability", desc = "Toggle invulnerability for selected units only.", icon = _ICN_INVULN,     action = "DevMenu_DoInvulnSelectedUnits", quick_panel_only = true },
+	{ category = "combat",      label = "Spawn Army",             desc = "Spawn a core army at the Keep.",                                       icon = _ICN_MILITARY,   action = "DevMenu_DoSpawnArmy"              },
+	{ category = "combat",      label = "Spawn Army",             desc = "Spawn a core army at the current camera / teleport position.",        icon = _ICN_MILITARY,   action = "DevMenu_DoSpawnArmyAtCamera",  quick_panel_only = true },
+	{ category = "combat",      label = "Spawn Photon Man",   desc = "Spawn the legacy Photon Man test unit.",         icon = _ICN_RELIC,      action = "DevMenu_DoSpawnPhotonMan" },
+	{ category = "combat",      label = "Block Actions",      desc = "Prevent other players from using cheat actions (Destroy, Convert, Burn, Teleport, Invulnerable) on your units.", icon = _ICN_KEEP, action = "DevMenu_DoToggleBlockActions", quick_panel = true, toggle_state_fn = "DevMenu_GetBlockActionsEnabled" },
+	{ category = "combat",      label = "Block Notify",       desc = "Show a notification when another player's cheat action targets your units (90-second cooldown per attacker). Disable to suppress these toasts.", icon = _ICN_KEEP, action = "DevMenu_ToggleBlockVictimNotify", toggle_state_fn = "DevMenu_GetBlockVictimNotifyEnabled" },
+	{ category = "combat",      label = "Block Toast",        desc = "Suppress on-screen action toasts (independent of Block Notify and VictimPrompt). Toasts have no timer; this toggle is the only gate.", icon = _ICN_KEEP, action = "DevMenu_ToggleBlockToast", toggle_state_fn = "DevMenu_GetBlockToastEnabled" },
+
+	-- ===== CONTEXTUAL — require live selection / cursor at click time =====
+	{ category = "contextual",  label = "Teleport Selected",  desc = "ZELEPORT — warp selected squads to current cursor position. Select first, then click from the Quick Panel.", icon = _ICN_RELIC,     action = "DevMenu_DoTeleportSelected", quick_panel_only = true },
+	{ category = "contextual",  label = "Convert Selected",   desc = "WOLOLO — convert selected enemy units (those with 'can_be_converted') to your player.",                       icon = _ICN_RELIGIOUS, action = "DevMenu_DoConvertSelected",  quick_panel_only = true },
+	{ category = "contextual",  label = "Destroy Selected",   desc = "Kill selected entities (squads or buildings) instantly.",                                                     icon = _ICN_VICTORY,   action = "DevMenu_DoDestroySelected",  quick_panel_only = true },
+	{ category = "contextual",  label = "Burn Buildings",     desc = "Set fire to all selected buildings (CheatSetFireToBuildings).",                                               icon = _ICN_KEEP,      action = "DevMenu_DoBurnSelected",     quick_panel_only = true },
+
+	-- ===== WORLD =====
+	-- toggle_state_fn is REQUIRED — reads gFoWCheat[playerIndex] set by ChatCheatFOW.
+	{ category = "world",       label = "Toggle FoW",         desc = "Reveal/hide the entire map.",                    icon = _ICN_FOW,        action = "DevMenu_DoFoW",           quick_panel = true, toggle_state_fn = "DevMenu_GetFoWEnabled" },
+	{ category = "world",       label = "Explore All",        desc = "Explore the entire map for your player.",        icon = _ICN_WONDER,     action = "DevMenu_DoExploreAll"     },
+	{ category = "world",       label = "Sheep -> Wolves",    desc = "Replace all sheep with wolves.",                 icon = _ICN_RES_FOOD,   action = "DevMenu_DoSheepToWolves"  },
+	{ category = "world",       label = "Kill All Gaia",      desc = "Kill all neutral animal entities.",              icon = _ICN_VICTORY,    action = "DevMenu_DoKillGaia"       },
+
+	-- ===== PRODUCTION & BUILD =====
+	-- toggle_state_fn is REQUIRED — reads gInstantBuildCheat[playerIndex] set by ChatCheatInstantBuildAndGather.
+	{ category = "production",  label = "Instant Build",      desc = "Toggle instant build + gather rates (x100).",    icon = _ICN_WORKSHOP,   action = "DevMenu_DoInstantBuild",  quick_panel = true, toggle_state_fn = "DevMenu_GetInstantBuildEnabled" },
+
+   -- ===== UI & PANELS =====
+   { category = "ui",          label = "Quick Panel",        desc = "Toggle the persistent left-docked Cheat Actions panel. Stays visible during gameplay so contextual cheats keep your unit selection.", icon = _ICN_AGE_PLAIN, action = "DevMenu_ToggleQuickPanel", toggle_state_fn = "DevMenu_GetQuickPanelEnabled" },
+   { category = "ui",          label = "Spawn Panel",        desc = "Toggle the persistent left-docked Last Spawned panel. Shows last 3 unit selections for quick re-spawn.", icon = _ICN_MILITARY, action = "DevMenu_ToggleSpawnPanel", toggle_state_fn = "DevMenu_GetSpawnPanelEnabled" },
+
+   -- ===== MISC =====
+   { category = "misc",        label = "Swap Alarm SFX",     desc = "Swap the attack alarm sound effect.",            icon = _ICN_RELIC_DROP, action = "DevMenu_DoSwapAlarmSfx",   dev_only = true, mp_locked = true },
+	{ category = "misc",        label = "Surrender",          desc = "Trigger the surrender flow for yourself.",       icon = _ICN_VICTORY,    action = "DevMenu_DoLoseInstantly",  dev_only = true, mp_locked = true },
+
+	-- ===== DIAGNOSTICS =====
+	{ category = "misc",        label = "RUN DIAG NOW",       desc = "Single-pass API + state probe for all devmenu features. Check scarlog for [DEVMENU-DIAG] lines.", icon = _ICN_TOOLTIP, action = "DevMenu_DiagRun", dev_only = true, mp_locked = true },
+}

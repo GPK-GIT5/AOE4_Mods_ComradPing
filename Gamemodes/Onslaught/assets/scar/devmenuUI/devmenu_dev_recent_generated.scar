@@ -1,0 +1,24 @@
+-----------------------------------------------------------------------
+-- DevMenu: Recent Categories — GENERATED ARTIFACT (do not hand-edit)
+--
+-- Source of truth: scripts/build_devmenu_recent.ps1
+-- Regenerate with:
+--   pwsh -File scripts/build_devmenu_recent.ps1
+--
+-- Provides `_DEVMENU_DEV_RECENT` consumed by devmenu.scar to render the
+-- "Recently Modified" strip atop the DEV menu category grid.
+--
+-- Shape (always present, even if empty -- runtime relies on `import()`
+-- succeeding, so this file MUST exist and assign the global):
+--   _DEVMENU_DEV_RECENT = {
+--     generated_at = "<UTC ISO8601 string>",  -- when the script ran
+--     stale        = <bool>,                  -- true if generator unavailable
+--     keys         = { "<category_key>", ... } -- 0..N stable category keys
+--   }
+-----------------------------------------------------------------------
+
+_DEVMENU_DEV_RECENT = {
+	generated_at = "2026-05-09T22:35:09Z",
+	stale        = false,
+	keys         = { "logging", "stress", "testing_debug" },
+}

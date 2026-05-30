@@ -1,0 +1,2508 @@
+-----------------------------------------------------------------------
+-- DevMenu — root module
+--
+-- Standalone two-menu system for Onslaught dev/cheat features:
+--   1. CHEAT menu — all cheats + speed controls (renamed from DEV)
+--   2. DEV menu — all debuggers + logger toggle (new)
+--
+-- CHEAT menu: visible when the lobby option "Enable Cheat Menu" is ON (AGS_GLOBAL_SETTINGS.CheatMenu).
+--   Also enabled by -cheat/-dev launch args or _mod.debug. Default OFF (host must enable in lobby).
+--   NOTE: the AoE4 lobby "Allow Cheats" UI does NOT set Misc_IsCommandLineOptionSet("cheat")
+--   in a mod/workshop context — confirmed 2026-05-11. Use the match-settings option instead.
+-- DEV menu: visible ONLY with the "-dev" or "-cheat" launch arg, or _mod.debug.
+--
+-- Decoupling guarantees:
+--   - Imports only its own sibling files (no external dependencies).
+--   - Does NOT import or read PlayerUI / HUD / cba_debug / cheat.scar.
+--   - Does NOT modify any global table owned by another system.
+--   - Reaches existing cheat/debug behaviour ONLY by calling already-public
+--     globals by name.
+--   - Lifecycle is driven by Core_RegisterModule + standard <Module>_OnPlay.
+-----------------------------------------------------------------------
+
+import("devmenuUI/devmenu_mp_gate.scar")     -- MP gate + determinism instrumentation (load FIRST)
+import("devmenuUI/devmenu_data.scar")         -- _DEVMENU_ENTRIES (CHEAT menu)
+import("devmenuUI/devmenu_dev_data.scar")    -- _DEVMENU_DEV_ENTRIES (DEV menu — legacy flat, kept for fallback)
+import("devmenuUI/devmenu_categories.scar")  -- _DEVMENU_DEV_CATEGORIES (two-level navigation)
+import("devmenuUI/devmenu_actions.scar")     -- DevMenu_Do* handlers (CHEAT actions)
+import("devmenuUI/devmenu_dev_actions.scar") -- DevMenu_RunDebug_* handlers (DEV actions)
+import("devmenuUI/devmenu_xaml.scar")        -- XAML builders
+import("devmenuUI/devmenu_diag.scar")        -- DevMenu_DiagRunAll (RUN DIAG NOW)
+import("devmenuUI/devmenu_cheat_debugger.scar") -- DevMenu_RunCheatsDebugger (DEVMENU_DIAG)
+import("devmenuUI/devmenu_unit_spawner.scar")       -- Unit Spawner Menu (CHEAT sub-page)
+import("devmenuUI/devmenu_unit_spawner_debug.scar") -- Unit Spawner debugger (ScarLog sweep)
+
+local _devmenu_print = print
+local function _devmenu_should_emit_log(message)
+	if not string.find(message, "^%[DEVMENU%]") then
+		return true
+	end
+	if string.find(message, "ERROR") or string.find(message, "missing") or string.find(message, "unknown category") or string.find(message, "unavailable") or string.find(message, "failed") then
+		return true
+	end
+	if type(CBA_Debug_IsLoggingEnabled) == "function" then
+		return CBA_Debug_IsLoggingEnabled() == true
+	end
+	return false
+end
+
+local function print(...)
+	local message = tostring(select(1, ...))
+	if _devmenu_should_emit_log(message) then
+		_devmenu_print(...)
+	end
+end
+
+-- Hardening: recent-category metadata is optional. The generated artifact is
+-- intentionally not imported here so malformed/generated-file drift cannot
+-- block module registration or hide both menu buttons.
+if _DEVMENU_DEV_RECENT == nil then
+	_DEVMENU_DEV_RECENT = {
+		generated_at = "builtin_fallback",
+		stale        = true,
+		keys         = {},
+	}
+end
+
+DEVMENU_MODULE = "DevMenu"
+_DEVMENU_STARTUP_DELAY_SEC = 0.35
+
+-- Module-private state. Underscore-prefixed to avoid collision risk.
+_devmenu = {
+	is_ui_created         = false,
+	is_ui_creation_scheduled = false,
+	cheats_enabled        = false,  -- Set at OnPlay: true when lobby "cheat" option on or _mod.debug (CHEAT menu gate)
+	
+	cheat_btn_data_context = nil,
+	cheat_panel_data_context = nil,
+	
+	dev_btn_data_context  = nil,
+	dev_panel_data_context = nil,
+
+	-- Per-category submenu DCs, keyed by category.key (set up at OnPlay).
+	dev_submenu_data_contexts = {},
+	-- Currently-open submenu key (or nil when on category list).
+	dev_active_submenu_key    = nil,
+	-- Per-category section lists and active section tracking for the nav strip.
+	dev_submenu_sections        = {},   -- cat_key -> array of { key, title } in display order
+	dev_active_section_by_cat   = {},   -- cat_key -> section_key (highlighted pill / filtered section)
+	dev_section_expanded_by_cat = {},   -- cat_key -> bool (true = all sections stacked; false = filtered to active)
+	dev_sec_content_vis         = {},   -- cat_key -> { [sec_idx]=bool } per-section card content visible
+	dev_pill_scroll_by_cat      = {},   -- cat_key -> int  0-based index of first visible pill slot
+
+	cheat_entry_count     = 0,
+	dev_entry_count       = 0,
+	cards_per_row         = 3,
+
+	-- Persistent (non-modal) Cheat Actions Quick Panel state.
+	quick_panel_enabled       = false,
+	quick_panel_data_context  = nil,
+	quick_panel_entry_count   = 0,
+
+	-- Spawn Panel (persistent left-side last-spawned history + group counter).
+	spawn_panel_enabled       = false,
+	spawn_panel_data_context  = nil,
+	spawn_group_count         = 1,
+
+	-- Toast notification overlay state.
+	toast_data_context = nil,
+
+	-- Camera-center teleport telemetry. Only `teleport_last_pos` is
+	-- populated now (the sampler/overlay system was removed once live
+	-- testing proved Misc_GetMouseOnTerrain is unusable from SCAR UI).
+	teleport_last_pos = nil,
+}
+
+Core_RegisterModule(DEVMENU_MODULE)
+
+-----------------------------------------------------------------------
+-- Per-entry click dispatcher (menu-agnostic)
+--
+-- We pre-generate one named global per entry (DevMenu_Click_Cheat_1, etc.)
+-- and store the action name on the dispatcher. This keeps UI command
+-- bindings stable while letting data tables drive actions.
+-----------------------------------------------------------------------
+
+_devmenu_cheat_dispatch = {} -- index -> action name (string)
+_devmenu_dev_dispatch   = {} -- index -> action name (string)
+
+-- Per-menu-type dispatch table registry (lets each submenu have its own
+-- namespace so cmd_N indices never collide across panels).
+_devmenu_dispatch_tables = {
+	cheat = _devmenu_cheat_dispatch,
+	dev   = _devmenu_dev_dispatch,
+}
+
+local _devmenu_refresh_dynamic_cards
+-- Forward declarations: defined later in the file but referenced from
+-- public globals (DevMenu_*) above their definition site.
+local _devmenu_build_cheat_panel_categorized
+local _devmenu_build_quick_panel
+local _devmenu_build_spawn_panel
+local _devmenu_ensure_submenu_presenter
+local _devmenu_hide_all_submenus
+
+local function _devmenu_get_dispatch_table(menu_type)
+	local t = _devmenu_dispatch_tables[menu_type]
+	if t == nil then
+		t = {}
+		_devmenu_dispatch_tables[menu_type] = t
+	end
+	return t
+end
+
+local function _devmenu_make_dispatcher(menu_type, idx)
+	-- menu_type: "cheat", "dev", or "devsub_<key>"
+	local fn_name = "DevMenu_Click_" .. menu_type .. "_" .. tostring(idx)
+	local dispatch_table = _devmenu_get_dispatch_table(menu_type)
+	
+	_G[fn_name] = function()
+		local action = dispatch_table[idx]
+		if type(action) ~= "string" or action == "" then
+			print("[DEVMENU] " .. menu_type .. " click " .. tostring(idx) .. ": no action bound")
+			return
+		end
+		local fn = _G[action]
+		if type(fn) ~= "function" then
+			print("[DEVMENU] " .. menu_type .. " click " .. tostring(idx) .. ": handler missing -> " .. action)
+			return
+		end
+		local ok, err = pcall(fn)
+		if not ok then
+			print("[DEVMENU] " .. menu_type .. " click " .. tostring(idx) .. " (" .. action .. ") ERROR: " .. tostring(err))
+			return
+		end
+		if type(_devmenu_refresh_dynamic_cards) == "function" then
+			_devmenu_refresh_dynamic_cards(menu_type)
+		end
+	end
+	return fn_name
+end
+
+-----------------------------------------------------------------------
+-- Section navigator for DEV submenus
+--
+-- Pill strip = permanent tab selector (always tab mode):
+--   clicking a pill shows ONLY that section. Pills visible when ≥1 section.
+-- Expand/Collapse button = card content toggle for the active section:
+--   dev_section_expanded_by_cat[cat_key] true = cards visible, false = hidden.
+--
+-- DC key convention (N = 1..8, matching _DEVMENU_MAX_NAV_PILLS):
+--   nav_strip_visible   bool    show strip when ≥1 section present
+--   nav_pill_cmd_N      command DevMenu_NavJump_<catkey>_N
+--   nav_pill_label_N    string  section title (short, from SECTION_META)
+--   nav_pill_tag_N      string  "active" | "" — drives pill highlight
+--   nav_pill_vis_N      bool    true if this section slot is used
+--   sec_N_vis           bool    true = this section is the active tab
+--   sec_N_content_vis   bool    true = cards visible (sec active AND expanded)
+--   nav_expand_cmd      command DevMenu_NavExpand_<catkey>
+--   nav_expand_label    string  "Collapse" | "Expand"
+-----------------------------------------------------------------------
+
+local _DEVMENU_MAX_SECTIONS = 32  -- absolute max tracked sections
+local _DEVMENU_PILL_WINDOW  = 6   -- pills visible at a time in the strip
+
+-- Helper: build default per-section content-vis (first=true, rest=false).
+local function _devmenu_default_sec_content_vis(sections)
+	local t = {}
+	for i = 1, #sections do
+		t[i] = (i == 1)
+	end
+	return t
+end
+
+-- Writes all nav DC keys into `dc`.
+--   sections        array of {key, title}
+--   active_key      currently highlighted pill (string or nil)
+--   expanded        true = all sections stacked; false = filter to active_key
+--   sec_content_vis table[i]=bool per-section card content visibility
+--   pill_scroll     0-based index of first visible pill slot
+local function _devmenu_update_submenu_nav_dc(dc, sections, active_key, expanded, sec_content_vis, pill_scroll)
+	if expanded == nil then expanded = true end
+	if pill_scroll == nil then pill_scroll = 0 end
+	local n = #sections
+
+	-- Section visibility: expanded = all visible; compact = only active.
+	for i = 1, math.max(n, _DEVMENU_MAX_SECTIONS) do
+		if i <= n then
+			local sec = sections[i]
+			local sec_vis = expanded or (sec.key == active_key)
+			-- Default (nil table): section 1 open, rest collapsed.
+			-- When the table exists, honour its values exactly — no i==1 override
+			-- that would prevent section 1 from ever being folded by the user.
+			local content_vis
+			if sec_content_vis == nil then
+				content_vis = (i == 1)
+			else
+				content_vis = (sec_content_vis[i] ~= false)
+			end
+			dc["sec_" .. i .. "_vis"]         = sec_vis
+			dc["sec_" .. i .. "_content_vis"] = sec_vis and content_vis
+			-- Chevron on header button: reflect actual content-vis state.
+			dc["sec_header_tag_" .. i]        = content_vis and "expanded" or "collapsed"
+		else
+			dc["sec_" .. i .. "_vis"]         = false
+			dc["sec_" .. i .. "_content_vis"] = false
+			dc["sec_header_tag_" .. i]        = "collapsed"
+		end
+	end
+
+	-- Pill strip window: show _DEVMENU_PILL_WINDOW pills starting at pill_scroll.
+	-- In filter mode (expanded=false) the active pill gets tag "filtered" (amber);
+	-- in expanded mode no pill is highlighted (all tags "").
+	for slot = 1, _DEVMENU_PILL_WINDOW do
+		local real_idx = pill_scroll + slot  -- 1-based section index
+		local s = tostring(slot)
+		if real_idx <= n then
+			local sec = sections[real_idx]
+			local tag = ""
+			if (not expanded) and sec.key == active_key then tag = "filtered" end
+			dc["nav_pill_label_" .. s] = sec.title
+			dc["nav_pill_tag_"   .. s] = tag
+			dc["nav_pill_vis_"   .. s] = true
+		else
+			dc["nav_pill_label_" .. s] = ""
+			dc["nav_pill_tag_"   .. s] = ""
+			dc["nav_pill_vis_"   .. s] = false
+		end
+	end
+
+	-- Arrow states.
+	dc.nav_scroll_left_tag  = (pill_scroll <= 0)                         and "disabled" or ""
+	dc.nav_scroll_right_tag = (pill_scroll + _DEVMENU_PILL_WINDOW >= n) and "disabled" or ""
+
+	dc.nav_strip_visible  = (n >= 1)
+	dc.nav_expand_visible = (n >= 1)
+	dc.nav_filter_active  = not expanded  -- true when a section filter is applied
+	-- Label: filtered = "Show All"; expanded = toggle between "Collapse"/"Expand".
+	if not expanded then
+		dc.nav_expand_label = "Show All"
+	else
+		-- Determine if any section has content visible.
+		local any_expanded = false
+		if sec_content_vis then
+			for i = 1, n do
+				if sec_content_vis[i] ~= false then any_expanded = true; break end
+			end
+		end
+		dc.nav_expand_label = any_expanded and "Collapse" or "Expand"
+	end
+end
+
+-- Handler: pill click. Filters to just that section (compact mode).
+-- If already filtered to that section, clicking again clears the filter.
+local function _devmenu_nav_jump(cat_key, sec_slot)
+	local sections = _devmenu.dev_submenu_sections[cat_key]
+	if sections == nil then return end
+	local scroll = _devmenu.dev_pill_scroll_by_cat[cat_key] or 0
+	local real_idx = scroll + sec_slot  -- slot -> real section index
+	if real_idx < 1 or real_idx > #sections then return end
+	local clicked_key = sections[real_idx].key
+	local expanded = _devmenu.dev_section_expanded_by_cat[cat_key]
+	if expanded == nil then expanded = true end
+	local active_key = _devmenu.dev_active_section_by_cat[cat_key]
+
+	if (not expanded) and clicked_key == active_key then
+		-- Clicking the already-filtered section clears the filter.
+		_devmenu.dev_section_expanded_by_cat[cat_key] = true
+	else
+		-- Filter to the clicked section; ensure its content is visible.
+		_devmenu.dev_active_section_by_cat[cat_key] = clicked_key
+		_devmenu.dev_section_expanded_by_cat[cat_key] = false
+		local cv = _devmenu.dev_sec_content_vis[cat_key]
+		if cv == nil then cv = _devmenu_default_sec_content_vis(sections) end
+		cv[real_idx] = true
+		_devmenu.dev_sec_content_vis[cat_key] = cv
+	end
+
+	local dc = _devmenu.dev_submenu_data_contexts[cat_key]
+	if dc == nil then return end
+	_devmenu_update_submenu_nav_dc(
+		dc, sections,
+		_devmenu.dev_active_section_by_cat[cat_key],
+		_devmenu.dev_section_expanded_by_cat[cat_key],
+		_devmenu.dev_sec_content_vis[cat_key],
+		scroll)
+	UI_SetDataContext("DevMenuDEVSubmenu_" .. cat_key, dc)
+end
+
+-- Handler: E/C button.
+--   Filtered (compact): restore all-sections view.
+--   Expanded: toggle all sections' content visibility.
+local function _devmenu_nav_toggle_expand(cat_key)
+	local sections = _devmenu.dev_submenu_sections[cat_key]
+	if sections == nil or #sections == 0 then return end
+	local expanded = _devmenu.dev_section_expanded_by_cat[cat_key]
+	if expanded == nil then expanded = true end
+
+	if not expanded then
+		-- Currently filtered: restore all-sections view.
+		-- Clear active_key so no pill appears highlighted in expanded mode.
+		_devmenu.dev_section_expanded_by_cat[cat_key] = true
+		_devmenu.dev_active_section_by_cat[cat_key]   = nil
+	else
+		-- Currently expanded: toggle all content visibility.
+		local cv = _devmenu.dev_sec_content_vis[cat_key]
+		if cv == nil then cv = _devmenu_default_sec_content_vis(sections) end
+		local any_expanded = false
+		for i = 1, #sections do
+			if cv[i] ~= false then any_expanded = true; break end
+		end
+		local new_vis = not any_expanded
+		for i = 1, #sections do cv[i] = new_vis end
+		_devmenu.dev_sec_content_vis[cat_key] = cv
+	end
+
+	local dc = _devmenu.dev_submenu_data_contexts[cat_key]
+	if dc == nil then return end
+	local active_key = _devmenu.dev_active_section_by_cat[cat_key]  -- nil when just cleared
+	local scroll = _devmenu.dev_pill_scroll_by_cat[cat_key] or 0
+	_devmenu_update_submenu_nav_dc(
+		dc, sections, active_key,
+		_devmenu.dev_section_expanded_by_cat[cat_key],
+		_devmenu.dev_sec_content_vis[cat_key],
+		scroll)
+	UI_SetDataContext("DevMenuDEVSubmenu_" .. cat_key, dc)
+end
+
+-- Handler: pill scroll left (show earlier pills).
+local function _devmenu_nav_scroll_left(cat_key)
+	local sections = _devmenu.dev_submenu_sections[cat_key]
+	if sections == nil then return end
+	local scroll = _devmenu.dev_pill_scroll_by_cat[cat_key] or 0
+	scroll = math.max(0, scroll - 1)
+	_devmenu.dev_pill_scroll_by_cat[cat_key] = scroll
+	local dc = _devmenu.dev_submenu_data_contexts[cat_key]
+	if dc == nil then return end
+	_devmenu_update_submenu_nav_dc(
+		dc, sections,
+		_devmenu.dev_active_section_by_cat[cat_key],
+		_devmenu.dev_section_expanded_by_cat[cat_key],
+		_devmenu.dev_sec_content_vis[cat_key],
+		scroll)
+	UI_SetDataContext("DevMenuDEVSubmenu_" .. cat_key, dc)
+end
+
+-- Handler: pill scroll right (show later pills).
+local function _devmenu_nav_scroll_right(cat_key)
+	local sections = _devmenu.dev_submenu_sections[cat_key]
+	if sections == nil then return end
+	local scroll = _devmenu.dev_pill_scroll_by_cat[cat_key] or 0
+	local max_scroll = math.max(0, #sections - _DEVMENU_PILL_WINDOW)
+	scroll = math.min(max_scroll, scroll + 1)
+	_devmenu.dev_pill_scroll_by_cat[cat_key] = scroll
+	local dc = _devmenu.dev_submenu_data_contexts[cat_key]
+	if dc == nil then return end
+	_devmenu_update_submenu_nav_dc(
+		dc, sections,
+		_devmenu.dev_active_section_by_cat[cat_key],
+		_devmenu.dev_section_expanded_by_cat[cat_key],
+		_devmenu.dev_sec_content_vis[cat_key],
+		scroll)
+	UI_SetDataContext("DevMenuDEVSubmenu_" .. cat_key, dc)
+end
+
+-- Registers DevMenu_NavJump_<cat_key>_<slot> (slot = 1.._DEVMENU_PILL_WINDOW).
+local function _devmenu_make_nav_dispatcher(cat_key, slot)
+	local fn_name = "DevMenu_NavJump_" .. cat_key .. "_" .. tostring(slot)
+	local key_copy = cat_key
+	local slot_copy = slot
+	_G[fn_name] = function()
+		_devmenu_nav_jump(key_copy, slot_copy)
+	end
+	return fn_name
+end
+
+-- Registers DevMenu_NavExpand_<cat_key> for the E/C button.
+local function _devmenu_make_nav_expand_dispatcher(cat_key)
+	local fn_name = "DevMenu_NavExpand_" .. cat_key
+	local key_copy = cat_key
+	_G[fn_name] = function()
+		_devmenu_nav_toggle_expand(key_copy)
+	end
+	return fn_name
+end
+
+-- Registers DevMenu_NavScrollLeft/Right_<cat_key> for pill paging arrows.
+local function _devmenu_make_nav_scroll_dispatchers(cat_key)
+	local left_fn  = "DevMenu_NavScrollLeft_"  .. cat_key
+	local right_fn = "DevMenu_NavScrollRight_" .. cat_key
+	local key_copy = cat_key
+	_G[left_fn]  = function() _devmenu_nav_scroll_left(key_copy)  end
+	_G[right_fn] = function() _devmenu_nav_scroll_right(key_copy) end
+	return left_fn, right_fn
+end
+
+-- Per-section header collapse: toggles sec_content_vis[sec_idx] without
+-- changing the expanded/compact mode. Works in both expanded and filtered view.
+local function _devmenu_sec_header_toggle(cat_key, sec_idx)
+	local sections = _devmenu.dev_submenu_sections[cat_key]
+	if sections == nil or sections[sec_idx] == nil then return end
+	local cv = _devmenu.dev_sec_content_vis[cat_key]
+	if cv == nil then
+		cv = _devmenu_default_sec_content_vis(sections)
+		_devmenu.dev_sec_content_vis[cat_key] = cv
+	end
+	cv[sec_idx] = (cv[sec_idx] == false)  -- toggle: nil/true -> false, false -> true
+	local dc = _devmenu.dev_submenu_data_contexts[cat_key]
+	if dc == nil then return end
+	_devmenu_update_submenu_nav_dc(
+		dc, sections,
+		_devmenu.dev_active_section_by_cat[cat_key],
+		_devmenu.dev_section_expanded_by_cat[cat_key],
+		cv,
+		_devmenu.dev_pill_scroll_by_cat[cat_key] or 0)
+	UI_SetDataContext("DevMenuDEVSubmenu_" .. cat_key, dc)
+end
+
+-- Registers DevMenu_SecToggle_<cat_key>_<sec_idx> for per-section header button.
+local function _devmenu_make_sec_toggle_dispatcher(cat_key, sec_idx)
+	local fn_name = "DevMenu_SecToggle_" .. cat_key .. "_" .. tostring(sec_idx)
+	local key_copy = cat_key
+	local idx_copy = sec_idx
+	_G[fn_name] = function()
+		_devmenu_sec_header_toggle(key_copy, idx_copy)
+	end
+	return fn_name
+end
+
+-- Toggle the CHEAT menu panel visibility.
+-- On close: flip panel_visible = false only (cheap, no rebuild).
+-- On open: rebuild the DC so toggle-state chrome (FoW / Invuln / InstantBuild)
+-- is current at the moment of opening. Without a rebuild the chrome reflects
+-- state at OnPlay (or last RefreshToggleStates call), which lags behind quick-
+-- panel toggles fired within the 0.1 s deferred-refresh window. Both panels
+-- are synced so the two surfaces always agree on toggle state.
+function DevMenu_ToggleCHEATPanel()
+	if not _devmenu.is_ui_created or _devmenu.cheat_panel_data_context == nil then
+		return
+	end
+	local dc = _devmenu.cheat_panel_data_context
+	if dc.panel_visible then
+		-- Closing: just hide.
+		dc.panel_visible = false
+		UI_SetDataContext("DevMenuCHEATPanel", dc)
+	else
+		-- Opening: close any open DEV submenus (e.g. Unit Spawner) so only the
+		-- CHEAT panel is visible. Without this, re-pressing the CHEAT hotkey while
+		-- the Unit Spawner is open leaves both panels simultaneously visible and the
+		-- CHEAT close button only dismisses the CHEAT panel, orphaning the spawner.
+		if type(_devmenu_hide_all_submenus) == "function" then
+			_devmenu_hide_all_submenus()
+		end
+		-- Rebuild so toggle states are live.
+		local _, fresh_dc = _devmenu_build_cheat_panel_categorized(_DEVMENU_ENTRIES or {})
+		fresh_dc.panel_visible = true
+		_devmenu.cheat_panel_data_context = fresh_dc
+		UI_SetDataContext("DevMenuCHEATPanel", fresh_dc)
+		-- Keep quick panel in sync.
+		if _devmenu.quick_panel_data_context ~= nil then
+			local _, qdc, qcount = _devmenu_build_quick_panel(_DEVMENU_ENTRIES or {})
+			qdc.panel_visible = _devmenu.quick_panel_enabled == true
+			_devmenu.quick_panel_data_context = qdc
+			_devmenu.quick_panel_entry_count  = qcount
+			UI_SetDataContext("DevMenuCHEATQuickPanel", qdc)
+		end
+	end
+end
+
+function DevMenu_CloseCHEATPanel()
+	if not _devmenu.is_ui_created or _devmenu.cheat_panel_data_context == nil then
+		return
+	end
+	_devmenu.cheat_panel_data_context.panel_visible = false
+	UI_SetDataContext("DevMenuCHEATPanel", _devmenu.cheat_panel_data_context)
+end
+
+-- Toggle the DEV menu panel visibility.
+-- Always returns to the L1 categories view when (re)opening, so users
+-- never get stuck inside an old submenu after closing+reopening DEV.
+function DevMenu_ToggleDEVPanel()
+	if not _devmenu.is_ui_created or _devmenu.dev_panel_data_context == nil then
+		return
+	end
+	local dc = _devmenu.dev_panel_data_context
+	if dc.panel_visible or _devmenu.dev_active_submenu_key ~= nil then
+		-- Closing: hide L1 + any open submenu.
+		DevMenu_CloseDEVAll()
+	else
+		-- Opening: ensure no submenu is active, then show L1.
+		DevMenu_BackToCategories()
+		dc.panel_visible = true
+		UI_SetDataContext("DevMenuDEVPanel", dc)
+	end
+end
+
+function DevMenu_CloseDEVPanel()
+	DevMenu_CloseDEVAll()
+end
+
+-- Close both panels when user toggles away.
+function DevMenu_CloseAllPanels()
+	DevMenu_CloseCHEATPanel()
+	DevMenu_CloseDEVPanel()
+end
+
+-----------------------------------------------------------------------
+-- Persistent (non-modal) Cheat Actions Quick Panel — public API
+--
+-- Exposed via the Quick Panel toggle entry in the CHEAT menu. The actual
+-- presenter is created at OnPlay alongside the modal panels; toggling
+-- only flips visibility on the existing data context (cheap and reversible).
+-- State persists in `_devmenu.quick_panel_enabled` for the lifetime of the
+-- module (and is restored after Game_Restore by the standard rebuild).
+-----------------------------------------------------------------------
+
+function DevMenu_ShowQuickPanel()
+	if not _devmenu.is_ui_created or _devmenu.quick_panel_data_context == nil then
+		_devmenu.quick_panel_enabled = true
+		return
+	end
+	-- Mutual exclusion: hide Spawn Panel if it is currently open.
+	if _devmenu.spawn_panel_enabled == true then
+		DevMenu_HideSpawnPanel()
+	end
+	_devmenu.quick_panel_enabled = true
+	-- Rebuild the DC so toggle state chrome (Invuln/FoW/Instant Build) reflects
+	-- the current game state when opening via the side-screen tab button.
+	-- Without this, states are stale from the initial build at OnPlay.
+	local _, dc, count = _devmenu_build_quick_panel(_DEVMENU_ENTRIES or {})
+	dc.panel_visible = true
+	_devmenu.quick_panel_data_context = dc
+	_devmenu.quick_panel_entry_count  = count
+	UI_SetDataContext("DevMenuCHEATQuickPanel", dc)
+	-- Also refresh the CHEAT modal panel so the Quick Panel toggle card
+	-- shows TOGGLE: ON next time the modal is opened (matches what
+	-- _devmenu_quick_panel_toggle does when toggled from inside the menu).
+	if _devmenu.cheat_panel_data_context ~= nil and _DEVMENU_ENTRIES ~= nil then
+		local cheat_visible = _devmenu.cheat_panel_data_context.panel_visible
+		local _, cheat_dc = _devmenu_build_cheat_panel_categorized(_DEVMENU_ENTRIES)
+		cheat_dc.panel_visible = cheat_visible
+		_devmenu.cheat_panel_data_context = cheat_dc
+		UI_SetDataContext("DevMenuCHEATPanel", cheat_dc)
+	end
+end
+
+function DevMenu_HideQuickPanel()
+	if not _devmenu.is_ui_created or _devmenu.quick_panel_data_context == nil then
+		_devmenu.quick_panel_enabled = false
+		return
+	end
+	_devmenu.quick_panel_enabled = false
+	_devmenu.quick_panel_data_context.panel_visible = false
+	UI_SetDataContext("DevMenuCHEATQuickPanel", _devmenu.quick_panel_data_context)
+	-- Refresh the CHEAT modal panel so the Quick Panel toggle card
+	-- shows TOGGLE: OFF when the panel is closed via the X button.
+	if _devmenu.cheat_panel_data_context ~= nil and _DEVMENU_ENTRIES ~= nil then
+		local cheat_visible = _devmenu.cheat_panel_data_context.panel_visible
+		local _, cheat_dc = _devmenu_build_cheat_panel_categorized(_DEVMENU_ENTRIES)
+		cheat_dc.panel_visible = cheat_visible
+		_devmenu.cheat_panel_data_context = cheat_dc
+		UI_SetDataContext("DevMenuCHEATPanel", cheat_dc)
+	end
+end
+
+-- Internal hook called by DevMenu_ToggleQuickPanel in devmenu_actions.scar.
+function _devmenu_quick_panel_toggle()
+	if _devmenu.quick_panel_enabled == true then
+		DevMenu_HideQuickPanel()
+	else
+		DevMenu_ShowQuickPanel()
+	end
+	-- Refresh the modal CHEAT panel so its toggle card chrome reflects the
+	-- new state next time it opens. Cheap: just a DC re-bind of the existing
+	-- panel (no presenter destroy/recreate).
+	if _devmenu.cheat_panel_data_context ~= nil and _DEVMENU_ENTRIES ~= nil then
+		local visible = _devmenu.cheat_panel_data_context.panel_visible
+		local _, dc = _devmenu_build_cheat_panel_categorized(_DEVMENU_ENTRIES)
+		dc.panel_visible = visible
+		_devmenu.cheat_panel_data_context = dc
+		UI_SetDataContext("DevMenuCHEATPanel", dc)
+	end
+end
+
+-- Internal hook called by DevMenu_GetQuickPanelEnabled in devmenu_actions.scar.
+function _devmenu_quick_panel_is_enabled()
+	return _devmenu.quick_panel_enabled == true
+end
+
+-----------------------------------------------------------------------
+-- Persistent (non-modal) Spawn Panel — public API
+--
+-- Right-side icon-only tab; expands to show last 3 spawned units.
+-- Mutual exclusion with Quick Panel.
+-----------------------------------------------------------------------
+
+-- Slot click dispatchers — referenced by cmd bindings in _devmenu_build_spawn_panel.
+function DevMenu_SpawnPanel_Slot1()
+	local item = _devmenu_spawn_history and _devmenu_spawn_history[1]
+	if item then DevMenu_UnitSpawner_Spawn(item.sbp, item.name) end
+end
+function DevMenu_SpawnPanel_Slot2()
+	local item = _devmenu_spawn_history and _devmenu_spawn_history[2]
+	if item then DevMenu_UnitSpawner_Spawn(item.sbp, item.name) end
+end
+function DevMenu_SpawnPanel_Slot3()
+	local item = _devmenu_spawn_history and _devmenu_spawn_history[3]
+	if item then DevMenu_UnitSpawner_Spawn(item.sbp, item.name) end
+end
+
+function DevMenu_ShowSpawnPanel()
+	if not _devmenu.is_ui_created or _devmenu.spawn_panel_data_context == nil then
+		_devmenu.spawn_panel_enabled = true
+		return
+	end
+	-- Mutual exclusion: hide Quick Panel if it is currently open.
+	if _devmenu.quick_panel_enabled == true then
+		DevMenu_HideQuickPanel()
+	end
+	_devmenu.spawn_panel_enabled = true
+	local _, dc = _devmenu_build_spawn_panel()
+	dc.panel_visible = true
+	_devmenu.spawn_panel_data_context = dc
+	UI_SetDataContext("DevMenuSpawnPanel", dc)
+end
+
+function DevMenu_HideSpawnPanel()
+	if not _devmenu.is_ui_created or _devmenu.spawn_panel_data_context == nil then
+		_devmenu.spawn_panel_enabled = false
+		return
+	end
+	_devmenu.spawn_panel_enabled = false
+	_devmenu.spawn_panel_data_context.panel_visible = false
+	UI_SetDataContext("DevMenuSpawnPanel", _devmenu.spawn_panel_data_context)
+end
+
+function _devmenu_spawn_panel_toggle()
+	if _devmenu.spawn_panel_enabled == true then
+		DevMenu_HideSpawnPanel()
+	else
+		DevMenu_ShowSpawnPanel()
+	end
+	-- Cross-refresh the CHEAT modal so its toggle card reflects new state.
+	if _devmenu.cheat_panel_data_context ~= nil and _DEVMENU_ENTRIES ~= nil then
+		local visible = _devmenu.cheat_panel_data_context.panel_visible
+		local _, dc = _devmenu_build_cheat_panel_categorized(_DEVMENU_ENTRIES)
+		dc.panel_visible = visible
+		_devmenu.cheat_panel_data_context = dc
+		UI_SetDataContext("DevMenuCHEATPanel", dc)
+	end
+end
+
+function _devmenu_spawn_panel_is_enabled()
+	return _devmenu.spawn_panel_enabled == true
+end
+
+-- Rebuild the Spawn Panel DC without changing its visible/hidden state.
+-- Called by DevMenu_SpawnPanel_Record after history changes.
+function DevMenu_SpawnPanel_Refresh()
+	if not _devmenu.is_ui_created or _devmenu.spawn_panel_data_context == nil then
+		return
+	end
+	local visible = _devmenu.spawn_panel_data_context.panel_visible
+	local _, dc = _devmenu_build_spawn_panel()
+	dc.panel_visible = visible
+	_devmenu.spawn_panel_data_context = dc
+	UI_SetDataContext("DevMenuSpawnPanel", dc)
+end
+
+-----------------------------------------------------------------------
+-- Spawn Panel: open Unit Spawner, back, switch, group, spawn-mode
+-----------------------------------------------------------------------
+
+-- Open the Unit Spawner sub-page from the Spawn Panel.
+function DevMenu_SpawnPanel_OpenUnitSpawner()
+	if _devmenu == nil or not _devmenu.is_ui_created then return end
+	DevMenu_UnitSpawner_BuildCategory()
+	_devmenu.dev_submenu_data_contexts["unit_spawner"] = nil
+	if not _devmenu_ensure_submenu_presenter("unit_spawner") then
+		print("[DEVMENU] SpawnPanel_OpenUnitSpawner: ensure_presenter failed"); return
+	end
+	local dc = _devmenu.dev_submenu_data_contexts["unit_spawner"]
+	if dc == nil then return end
+	dc.cmd_back  = UI_CreateCommand("DevMenu_SpawnPanel_UnitSpawnerBack")
+	dc.cmd_close = UI_CreateCommand("DevMenu_SpawnPanel_UnitSpawnerClose")
+	DevMenu_HideSpawnPanel()
+	if type(_devmenu_hide_all_submenus) == "function" then _devmenu_hide_all_submenus() end
+	dc.panel_visible = true
+	UI_SetDataContext("DevMenuDEVSubmenu_unit_spawner", dc)
+	_devmenu.dev_active_submenu_key = "unit_spawner"
+end
+
+-- Back handler when Unit Spawner was opened via Spawn Panel.
+function DevMenu_SpawnPanel_UnitSpawnerBack()
+	if _devmenu == nil or not _devmenu.is_ui_created then return end
+	if type(_devmenu_hide_all_submenus) == "function" then _devmenu_hide_all_submenus() end
+	DevMenu_ShowSpawnPanel()
+end
+
+-- Close handler when Unit Spawner was opened via Spawn Panel.
+-- Hides the spawner without returning to the Spawn Panel.
+function DevMenu_SpawnPanel_UnitSpawnerClose()
+	if _devmenu == nil or not _devmenu.is_ui_created then return end
+	if type(_devmenu_hide_all_submenus) == "function" then _devmenu_hide_all_submenus() end
+	DevMenu_HideSpawnPanel()
+end
+
+-- Switch from Quick Panel to Spawn Panel.
+function DevMenu_QuickPanel_SwitchToSP()
+	DevMenu_HideQuickPanel()
+	DevMenu_ShowSpawnPanel()
+end
+
+-- Switch from Spawn Panel to Quick Panel.
+function DevMenu_SpawnPanel_SwitchToQP()
+	DevMenu_HideSpawnPanel()
+	DevMenu_ShowQuickPanel()
+end
+
+-- Increment spawn group count (max 8).
+function DevMenu_SpawnPanel_GroupInc()
+	if _devmenu == nil then return end
+	_devmenu.spawn_group_count = math.min((_devmenu.spawn_group_count or 1) + 1, 8)
+	DevMenu_SpawnPanel_Refresh()
+end
+
+-- Decrement spawn group count (min 1).
+function DevMenu_SpawnPanel_GroupDec()
+	if _devmenu == nil then return end
+	_devmenu.spawn_group_count = math.max((_devmenu.spawn_group_count or 1) - 1, 1)
+	DevMenu_SpawnPanel_Refresh()
+end
+
+-- Toggle spawn location: Keep (default) vs Camera.
+-- Camera mode works in MP: the camera position is captured and serialized
+-- into DEVMENU_SPAWN_UNIT_CAM / DEVMENU_SPAWN_ARMY_CAM messages at spawn
+-- time, so all peers execute the spawn at the pressing peer's coordinates.
+function DevMenu_SpawnPanel_ToggleSpawnMode()
+	if _devmenu == nil then return end
+	_devmenu.spawn_at_camera = not (_devmenu.spawn_at_camera == true)
+	DevMenu_SpawnPanel_Refresh()
+end
+
+-----------------------------------------------------------------------
+-- Toggle-state refresh — rebuilds panel DCs so toggle cards (FoW,
+-- Invulnerable, Instant Build) reflect their current state after a
+-- cheat handler fires. Called via Rule_AddOneShot(0.3) from each
+-- toggle handler so the GE_BroadcastMessage net callback has already
+-- executed on all peers before we read the engine state globals.
+-----------------------------------------------------------------------
+
+function DevMenu_RefreshToggleStates()
+	if not _devmenu.is_ui_created then return end
+	-- Refresh the CHEAT modal panel (preserving its open/closed state).
+	if _devmenu.cheat_panel_data_context ~= nil and _DEVMENU_ENTRIES ~= nil then
+		local cheat_visible = _devmenu.cheat_panel_data_context.panel_visible
+		local _, cheat_dc = _devmenu_build_cheat_panel_categorized(_DEVMENU_ENTRIES)
+		cheat_dc.panel_visible = cheat_visible
+		_devmenu.cheat_panel_data_context = cheat_dc
+		UI_SetDataContext("DevMenuCHEATPanel", cheat_dc)
+	end
+	-- Refresh the Quick Panel (preserving its visible state).
+	if _devmenu.quick_panel_data_context ~= nil and _DEVMENU_ENTRIES ~= nil then
+		local _, qdc, qcount = _devmenu_build_quick_panel(_DEVMENU_ENTRIES)
+		qdc.panel_visible = _devmenu.quick_panel_enabled == true
+		_devmenu.quick_panel_data_context = qdc
+		_devmenu.quick_panel_entry_count  = qcount
+		UI_SetDataContext("DevMenuCHEATQuickPanel", qdc)
+	end
+end
+
+-----------------------------------------------------------------------
+-- Toast notification — lightweight confirmation popup (bottom-center).
+--
+-- DevMenu_ShowToast(arg)   shows the toast; auto-dismisses after 3 seconds
+--                          via Rule_AddOneShot (_devmenu_toast_autohide).
+-- DevMenu_HideToast()      hides immediately (also called by the timer).
+-- _devmenu_toast_autohide  named global so Rule_AddOneShot can reference it.
+--
+-- The presenter is created on ScarAlwaysVisible with IsHitTestVisible=false
+-- so clicks pass through the entire panel transparently.
+--
+-- The only user-controlled gate is _DEVMENU_BLOCK_TOAST_ENABLED (cheat menu
+-- "Block Toast" toggle). This is INDEPENDENT of VictimPrompt and Block Notify.
+-----------------------------------------------------------------------
+
+-- Survives hot-reloads via `or false` init. Defaults OFF (toasts shown).
+_DEVMENU_BLOCK_TOAST_ENABLED = _DEVMENU_BLOCK_TOAST_ENABLED or false
+
+local _devmenu_toast_rule_pending = false
+
+function _devmenu_toast_autohide()
+	_devmenu_toast_rule_pending = false
+	DevMenu_HideToast()
+	-- Rule_AddOneShot callbacks are automatically removed after firing;
+	-- no explicit Rule_Remove needed here.
+end
+
+function DevMenu_HideToast()
+	if _devmenu.toast_data_context == nil then return end
+	local dc = _devmenu.toast_data_context
+	dc.toast_visible    = false
+	dc.state_on_visible  = false
+	dc.state_off_visible = false
+	dc.suffix_visible    = false
+	dc.target_visible   = false
+	dc.flag_visible     = false
+	dc.subtext_visible  = false
+	if _devmenu.is_ui_created then
+		UI_SetDataContext("DevMenuToast", dc)
+	end
+end
+
+-- DevMenu_ShowToast(arg)
+--   arg = string : simple one-line toast ("+1000 resources")
+--   arg = table  : rich toast:
+--     msg        (string) — backward-compat plain message (sets msg_prefix)
+--     prefix     (string) — text before the colored state word
+--     state_word (string) — highlighted word, e.g. "ENABLED", "ON", "REVEALED"
+--     state_on   (bool)   — true = green (#5DFF88), false = red (#FF6B6B)
+--     suffix     (string) — text after the state word, e.g. " to 3 squad(s)"
+--     flag       (string) — civ flag pack:// URI
+--     name       (string) — player display name
+--     subtext    (string) — third line, e.g. "Team 1 (allied)"
+function DevMenu_ShowToast(arg)
+	-- Block Toast gate (user-controlled, independent of VP/Block-Notify).
+	if _DEVMENU_BLOCK_TOAST_ENABLED == true then
+		print("[DEVMENU] toast: SUPPRESSED (Block Toast ON) - " .. tostring(
+			(type(arg) == "table" and (arg.prefix or arg.msg or arg[1])) or arg or ""))
+		return
+	end
+	if _devmenu.toast_data_context == nil then
+		print("[DEVMENU] toast: UI not ready - " .. tostring(arg))
+		return
+	end
+	-- Cancel any existing auto-hide rule before starting a new one.
+	if _devmenu_toast_rule_pending
+		and type(Rule_Exists) == "function" and Rule_Exists(_devmenu_toast_autohide)
+		and type(Rule_Remove) == "function" then
+		Rule_Remove(_devmenu_toast_autohide)
+		_devmenu_toast_rule_pending = false
+	end
+	local prefix, state_word, state_on, suffix, flag, name, subtext
+	if type(arg) == "table" then
+		prefix     = arg.prefix or arg.msg or arg[1] or ""
+		state_word = arg.state_word
+		state_on   = arg.state_on   -- true/false/nil
+		suffix     = arg.suffix
+		flag       = arg.flag
+		name       = arg.name
+		subtext    = arg.subtext
+	else
+		prefix = tostring(arg or "")
+	end
+	local has_state  = (state_word ~= nil and state_word ~= "")
+	local has_suffix = (suffix ~= nil and suffix ~= "")
+	local dc = _devmenu.toast_data_context
+	dc.msg_prefix        = tostring(prefix or "")
+	dc.msg_state_word    = tostring(state_word or "")
+	dc.msg_suffix        = tostring(suffix or "")
+	dc.state_on_visible  = has_state and (state_on == true)
+	dc.state_off_visible = has_state and (state_on == false)
+	dc.suffix_visible    = has_suffix
+	dc.player_name       = tostring(name or "")
+	dc.flag_image        = tostring(flag or "")
+	dc.flag_visible      = (flag ~= nil and flag ~= "")
+	dc.target_visible    = (name ~= nil and name ~= "") or dc.flag_visible
+	dc.subtext           = tostring(subtext or "")
+	dc.subtext_visible   = (subtext ~= nil and subtext ~= "")
+	dc.toast_visible     = true
+	UI_SetDataContext("DevMenuToast", dc)
+	if type(Rule_AddOneShot) == "function" then
+		_devmenu_toast_rule_pending = true
+		Rule_AddOneShot(_devmenu_toast_autohide, 3.0)
+	end
+	local log_msg = tostring(prefix or "")
+		.. (has_state and (" [" .. tostring(state_word) .. (state_on and "/ON" or "/OFF") .. "]") or "")
+		.. tostring(suffix or "")
+	print("[DEVMENU] toast: " .. log_msg)
+end
+
+-- Returns whether the on-screen Toast is currently suppressed by the user.
+-- Read by the cheat menu "Block Toast" toggle button to render its state.
+function DevMenu_GetBlockToastEnabled()
+	return _DEVMENU_BLOCK_TOAST_ENABLED == true
+end
+
+-- Toggles the on-screen Toast suppression. INDEPENDENT of VictimPrompt and
+-- Block Notify state. Uses print() (not ShowToast) so the OFF transition is
+-- always observable in scarlog even when toasts are being suppressed.
+function DevMenu_ToggleBlockToast()
+	_DEVMENU_BLOCK_TOAST_ENABLED = not (_DEVMENU_BLOCK_TOAST_ENABLED == true)
+	print("[DEVMENU] Block Toast: " .. (_DEVMENU_BLOCK_TOAST_ENABLED and "ON (toasts suppressed)" or "OFF (toasts shown)"))
+	if type(DevMenu_RefreshToggleStates) == "function" then
+		DevMenu_RefreshToggleStates()
+	end
+end
+
+-----------------------------------------------------------------------
+-- BlockNotify: plain toast shown to the actor (pressing peer) whose
+-- cheat action was blocked by the victim's Block Actions flag.
+-- The interactive popup has been removed; actors receive read-only
+-- toast feedback.  Victim-side interaction is handled by VictimPrompt.
+-----------------------------------------------------------------------
+
+-- DevMenu_ShowBlockNotify(victim_name)
+-- Shows a plain toast to the actor informing that their action was
+-- blocked.  Kept for backward compatibility with external callers.
+function DevMenu_ShowBlockNotify(victim_name)
+	local vname = tostring(victim_name or "Unknown")
+	if type(DevMenu_ShowToast) ~= "function" then return end
+	DevMenu_ShowToast({
+		prefix     = "Action blocked — Block Actions enabled by ",
+		state_word = vname,
+		state_on   = false,
+		name       = vname,
+	})
+end
+
+-- No-ops kept for backward compatibility with external callers.
+function DevMenu_HideBlockNotify() end
+function DevMenu_BlockNotify_Yes() end
+function DevMenu_BlockNotify_Dismiss() end
+
+-----------------------------------------------------------------------
+-- VictimPrompt: interactive overlay shown to the LOCAL PLAYER when
+-- their units are targeted by another player's cheat action.
+-- Buttons: [Block/Unblock Actions] [Close] [Disable Notifications]
+--
+-- Flow:
+--   (a) Net handler detects local player's units were targeted, calls
+--       _devmenu_maybe_show_victim_prompt (devmenu_mp_gate.scar).
+--   (b) DevMenu_ShowVictimPrompt updates the DC and shows the overlay.
+--   (c1) Player clicks [Block/Unblock Actions] → DevMenu_VictimPromptBlock
+--        toggles Block Actions and hides.
+--   (c2) Player clicks [Close] → DevMenu_VictimPromptClose hides + 30s gate.
+--   (c3) Player clicks [Disable Notifications] →
+--        DevMenu_VictimPromptDisable sets _DEVMENU_VICTIM_PROMPT_ENABLED=false.
+--
+-- Round 4 (2026-05-26): VictimPrompt NEVER auto-closes. It stays visible
+-- until the user clicks Close / Block / Disable. The 30s post-Close cooldown
+-- (CLOSE_UNTIL) is retained — it is user-initiated, not auto-close.
+-----------------------------------------------------------------------
+
+function DevMenu_HideVictimPrompt()
+	if _devmenu.victim_prompt_data_context == nil then return end
+	_devmenu.victim_prompt_data_context.victim_prompt_visible = false
+	if _devmenu.is_ui_created then
+		UI_SetDataContext("DevMenuVictimPrompt", _devmenu.victim_prompt_data_context)
+	end
+end
+
+-- DevMenu_ShowVictimPrompt(attacker_name, action_verb)
+-- Shows an interactive prompt to the VICTIM (local player) when their
+-- units were targeted by attacker_name's cheat action.
+-- attacker_name : display name of the attacking player.
+-- action_verb   : present-tense verb ("destroy", "teleport", etc.).
+function DevMenu_ShowVictimPrompt(attacker_name, action_verb)
+	if _devmenu.victim_prompt_data_context == nil then return end
+	local aname = tostring(attacker_name or "Unknown")
+	local verb  = tostring(action_verb   or "target")
+	local already = type(DevMenu_GetBlockActionsEnabled) == "function" and DevMenu_GetBlockActionsEnabled()
+	local dc = _devmenu.victim_prompt_data_context
+	dc.btn_block_label       = already and "Unblock Actions" or "Block Actions"
+	dc.victim_prompt_visible = true
+	if _devmenu.is_ui_created then
+		UI_SetDataContext("DevMenuVictimPrompt", dc)
+	end
+	-- Round 4: NO auto-hide. VictimPrompt stays visible until the user clicks
+	-- Block / Close / Disable. This is intentional — the prompt is a
+	-- decision the victim should make explicitly.
+end
+
+-- Called when the victim clicks [Block Actions] / [Unblock Actions].
+function DevMenu_VictimPromptBlock()
+	DevMenu_HideVictimPrompt()
+	if type(DevMenu_DoToggleBlockActions) == "function" then
+		DevMenu_DoToggleBlockActions()
+	end
+end
+
+-- Called when the victim clicks [Close].
+-- Hides the prompt immediately and suppresses new VP notifications for 30 seconds.
+function DevMenu_VictimPromptClose()
+	DevMenu_HideVictimPrompt()
+	if type(World_GetGameTime) == "function" then
+		local ok, t = pcall(World_GetGameTime)
+		if ok then _DEVMENU_VICTIM_PROMPT_CLOSE_UNTIL = t + 30.0 end
+	end
+end
+
+-- Called when the victim clicks [Disable Notifications].
+function DevMenu_VictimPromptDisable()
+	_DEVMENU_VICTIM_PROMPT_ENABLED = false
+	DevMenu_HideVictimPrompt()
+end
+
+-- Companion to DevMenu_VictimPromptDisable.  Re-enables VP notifications
+-- and shows a confirmation toast.  Does NOT show the VictimPrompt itself —
+-- the next gated cheat action triggers that naturally via the gate logic.
+function DevMenu_VictimPromptEnable()
+	-- Diagnostic print when CDBG is active so the Enable toggle is always
+	-- visible in scarlog (logs pre-call ENABLED + CLOSE_UNTIL state).
+	-- _CDBG_SESSION_ACTIVE is the cross-file bridge global set by
+	-- DevMenu_RunCheatsDebugger; _cdbg_running itself is file-local.
+	if _CDBG_SESSION_ACTIVE then
+		print("[DEVMENU] VictimPromptEnable called (CDBG active)"
+			.. "  ENABLED_was=" .. tostring(_DEVMENU_VICTIM_PROMPT_ENABLED)
+			.. "  CLOSE_UNTIL_was=" .. tostring(_DEVMENU_VICTIM_PROMPT_CLOSE_UNTIL or 0)
+			.. "  gametime=" .. (type(World_GetGameTime) == "function"
+				and tostring(World_GetGameTime()) or "?"))
+	end
+	_DEVMENU_VICTIM_PROMPT_ENABLED     = true
+	-- Resets CLOSE_UNTIL — Enable signals "show VP now"; a stale 30-second
+	-- Close cooldown would silently suppress subsequent VPs and make the
+	-- Enable toggle appear broken.  Design (2026-05-25): Enable fully
+	-- restores VP regardless of prior Close/Disable state.
+	_DEVMENU_VICTIM_PROMPT_CLOSE_UNTIL = 0
+	if type(DevMenu_ShowToast) == "function" then
+		DevMenu_ShowToast({ prefix = "Notifications ", state_word = "ENABLED", state_on = true })
+	end
+end
+
+-----------------------------------------------------------------------
+-- Camera-center Teleport (one-shot)
+--
+-- Background: Misc_GetMouseOnTerrain() is documented as non-deterministic
+-- and, per live telemetry (2026-05-11), returns (0,0,0) on every call
+-- from any UI/Rule context — even when the cursor is plainly over
+-- terrain. The official CheatTeleportSelectedSquads in chatcheats.scar
+-- only works because the engine's chat-cheat dispatcher pre-resolves
+-- cursorPos before invoking the SCAR function; SCAR cannot reproduce
+-- that resolution itself. A previous two-step "arm overlay" approach
+-- also bugged the camera (the transparent full-viewport XamlPresenter
+-- captured input it should not have).
+--
+-- Resolution: warp selected squads to Camera_GetCurrentTargetPos()
+-- (the world position the camera is pointed at). It is one click, no
+-- overlay, no input capture, and the API returns valid coordinates
+-- in every observed case. Users pan to the target, press the button,
+-- units arrive. This is the same UX the engine’s built-in `warp`
+-- console command uses.
+-----------------------------------------------------------------------
+
+-- Scratch SGroup for the warp loop (mirrors chatcheats.scar's sg_temp).
+local _DEVMENU_TELEPORT_SGROUP = "sg_devmenu_teleport"
+
+local function _devmenu_teleport_pos_xyz(pos)
+	if pos == nil then return nil, nil, nil end
+	local ok, x, y, z = pcall(function() return pos.x, pos.y, pos.z end)
+	if not ok or x == nil then return nil, nil, nil end
+	return x, y, z
+end
+
+local function _devmenu_teleport_fmt_pos(pos)
+	local x, y, z = _devmenu_teleport_pos_xyz(pos)
+	if x == nil then return "<no-xyz:" .. tostring(pos) .. ">" end
+	return string.format("(%.2f,%.2f,%.2f)", x, y, z)
+end
+
+local function _devmenu_teleport_log(msg)
+	-- Use the original (unfiltered) print captured at module load so
+	-- teleport telemetry is always visible regardless of the precache
+	-- log filter at the top of this file.
+	_devmenu_print("[DEVMENU-TELEPORT] " .. tostring(msg))
+end
+
+-- Public entry point bound to DevMenu_DoTeleportSelected. Snapshots the
+-- local player's current selection and warps each squad to a position
+-- 20 units forward of the camera focal point (same direction/offset used
+-- by spawn actions). No overlay, no input capture, no second click.
+function DevMenu_TeleportSelectedToCameraCenter()
+	if type(_devmenu_mp_gate) == "function" and _devmenu_mp_gate("teleport_camera") then return false end
+	if type(Camera_GetCurrentTargetPos) ~= "function" then
+		_devmenu_teleport_log("ABORT: Camera_GetCurrentTargetPos unavailable")
+		if type(DevMenu_ShowToast) == "function" then
+			DevMenu_ShowToast({ prefix = "teleport: ", state_word = "API UNAVAILABLE", state_on = false,
+				suffix = " — Camera_GetCurrentTargetPos missing" })
+		end
+		return false
+	end
+	if type(Misc_GetSelectedSquads) ~= "function" or type(SGroup_Create) ~= "function" then
+		_devmenu_teleport_log("ABORT: selection API unavailable")
+		if type(DevMenu_ShowToast) == "function" then
+			DevMenu_ShowToast({ prefix = "teleport: ", state_word = "API UNAVAILABLE", state_on = false,
+				suffix = " — selection API missing" })
+		end
+		return false
+	end
+
+	local sg
+	if type(SGroup_Exists) == "function" and SGroup_Exists(_DEVMENU_TELEPORT_SGROUP) then
+		sg = SGroup_FromName(_DEVMENU_TELEPORT_SGROUP)
+		if type(SGroup_Clear) == "function" then SGroup_Clear(sg) end
+	else
+		sg = SGroup_Create(_DEVMENU_TELEPORT_SGROUP)
+	end
+	Misc_GetSelectedSquads(sg, false)
+
+	local count = (type(SGroup_CountSpawned) == "function") and SGroup_CountSpawned(sg) or 0
+	if count == 0 then
+		_devmenu_teleport_log("ABORT: no squads selected — select units first")
+		if type(DevMenu_ShowToast) == "function" then
+			DevMenu_ShowToast({ prefix = "teleport: ", state_word = "NO SELECTION", state_on = false,
+				suffix = " — select units first" })
+		end
+		return false
+	end
+
+	-- _devmenu_camera_forward_pos is defined in devmenu_actions.scar (global).
+	local targetPos = (type(_devmenu_camera_forward_pos) == "function")
+		and _devmenu_camera_forward_pos(-40)
+		or Camera_GetCurrentTargetPos()
+	_devmenu.teleport_last_pos = targetPos
+
+	-- MP routing: serialize squad IDs + target position and broadcast to all peers.
+	if _devmenu_is_multiplayer() and type(Squad_GetID) == "function"
+		and type(SGroup_GetSpawnedSquadAt) == "function" then
+		local ok_px, px = pcall(function() return targetPos.x end)
+		local ok_py, py = pcall(function() return targetPos.y end)
+		local ok_pz, pz = pcall(function() return targetPos.z end)
+		if ok_px and ok_py and ok_pz and type(px) == "number" then
+			local sqids = {}
+			-- DEVMENU-RICH-TOAST: pid -> count for single-owner attribution.
+			local owner_pids = {}
+			for i = 1, count do
+				local sq = SGroup_GetSpawnedSquadAt(sg, i)
+				if sq ~= nil then
+					sqids[#sqids + 1] = tostring(Squad_GetID(sq))
+					-- DEVMENU-RICH-TOAST: resolve owner via first entity.
+					local _eid = (type(Squad_GetFirstEntity) == "function") and Squad_GetFirstEntity(sq) or nil
+					local _o = (_eid ~= nil and type(Entity_GetPlayerOwner) == "function")
+						and ((type(World_OwnsEntity) ~= "function" or World_OwnsEntity(_eid)) and Entity_GetPlayerOwner(_eid) or nil)
+						or nil
+					local _opid = (_o ~= nil and type(Player_GetID) == "function") and Player_GetID(_o) or nil
+					if _opid ~= nil then owner_pids[_opid] = (owner_pids[_opid] or 0) + 1 end
+				end
+			end
+			if #sqids > 0 then
+				local payload = string.format("%.4f %.4f %.4f %s",
+					px, py, pz, table.concat(sqids, " "))
+				local local_player = (type(Game_GetLocalPlayer) == "function")
+					and Game_GetLocalPlayer() or nil
+				if _devmenu_mp_net_action(local_player, "DEVMENU_TELEPORT", payload) then
+					_devmenu_teleport_log(string.format("MP: routed %d squad(s) via DEVMENU_TELEPORT", count))
+					-- DEVMENU-RICH-TOAST: single-owner attribution mirrors Convert pattern.
+					if type(DevMenu_ShowToast) == "function" then
+						local _msg = string.format("%d squad(s) teleported to camera center", count)
+						local _owner_pid = (type(_devmenu_single_owner) == "function") and _devmenu_single_owner(owner_pids) or nil
+						if _owner_pid ~= nil and type(_devmenu_resolve_player_info_by_pid) == "function" then
+							local ti = _devmenu_resolve_player_info_by_pid(_owner_pid)
+							DevMenu_ShowToast({
+								msg     = _msg,
+								flag    = ti.civ_icon,
+								name    = ti.display_name,
+								subtext = (type(_devmenu_team_label) == "function") and _devmenu_team_label(ti) or nil,
+							})
+						else
+							DevMenu_ShowToast(_msg)
+						end
+					end
+					return true
+				end
+			end
+		end
+	end
+
+	local function _TeleportSquad(gid, idx, sid)
+		Squad_SetPosition(sid, targetPos, targetPos)
+	end
+	SGroup_ForEach(sg, _TeleportSquad)
+
+	_devmenu_teleport_log(string.format(
+		"OK: warped %d squad(s) to camera_forward_pos=%s",
+		count, _devmenu_teleport_fmt_pos(targetPos)))
+	if type(DevMenu_ShowToast) == "function" then
+		DevMenu_ShowToast(string.format("%d squad(s) teleported to camera center", count))
+	end
+	return true
+end
+
+-- CHEAT menu gate.
+-- Priority order:
+--   1. cmdline "-cheat" launch arg  (Misc_IsCommandLineOptionSet("cheat"))
+--      DEAD IN WORKSHOP: the AoE4 lobby "Allow Cheats" UI toggle does NOT set this
+--      flag when running a workshop mod — it only injects -cheat for native game modes
+--      (standard/skirmish). Confirmed 2026-05-11: cmdline_cheat=false with lobby cheats ON.
+--   2. cmdline "-dev" launch arg  (also enables the DEV menu)
+--   3. _mod.debug — explicit local dev build override
+--   4. AGS_GLOBAL_SETTINGS.CheatMenu — lobby option "Enable Cheat Menu" (default OFF).
+--      Host must enable this in match settings before starting the session.
+local function _devmenu_are_cheats_enabled()
+	if type(Misc_IsCommandLineOptionSet) == "function" and Misc_IsCommandLineOptionSet("cheat") then
+		return true, "cmdline_cheat"
+	end
+	if type(Misc_IsCommandLineOptionSet) == "function" and Misc_IsCommandLineOptionSet("dev") then
+		return true, "cmdline_dev"
+	end
+	if _mod ~= nil and _mod.debug == true then
+		return true, "_mod.debug"
+	end
+	if AGS_GLOBAL_SETTINGS ~= nil and AGS_GLOBAL_SETTINGS.CheatMenu == true then
+		return true, "lobby_cheat_menu"
+	end
+	return false, "none"
+end
+
+-- DEV menu gate: requires the stricter "-dev" command-line flag.
+-- This is independent of the lobby cheats setting; the DEV menu is never
+-- shown in normal cheat-enabled lobbies — only in explicit dev/debug launches.
+local function _devmenu_is_dev_mode()
+	if type(Misc_IsCommandLineOptionSet) == "function" and Misc_IsCommandLineOptionSet("dev") then
+		return true
+	end
+	if _mod ~= nil and _mod.debug == true then
+		return true
+	end
+	return false
+end
+
+-----------------------------------------------------------------------
+-- Build the panel XAML and data context from entries (menu-agnostic)
+-----------------------------------------------------------------------
+
+-- Low-level: build the card-grid XAML + card DC keys (cmd_N/icon_N/label_N/desc_N/vis_N)
+-- without wrapping in any panel chrome. Caller adds chrome (panel/submenu/recent strip).
+-- Returns (cards_xaml_string, dc_table, entry_count).
+local function _devmenu_build_cards(menu_type, entries, section_suffix)
+	local entry_count = #entries
+	local cards_per_row = _devmenu.cards_per_row
+
+	local cards_xaml = {}
+
+	table.insert(cards_xaml, "<Grid.ColumnDefinitions>")
+	for c = 1, cards_per_row do
+		table.insert(cards_xaml, '<ColumnDefinition Width="Auto" />')
+	end
+	table.insert(cards_xaml, "</Grid.ColumnDefinitions>")
+
+	local row_count = math.ceil(entry_count / cards_per_row)
+	if row_count < 1 then row_count = 1 end
+	table.insert(cards_xaml, "<Grid.RowDefinitions>")
+	for r = 1, row_count do
+		table.insert(cards_xaml, '<RowDefinition Height="Auto" />')
+	end
+	table.insert(cards_xaml, "</Grid.RowDefinitions>")
+
+	local dc = {}
+	local dispatch_table = _devmenu_get_dispatch_table(menu_type)
+	-- Reset the dispatch table so stale entries from a prior build don't leak.
+	for k in pairs(dispatch_table) do dispatch_table[k] = nil end
+
+	for idx, entry in ipairs(entries) do
+		local row = math.floor((idx - 1) / cards_per_row)
+		local col = (idx - 1) % cards_per_row
+
+		local fn_name = _devmenu_make_dispatcher(menu_type, idx)
+		dispatch_table[idx] = entry.action
+
+		-- LOCKED gate: entries flagged with `locked = true` are decorative.
+		-- They always show the LOCKED badge and clicks are routed to NoOp.
+		-- This is independent of `dev_only` (conditional on -dev launch flag);
+		-- both produce the same visual + click behavior, so they share the
+		-- `is_locked` boolean and the same DC keys.
+		local is_locked = (entry.locked == true)
+			or (entry.dev_only == true and not _devmenu_is_dev_mode())
+		if is_locked then
+			dispatch_table[idx] = "DevMenu_NoOp"
+		end
+
+		-- MP-LOCKED gate: block mp_locked entries in multiplayer sessions.
+		-- Priority: locked overrides mp_locked (locked entries are already NoOp'd).
+		local is_mp_locked = (not is_locked) and (entry.mp_locked == true) and _devmenu_is_multiplayer()
+		if is_mp_locked then
+			dispatch_table[idx] = "DevMenu_NoOp"
+		end
+
+		dc["cmd_"   .. tostring(idx)] = UI_CreateCommand(fn_name)
+		dc["icon_"  .. tostring(idx)] = entry.icon  or _DEVMENU_ICON_DEFAULT
+		dc["label_" .. tostring(idx)] = entry.label or (menu_type .. " " .. tostring(idx))
+		dc["desc_"  .. tostring(idx)] = entry.desc  or ""
+		dc["note_"  .. tostring(idx)] = entry.note  or ""
+		dc["note_vis_" .. tostring(idx)] = (entry.note or "") ~= ""
+		dc["kind_"  .. tostring(idx)] = is_locked and "locked" or (is_mp_locked and "mp_locked" or (entry.kind or "action"))
+		dc["hint_"  .. tostring(idx)] = is_locked and "LOCKED"   or (is_mp_locked and "MP LOCKED" or (entry.hint or "RUN NOW"))
+		dc["state_" .. tostring(idx)] = entry.state or ""
+		dc["vis_"   .. tostring(idx)] = true
+		dc["locked_vis_"   .. tostring(idx)] = is_locked
+		dc["mplocked_vis_" .. tostring(idx)] = is_mp_locked
+
+		-- Tier selector DC keys (spawner-only; nil for all other menus).
+		if entry.tier_vis then
+			dc["tvis_" .. tostring(idx)] = true
+			local td = entry.tier_data
+			if td then
+				if td.count > 4 then
+					-- 5+-tier stepper (theoretical): prev/next commands + active label.
+					dc["tcmd_" .. tostring(idx) .. "_prev"] = UI_CreateCommand(td.cmds[1] or "DevMenu_NoOp")
+					dc["tcmd_" .. tostring(idx) .. "_next"] = UI_CreateCommand(td.cmds[2] or "DevMenu_NoOp")
+					dc["tsel_label_" .. tostring(idx)] = td.labels and (td.labels[td.sel or 1] or "I") or "I"
+				else
+					-- 2–4-tier tabs: one command + active/label per tab.
+					for t = 1, td.count do
+						dc["tlbl_" .. tostring(idx) .. "_" .. t] = td.labels[t] or tostring(t)
+						dc["tact_" .. tostring(idx) .. "_" .. t] = (t == (td.sel or 1)) and "active" or ""
+						dc["tcmd_" .. tostring(idx) .. "_" .. t] = UI_CreateCommand(td.cmds[t] or "DevMenu_NoOp")
+					end
+				end
+			end
+		else
+			dc["tvis_" .. tostring(idx)] = false
+		end
+
+		-- Allow per-entry custom card XAML builder (spawner tier cards use this).
+		local card_fn = _DEVMENU_BUILD_CARD_XAML
+		if type(entry.card_xaml_fn) == "string" then
+			local f = _G[entry.card_xaml_fn]
+			if type(f) == "function" then card_fn = f end
+		end
+		table.insert(cards_xaml, card_fn(idx, row, col, section_suffix or ""))
+	end
+
+	return table.concat(cards_xaml, "\n"), dc, entry_count
+end
+
+local function _devmenu_build_panel(menu_type, entries)
+	-- CHEAT/legacy DEV panel using shared chrome.
+	local cards_xaml, dc, entry_count = _devmenu_build_cards(menu_type, entries)
+	dc.panel_visible = false
+	dc.cmd_close     = UI_CreateCommand("DevMenu_Close" .. string.upper(menu_type) .. "Panel")
+	local panel_xaml = _DEVMENU_BUILD_PANEL_XAML(cards_xaml)
+	return panel_xaml, dc, entry_count
+end
+
+local function _devmenu_eval_toggle_state(toggle_state_fn)
+	if type(toggle_state_fn) ~= "string" or toggle_state_fn == "" then
+		return nil
+	end
+	local fn = _G[toggle_state_fn]
+	if type(fn) ~= "function" then
+		return nil
+	end
+	local ok, value = pcall(fn)
+	if not ok then
+		return nil
+	end
+	return value == true
+end
+
+local function _devmenu_build_category_card_entry(cat)
+	local submenu = cat.submenu or {}
+	local n = #submenu
+	local base_icon = cat.icon or _DEVMENU_ICON_DEFAULT
+
+	if n <= 0 then
+		return {
+			label  = cat.label or cat.key,
+			desc   = (cat.desc or "") .. " (no actions)",
+			icon   = base_icon,
+			action = "DevMenu_OpenCategory_" .. cat.key,
+			kind   = "menu",
+			hint   = "OPEN MENU",
+			state  = "",
+		}
+	end
+
+	if n == 1 then
+		local item = submenu[1]
+		local is_on = _devmenu_eval_toggle_state(item.toggle_state_fn)
+		local kind = "action"
+		local hint = "RUN NOW"
+		local state = ""
+		if is_on ~= nil then
+			kind = is_on and "toggle_on" or "toggle_off"
+			hint = is_on and "TOGGLE: ON" or "TOGGLE: OFF"
+			state = is_on and "ENABLED" or "DISABLED"
+		end
+		return {
+			label  = cat.label or cat.key,
+			desc   = cat.desc or "",
+			icon   = item.icon or base_icon,
+			action = item.action,
+			kind   = kind,
+			hint   = hint,
+			state  = state,
+		}
+	end
+
+	return {
+		label  = cat.label or cat.key,
+		desc   = cat.desc or "",
+		icon   = base_icon,
+		action = "DevMenu_OpenCategory_" .. cat.key,
+		kind   = "menu",
+		hint   = "OPEN MENU",
+		state  = "",
+	}
+end
+
+local function _devmenu_suffix_card_bindings(cards_xaml, suffix)
+	if type(cards_xaml) ~= "string" or cards_xaml == "" then
+		return cards_xaml or ""
+	end
+	if type(suffix) ~= "string" or suffix == "" then
+		return cards_xaml
+	end
+	local keys = {"cmd", "icon", "label", "desc", "note", "note_vis", "kind", "hint", "state", "vis", "locked_vis", "mplocked_vis"}
+	for _, key in ipairs(keys) do
+		cards_xaml = string.gsub(cards_xaml, "%[(" .. key .. "_%d+)%]", "[%1" .. suffix .. "]")
+	end
+	-- Tier selector bindings: tvis_N, tsel_label_N, double-index t*_N_T keys,
+	-- and stepper tcmd_N_prev/tcmd_N_next.
+	cards_xaml = string.gsub(cards_xaml, "%[(tvis_%d+)%]",             "[%1" .. suffix .. "]")
+	cards_xaml = string.gsub(cards_xaml, "%[(tsel_label_%d+)%]",       "[%1" .. suffix .. "]")
+	cards_xaml = string.gsub(cards_xaml, "%[(t%a+_%d+_%d+)%]",         "[%1" .. suffix .. "]")
+	cards_xaml = string.gsub(cards_xaml, "%[(tcmd_%d+_prev)%]",        "[%1" .. suffix .. "]")
+	cards_xaml = string.gsub(cards_xaml, "%[(tcmd_%d+_next)%]",        "[%1" .. suffix .. "]")
+	return cards_xaml
+end
+
+local function _devmenu_merge_dc_with_suffix(dst, src, suffix)
+	if dst == nil or src == nil then
+		return
+	end
+	for k, v in pairs(src) do
+		dst[k .. suffix] = v
+	end
+end
+
+local function _devmenu_build_section(menu_type, entries, suffix, dc)
+	local cards_xaml, section_dc, _ = _devmenu_build_cards(menu_type, entries, suffix)
+	cards_xaml = _devmenu_suffix_card_bindings(cards_xaml, suffix)
+	_devmenu_merge_dc_with_suffix(dc, section_dc, suffix)
+	local visible = (#entries > 0) and "Visible" or "Collapsed"
+	return cards_xaml, visible
+end
+
+local function _devmenu_wrap_cards_grid(cards_xaml)
+	return '<Grid HorizontalAlignment="Center">\n' .. (cards_xaml or "") .. '\n</Grid>'
+end
+
+-- Build the CHEAT panel grouped by entry.category, using the same section
+-- chrome as the DEV submenu. Returns the complete panel XAML plus the
+-- merged data context so existing presenter creation code can keep using
+-- the standard `panel_visible` / `cmd_close` bindings.
+_devmenu_build_cheat_panel_categorized = function(entries)
+	local dc = {}
+
+	-- Group entries by category preserving first-seen order; then sort by
+	-- _DEVMENU_CHEAT_SECTION_ORDER, with unknown categories appended.
+	local order_index = {}
+	for i, key in ipairs(_DEVMENU_CHEAT_SECTION_ORDER or {}) do
+		order_index[key] = i
+	end
+
+	local seen_order = {}
+	local groups = {}
+	for _, e in ipairs(entries or {}) do
+		if e.quick_panel_only then goto continue_cheat end
+		local cat = e.category or "misc"
+		if groups[cat] == nil then
+			groups[cat] = {}
+			table.insert(seen_order, cat)
+		end
+		table.insert(groups[cat], e)
+		::continue_cheat::
+	end
+
+	table.sort(seen_order, function(a, b)
+		local ai = order_index[a] or (1000 + #seen_order)
+		local bi = order_index[b] or (1000 + #seen_order)
+		if ai ~= bi then return ai < bi end
+		return tostring(a) < tostring(b)
+	end)
+
+	local total = 0
+	local body_parts = {}
+	for i, cat in ipairs(seen_order) do
+		local cat_entries = groups[cat] or {}
+		-- Decorate toggle entries (e.g. Quick Panel) with chrome reflecting
+		-- their current state.
+		for _, entry in ipairs(cat_entries) do
+			local is_on = _devmenu_eval_toggle_state(entry.toggle_state_fn)
+			if is_on ~= nil then
+				entry.kind  = is_on and "toggle_on" or "toggle_off"
+				entry.hint  = is_on and "TOGGLE: ON" or "TOGGLE: OFF"
+				entry.state = is_on and "ENABLED" or "DISABLED"
+			end
+		end
+
+		local suffix = "_cat_" .. tostring(i)
+		local cards_xaml, _ = _devmenu_build_section("cheat" .. suffix, cat_entries, suffix, dc)
+		local meta = (_DEVMENU_CHEAT_SECTION_META and _DEVMENU_CHEAT_SECTION_META[cat])
+			or { title = string.upper(tostring(cat)), subtitle = "" }
+		table.insert(body_parts,
+			_DEVMENU_BUILD_DEV_SUBMENU_SECTION_XAML(meta.title, meta.subtitle, _devmenu_wrap_cards_grid(cards_xaml)))
+		total = total + #cat_entries
+	end
+
+	dc.panel_visible = false
+	dc.cmd_close     = UI_CreateCommand("DevMenu_CloseCHEATPanel")
+
+	local content = '<StackPanel HorizontalAlignment="Center">\n' .. table.concat(body_parts, "\n") .. '\n</StackPanel>'
+	local panel_xaml = _DEVMENU_BUILD_PANEL_XAML(content)
+	return panel_xaml, dc, total
+end
+
+-- Build the persistent (non-modal) Cheat Actions Quick Panel from the
+-- subset of `_DEVMENU_ENTRIES` flagged with `quick_panel = true`.
+-- Uses its own dispatcher namespace ("cheatquick") so per-card command
+-- bindings never collide with the modal CHEAT panel's dispatchers.
+_devmenu_build_quick_panel = function(entries)
+	local quick_entries = {}
+	for _, e in ipairs(entries or {}) do
+		if e.quick_panel == true or e.quick_panel_only == true then
+			-- Shallow copy so we can decorate without mutating the source.
+			local entry = {}
+			for k, v in pairs(e) do entry[k] = v end
+			local is_on = _devmenu_eval_toggle_state(entry.toggle_state_fn)
+			if is_on ~= nil then
+				entry.kind  = is_on and "toggle_on" or "toggle_off"
+				entry.state = is_on and "ON" or "OFF"
+			end
+			table.insert(quick_entries, entry)
+		end
+	end
+
+	local dc = {}
+	local rows_xaml_parts = {}
+
+	-- 1-column Grid: build column + row defs.
+	table.insert(rows_xaml_parts, "<Grid.ColumnDefinitions>")
+	table.insert(rows_xaml_parts, '<ColumnDefinition Width="*" />')
+	table.insert(rows_xaml_parts, "</Grid.ColumnDefinitions>")
+	table.insert(rows_xaml_parts, "<Grid.RowDefinitions>")
+	for _ = 1, math.max(#quick_entries, 1) do
+		table.insert(rows_xaml_parts, '<RowDefinition Height="Auto" />')
+	end
+	table.insert(rows_xaml_parts, "</Grid.RowDefinitions>")
+
+	local dispatch_table = _devmenu_get_dispatch_table("cheatquick")
+	for k in pairs(dispatch_table) do dispatch_table[k] = nil end
+
+	for idx, entry in ipairs(quick_entries) do
+		local row = idx - 1
+		local fn_name = _devmenu_make_dispatcher("cheatquick", idx)
+		dispatch_table[idx] = entry.action
+
+		dc["cmd_"   .. tostring(idx)] = UI_CreateCommand(fn_name)
+		dc["icon_"  .. tostring(idx)] = entry.icon  or _DEVMENU_ICON_DEFAULT
+		dc["label_" .. tostring(idx)] = entry.label or ("quick " .. tostring(idx))
+		dc["desc_"  .. tostring(idx)] = entry.desc  or ""
+		dc["kind_"  .. tostring(idx)] = entry.kind  or "action"
+		dc["state_" .. tostring(idx)] = entry.state or ""
+		dc["vis_"   .. tostring(idx)] = true
+
+		table.insert(rows_xaml_parts, _DEVMENU_BUILD_QUICK_CARD_XAML(idx, row))
+	end
+
+	dc.panel_visible    = _devmenu.quick_panel_enabled == true
+	dc.sp_panel_visible = _devmenu.spawn_panel_enabled == true
+	dc.cmd_close        = UI_CreateCommand("DevMenu_HideQuickPanel")
+	dc.cmd_open         = UI_CreateCommand("DevMenu_ShowQuickPanel")
+	dc.cmd_switch_to_sp = UI_CreateCommand("DevMenu_QuickPanel_SwitchToSP")
+
+	local rows_xaml = table.concat(rows_xaml_parts, "\n")
+	local panel_xaml = _DEVMENU_BUILD_CHEAT_QUICK_PANEL_XAML(rows_xaml)
+	return panel_xaml, dc, #quick_entries
+end
+
+-- Build the Spawn Panel data context from the current spawn history.
+-- Returns (panel_xaml, dc). Panel XAML is static; DC drives all slots.
+_devmenu_build_spawn_panel = function()
+	local history = _devmenu_spawn_history or {}
+	local max = _DEVMENU_SPAWN_HISTORY_MAX or 3
+	local dc = {}
+	for i = 1, max do
+		local s = tostring(i)
+		local item = history[i]
+		dc["slot_vis_"   .. s] = (item ~= nil)
+		dc["slot_label_" .. s] = item and (item.name or item.sbp) or ""
+		dc["slot_cmd_"   .. s] = UI_CreateCommand("DevMenu_SpawnPanel_Slot" .. s)
+	end
+	dc.slot_empty_vis    = (#history == 0)
+	dc.slot_nonempty_vis = (#history > 0)
+	dc.panel_visible     = _devmenu.spawn_panel_enabled == true
+	dc.qp_panel_visible  = _devmenu.quick_panel_enabled == true
+	dc.cmd_open          = UI_CreateCommand("DevMenu_ShowSpawnPanel")
+	dc.cmd_close         = UI_CreateCommand("DevMenu_HideSpawnPanel")
+	dc.cmd_switch_to_qp  = UI_CreateCommand("DevMenu_SpawnPanel_SwitchToQP")
+	dc.cmd_open_spawner  = UI_CreateCommand("DevMenu_SpawnPanel_OpenUnitSpawner")
+	dc.group_count       = tostring(_devmenu.spawn_group_count or 1)
+	dc.cmd_group_dec     = UI_CreateCommand("DevMenu_SpawnPanel_GroupDec")
+	dc.cmd_group_inc     = UI_CreateCommand("DevMenu_SpawnPanel_GroupInc")
+	dc.cmd_spawn_mode    = UI_CreateCommand("DevMenu_SpawnPanel_ToggleSpawnMode")
+	dc.spawn_mode_badge    = _devmenu.spawn_at_camera and "CAM"  or "KEEP"
+	dc.spawn_mode_badge_fg = _devmenu.spawn_at_camera and "#66FFDD" or "#AAFFCC"
+	dc.spawn_mode_badge_bg = _devmenu.spawn_at_camera and "#223344" or "#222233"
+	local panel_xaml = _DEVMENU_BUILD_SPAWN_PANEL_XAML()
+	return panel_xaml, dc
+end
+
+-- NOTE: GLOBAL (no `local`) so devmenu_unit_spawner.scar can append
+-- per-civ section keys at init. Order here drives section render order.
+_DEVMENU_SUBMENU_SECTION_ORDER = {
+	"logging_core",
+	"logging_ai",
+	"logging_onslaught",
+	"logging_systems",
+	"logging_ui",
+	"whole_game",
+	"ai",
+	"siege",
+	"player_ui",
+	"ui_pressure",
+	"advanced",
+	"perf",
+	"controls",
+}
+-- NOTE: GLOBAL (no `local`) so devmenu_unit_spawner.scar can register
+-- per-civ section meta at init.
+_DEVMENU_SUBMENU_SECTION_META = {
+	logging_core = {
+		title = "GLOBAL CONTROLS",
+		subtitle = "Master gates and child variants for default-off logging across the mod.",
+	},
+	logging_ai = {
+		title = "AI",
+		subtitle = "AI player lifecycle, heartbeat, and patrol-ownership logging.",
+	},
+	logging_onslaught = {
+		title = "ONSLAUGHT",
+		subtitle = "Core trace, precache, and runtime instrumentation channels.",
+	},
+	logging_systems = {
+		title = "SYSTEMS",
+		subtitle = "Gameplay-system logs and verbose debug variants layered on the master gates.",
+	},
+	logging_ui = {
+		title = "UI",
+		subtitle = "PlayerUI runtime and diagnostic output channels.",
+	},
+	whole_game = {
+		title = "WHOLE GAMEMODE",
+		subtitle = "Start here — every item tests or stresses the entire gamemode, not just one subsystem.",
+	},
+	ai = {
+		title = "AI SYSTEM",
+		subtitle = "Tests for the AI opponent: building, army, economy, and decision-making.",
+	},
+	siege = {
+		title = "SIEGE SYSTEM",
+		subtitle = "Tests for the siege unit limit system — blueprints, workshops, and thresholds.",
+	},
+	player_ui = {
+		title = "PLAYER UI & ELIMINATION",
+		subtitle = "Player scorecard, ranking animations, and defeat-classification rules.",
+	},
+	ui_pressure = {
+		title = "LIMITS & UI PRESSURE",
+		subtitle = "Rapid-fire stress tests that hammer UI counters and animations to find display inconsistencies.",
+	},
+	advanced = {
+		title = "ADVANCED EDGE CASES",
+		subtitle = "Individual scenarios from Advanced Stress All — run separately for targeted investigation.",
+	},
+	perf = {
+		title = "PERFORMANCE PROFILER",
+		subtitle = "Controls for the long-match battle lag profiler — always run Stop when finished.",
+	},
+	controls = {
+		title = "SESSION CONTROLS",
+		subtitle = "Start, inspect, or abort the top-level session bundle currently running.",
+	},
+}
+
+local function _devmenu_submenu_sort_value(value, fallback)
+	local num = tonumber(value)
+	if num ~= nil then
+		return num
+	end
+	return fallback or 999999
+end
+
+local function _devmenu_sort_submenu_entries(a, b)
+	local a_sort = _devmenu_submenu_sort_value(a and a.sort)
+	local b_sort = _devmenu_submenu_sort_value(b and b.sort)
+	if a_sort ~= b_sort then
+		return a_sort < b_sort
+	end
+	local a_label = string.upper(tostring((a and a.label) or ""))
+	local b_label = string.upper(tostring((b and b.label) or ""))
+	return a_label < b_label
+end
+
+local function _devmenu_sort_submenu_groups(a, b)
+	local a_sort = _devmenu_submenu_sort_value(a and a.sort)
+	local b_sort = _devmenu_submenu_sort_value(b and b.sort)
+	if a_sort ~= b_sort then
+		return a_sort < b_sort
+	end
+	local a_label = string.upper(tostring((a and a.label) or ""))
+	local b_label = string.upper(tostring((b and b.label) or ""))
+	return a_label < b_label
+end
+
+local function _devmenu_render_submenu_section(menu_type, section_key, section_entries, dc)
+	table.sort(section_entries, _devmenu_sort_submenu_entries)
+
+	local grouped = {}
+	local group_list = {}
+	local ungrouped = {}
+	local has_groups = false
+
+	for _, entry in ipairs(section_entries or {}) do
+		local group_key = entry.group
+		if type(group_key) == "string" and group_key ~= "" then
+			has_groups = true
+			local group_record = grouped[group_key]
+			if group_record == nil then
+				group_record = {
+					key = group_key,
+					label = entry.group_label or string.upper(group_key),
+					subtitle = entry.group_desc or "",
+					sort = _devmenu_submenu_sort_value(entry.group_sort, _devmenu_submenu_sort_value(entry.sort)),
+					entries = {},
+				}
+				grouped[group_key] = group_record
+				table.insert(group_list, group_record)
+			else
+				local candidate_sort = _devmenu_submenu_sort_value(entry.group_sort, _devmenu_submenu_sort_value(entry.sort))
+				if candidate_sort < group_record.sort then
+					group_record.sort = candidate_sort
+				end
+				if group_record.subtitle == "" and type(entry.group_desc) == "string" and entry.group_desc ~= "" then
+					group_record.subtitle = entry.group_desc
+				end
+			end
+			table.insert(group_record.entries, entry)
+		else
+			table.insert(ungrouped, entry)
+		end
+	end
+
+	local content_parts = {}
+	local entry_count = 0
+
+	if #ungrouped > 0 then
+		local cards_xaml, _ = _devmenu_build_section(menu_type .. "_flat", ungrouped, "_flat", dc)
+		table.insert(content_parts, _devmenu_wrap_cards_grid(cards_xaml))
+		entry_count = entry_count + #ungrouped
+	end
+
+	if not has_groups then
+		return table.concat(content_parts, "\n"), entry_count
+	end
+
+	table.sort(group_list, _devmenu_sort_submenu_groups)
+	for _, group_record in ipairs(group_list) do
+		table.sort(group_record.entries, _devmenu_sort_submenu_entries)
+		local suffix = "_" .. section_key .. "_" .. group_record.key
+		local cards_xaml, _ = _devmenu_build_section(menu_type .. suffix, group_record.entries, suffix, dc)
+		table.insert(content_parts, _DEVMENU_BUILD_DEV_SUBMENU_GROUP_XAML(group_record.label, group_record.subtitle, cards_xaml))
+		entry_count = entry_count + #group_record.entries
+	end
+
+	return table.concat(content_parts, "\n"), entry_count
+end
+
+-----------------------------------------------------------------------
+-- DEV two-level navigation (categories + per-category submenus)
+-----------------------------------------------------------------------
+
+-- Build the L1 categories panel (with optional Top-3 Recent strip).
+-- Returns (panel_xaml, dc, entry_count).
+local function _devmenu_build_dev_categories_panel()
+	local categories = _DEVMENU_DEV_CATEGORIES or {}
+	local dc = {}
+
+	-- CUSTOM section: explicitly curated, always unlocked.
+	local custom_entries = {}
+	local custom_keys = {
+		logging = true,
+		stress  = true,
+	}
+	-- OPEN MENU unlocked: appear in the Open Menu section as live (non-locked) cards.
+	-- These are NOT in the custom section but ARE clickable (entry.locked is not set).
+	-- debugger_tools is intentionally absent: it shows as a locked decorative card.
+	local open_unlocked_keys = {
+		spawner_debug  = true,
+	}
+	local logging_cat = _DEVMENU_DEV_CATEGORY_INDEX and _DEVMENU_DEV_CATEGORY_INDEX.logging
+	if logging_cat ~= nil then
+		table.insert(custom_entries, _devmenu_build_category_card_entry(logging_cat))
+	end
+	local stress_cat = _DEVMENU_DEV_CATEGORY_INDEX and _DEVMENU_DEV_CATEGORY_INDEX.stress
+	if stress_cat ~= nil then
+		table.insert(custom_entries, _devmenu_build_category_card_entry(stress_cat))
+	end
+
+	-- Remaining categories are split by behavior.
+	-- Non-custom entries are flagged `locked = true` (decorative, NoOp on click)
+	-- unless they are listed in open_unlocked_keys (live cards in Open Menu).
+	local open_menu_entries = {}
+	local run_now_entries = {}
+	for _, cat in ipairs(categories) do
+		if not custom_keys[cat.key] then
+			local submenu = cat.submenu or {}
+			local entry = _devmenu_build_category_card_entry(cat)
+			if not open_unlocked_keys[cat.key] then
+				entry.locked = true
+			end
+			if #submenu > 1 then
+				table.insert(open_menu_entries, entry)
+			else
+				table.insert(run_now_entries, entry)
+			end
+		end
+	end
+
+	local custom_cards_xaml, custom_visible = _devmenu_build_section("devcustom", custom_entries, "_custom", dc)
+	local open_cards_xaml, open_visible = _devmenu_build_section("devopen", open_menu_entries, "_open", dc)
+	local run_cards_xaml, run_visible = _devmenu_build_section("devrun", run_now_entries, "_run", dc)
+	local entry_count = #custom_entries + #open_menu_entries + #run_now_entries
+
+	-- Recent strip (built only when artifact has at least one valid key).
+	local recent_xaml = ""
+	local recent_visible = "Collapsed"
+	if _DEVMENU_DEV_RECENT and _DEVMENU_DEV_RECENT.keys and #_DEVMENU_DEV_RECENT.keys > 0 then
+		local recent_entries = {}
+		for _, key in ipairs(_DEVMENU_DEV_RECENT.keys) do
+			local cat = _DEVMENU_DEV_CATEGORY_INDEX and _DEVMENU_DEV_CATEGORY_INDEX[key]
+			if cat ~= nil then
+				local e = _devmenu_build_category_card_entry(cat)
+				e.label = "* " .. (e.label or cat.key)
+				table.insert(recent_entries, e)
+			end
+		end
+		if #recent_entries > 0 then
+			local r_xaml, r_dc, _ = _devmenu_build_cards("devrecent", recent_entries)
+			recent_xaml = r_xaml
+			recent_xaml = _devmenu_suffix_card_bindings(recent_xaml, "_r")
+			_devmenu_merge_dc_with_suffix(dc, r_dc, "_r")
+			recent_visible = "Visible"
+		end
+	end
+
+	dc.panel_visible = false
+	dc.cmd_close     = UI_CreateCommand("DevMenu_CloseDEVPanel")
+
+	local panel_xaml = _DEVMENU_BUILD_DEV_PANEL_XAML(
+		recent_xaml,
+		recent_visible,
+		custom_cards_xaml,
+		custom_visible,
+		open_cards_xaml,
+		open_visible,
+		run_cards_xaml,
+		run_visible
+	)
+	return panel_xaml, dc, entry_count
+end
+
+-- Build a single L2 submenu panel for a category.
+-- Returns (panel_xaml, dc, entry_count).
+local function _devmenu_build_dev_submenu_panel(cat)
+	local entries = {}
+	local sectioned_entries = {}
+	local has_sections = false
+	for _, item in ipairs(cat.submenu or {}) do
+		local is_on = _devmenu_eval_toggle_state(item.toggle_state_fn)
+		local kind = "action"
+		local hint = item.hint or "RUN NOW"
+		local state = ""
+		if is_on ~= nil then
+			kind = is_on and "toggle_on" or "toggle_off"
+			hint = is_on and "TOGGLE: ON" or "TOGGLE: OFF"
+			state = is_on and "ENABLED" or "DISABLED"
+		end
+		local entry = {
+			label        = item.label or "?",
+			desc         = item.desc  or "",
+			icon         = item.icon or cat.icon or _DEVMENU_ICON_DEFAULT,
+			action       = item.action,
+			kind         = kind,
+			hint         = hint,
+			state        = state,
+			mp_locked    = item.mp_locked == true,
+			card_xaml_fn = item.card_xaml_fn,
+		}
+		local section_key = item.section
+		local note_parts = {}
+		if type(item.included_by) == "string" and item.included_by ~= "" then
+			table.insert(note_parts, "Included in " .. item.included_by)
+		end
+		if type(item.warning) == "string" and item.warning ~= "" then
+			table.insert(note_parts, item.warning)
+		end
+		entry.note = table.concat(note_parts, " | ")
+		if type(section_key) == "string" and section_key ~= "" then
+			has_sections = true
+			if sectioned_entries[section_key] == nil then
+				sectioned_entries[section_key] = {}
+			end
+			entry.sort = item.sort
+			entry.group = item.group
+			entry.group_label = item.group_label
+			entry.group_desc = item.group_desc
+			entry.group_sort = item.group_sort
+			-- Tier fields: pass through from catalog entry verbatim.
+			entry.tier_vis   = item.tier_vis
+			entry.tier_count = item.tier_count
+			entry.tier_data  = item.tier_data
+			entry.state_init = item.state_init
+			table.insert(sectioned_entries[section_key], entry)
+		else
+			table.insert(entries, entry)
+		end
+	end
+	local menu_type = "devsub_" .. cat.key
+
+	if has_sections then
+		local dc = {}
+		local body_parts = {}
+		local entry_count = 0
+		local consumed = {}
+		local sections_present = {}  -- { {key, title}, ... } in display order
+
+		-- Registers a section in the navigator, wraps its XAML in a visibility-gated
+		-- StackPanel structure, and appends to body_parts.
+		--   Outer: gated by sec_N_vis (filter gate or expanded = all visible).
+		--   Header button: DevMenuSecHeaderStyle — click toggles sec_N_content_vis.
+		--     Tag = "expanded"/"collapsed" drives chevron direction.
+		--   Inner: gated by sec_N_content_vis — card content shown/hidden.
+		--
+		-- nav_pill_cmd_N  → SLOT index (1.._DEVMENU_PILL_WINDOW), window-relative.
+		-- sec_header_cmd_N → ABSOLUTE section index N.
+		local function _register_section(section_key, meta, cards_xaml, added_count)
+			table.insert(sections_present, { key = section_key, title = meta.title })
+			local sec_idx  = #sections_present
+			local sec_n    = tostring(sec_idx)
+			local hdr_fn   = _devmenu_make_sec_toggle_dispatcher(cat.key, sec_idx)
+			dc["sec_header_cmd_"   .. sec_n] = UI_CreateCommand(hdr_fn)
+			dc["sec_header_title_" .. sec_n] = meta.title or ""
+			dc["sec_header_tag_"   .. sec_n] = (sec_idx == 1) and "expanded" or "collapsed"
+			-- Optional icon support (used by Unit Spawner Menu civ sections; other
+			-- sections leave icon_uri nil so the Image stays hidden).
+			local icon_uri = (meta.icon ~= nil and meta.icon ~= "") and meta.icon or ""
+			dc["sec_header_icon_"     .. sec_n] = icon_uri
+			dc["sec_header_icon_vis_" .. sec_n] = icon_uri ~= ""
+			local section_xaml = _DEVMENU_BUILD_DEV_SUBMENU_SECTION_XAML("", meta.subtitle, cards_xaml)
+			table.insert(body_parts,
+				'<StackPanel Visibility="{Binding [sec_' .. sec_n .. '_vis], Converter={StaticResource BoolToVis}}">' .. '\n' ..
+				'<Button Command="{Binding [sec_header_cmd_' .. sec_n .. ']}" Tag="{Binding [sec_header_tag_' .. sec_n .. ']}" Style="{StaticResource DevMenuSecHeaderStyle}">' .. '\n' ..
+				'<StackPanel Orientation="Horizontal">' .. '\n' ..
+				'<Image Source="{Binding [sec_header_icon_' .. sec_n .. ']}" Width="20" Height="20" Margin="0,0,8,0" VerticalAlignment="Center" Visibility="{Binding [sec_header_icon_vis_' .. sec_n .. '], Converter={StaticResource BoolToVis}}" />' .. '\n' ..
+				'<TextBlock Text="{Binding [sec_header_title_' .. sec_n .. ']}" FontSize="11" FontWeight="SemiBold" Foreground="#B0C8E8" VerticalAlignment="Center" />' .. '\n' ..
+				'</StackPanel>' .. '\n' ..
+				'</Button>' .. '\n' ..
+				'<StackPanel Visibility="{Binding [sec_' .. sec_n .. '_content_vis], Converter={StaticResource BoolToVis}}">' .. '\n' ..
+				section_xaml ..
+				'\n</StackPanel>\n' ..
+				'</StackPanel>')
+			entry_count = entry_count + added_count
+		end
+
+		for _, section_key in ipairs(_DEVMENU_SUBMENU_SECTION_ORDER) do
+			local section_entries = sectioned_entries[section_key]
+			if section_entries ~= nil and #section_entries > 0 then
+				local cards_xaml, added_count = _devmenu_render_submenu_section(menu_type .. "_" .. section_key, section_key, section_entries, dc)
+				local meta = _DEVMENU_SUBMENU_SECTION_META[section_key] or { title = string.upper(section_key), subtitle = "" }
+				_register_section(section_key, meta, cards_xaml, added_count)
+				consumed[section_key] = true
+			end
+		end
+
+		local extra_keys = {}
+		for section_key, section_entries in pairs(sectioned_entries) do
+			if not consumed[section_key] and section_entries ~= nil and #section_entries > 0 then
+				table.insert(extra_keys, section_key)
+			end
+		end
+		table.sort(extra_keys)
+		for _, section_key in ipairs(extra_keys) do
+			local section_entries = sectioned_entries[section_key]
+			local cards_xaml, added_count = _devmenu_render_submenu_section(menu_type .. "_" .. section_key, section_key, section_entries, dc)
+			local meta = _DEVMENU_SUBMENU_SECTION_META[section_key] or { title = string.upper(section_key), subtitle = "" }
+			_register_section(section_key, meta, cards_xaml, added_count)
+		end
+
+		if #entries > 0 then
+			local cards_xaml, _ = _devmenu_build_section(menu_type .. "_other", entries, "_other", dc)
+			_register_section("__other", { title = "OTHER", subtitle = "" }, cards_xaml, #entries)
+		end
+
+		-- Store section list; default to expanded (all sections visible) on
+		-- first build. First section content visible; rest collapsed.
+		_devmenu.dev_submenu_sections[cat.key] = sections_present
+		local first_key = sections_present[1] and sections_present[1].key or nil
+		if _devmenu.dev_active_section_by_cat[cat.key] == nil then
+			_devmenu.dev_active_section_by_cat[cat.key] = first_key
+		end
+		if _devmenu.dev_section_expanded_by_cat[cat.key] == nil then
+			_devmenu.dev_section_expanded_by_cat[cat.key] = true   -- all sections visible
+		end
+		if _devmenu.dev_sec_content_vis[cat.key] == nil then
+			_devmenu.dev_sec_content_vis[cat.key] = _devmenu_default_sec_content_vis(sections_present)
+		end
+		if _devmenu.dev_pill_scroll_by_cat[cat.key] == nil then
+			_devmenu.dev_pill_scroll_by_cat[cat.key] = 0
+		end
+		-- Pre-register pill slot commands (slots 1.._DEVMENU_PILL_WINDOW).
+		for slot = 1, _DEVMENU_PILL_WINDOW do
+			dc["nav_pill_cmd_" .. tostring(slot)] = UI_CreateCommand(_devmenu_make_nav_dispatcher(cat.key, slot))
+		end
+		local left_fn, right_fn = _devmenu_make_nav_scroll_dispatchers(cat.key)
+		dc.nav_scroll_left_cmd  = UI_CreateCommand(left_fn)
+		dc.nav_scroll_right_cmd = UI_CreateCommand(right_fn)
+		_devmenu_update_submenu_nav_dc(
+			dc, sections_present,
+			_devmenu.dev_active_section_by_cat[cat.key],
+			_devmenu.dev_section_expanded_by_cat[cat.key],
+			_devmenu.dev_sec_content_vis[cat.key],
+			_devmenu.dev_pill_scroll_by_cat[cat.key])
+		dc.nav_expand_cmd = UI_CreateCommand(_devmenu_make_nav_expand_dispatcher(cat.key))
+
+		dc.panel_visible = false
+		dc.cmd_back  = UI_CreateCommand("DevMenu_BackToCategories")
+		dc.cmd_close = UI_CreateCommand("DevMenu_CloseDEVAll")
+
+		local panel_xaml = _DEVMENU_BUILD_DEV_SUBMENU_XAML(cat.label or cat.key, cat.desc or "", table.concat(body_parts, "\n"))
+		return panel_xaml, dc, entry_count
+	end
+
+	local cards_xaml, dc, entry_count = _devmenu_build_cards(menu_type, entries)
+
+	-- No sections: zero out nav DC keys so the strip and toggle are hidden.
+	_devmenu.dev_submenu_sections[cat.key] = {}
+	_devmenu_update_submenu_nav_dc(dc, {}, nil, true, nil, 0)
+	dc.nav_expand_cmd       = UI_CreateCommand("DevMenu_NoOp")
+	dc.nav_scroll_left_cmd  = UI_CreateCommand("DevMenu_NoOp")
+	dc.nav_scroll_right_cmd = UI_CreateCommand("DevMenu_NoOp")
+
+	dc.panel_visible = false
+	dc.cmd_back  = UI_CreateCommand("DevMenu_BackToCategories")
+	dc.cmd_close = UI_CreateCommand("DevMenu_CloseDEVAll")
+
+	local panel_xaml = _DEVMENU_BUILD_DEV_SUBMENU_XAML(cat.label or cat.key, cat.desc or "", _devmenu_wrap_cards_grid(cards_xaml))
+	return panel_xaml, dc, entry_count
+end
+
+_devmenu_refresh_dynamic_cards = function(menu_type)
+	-- Refresh the Quick Panel after any of its own clicks so toggle state
+	-- chrome (Invuln/FoW/Instant Build) reflects the new ON/OFF value.
+	if menu_type == "cheatquick" then
+		if not _devmenu.is_ui_created or _devmenu.quick_panel_data_context == nil then
+			return
+		end
+		local visible = _devmenu.quick_panel_data_context.panel_visible
+		local _, dc, count = _devmenu_build_quick_panel(_DEVMENU_ENTRIES or {})
+		dc.panel_visible = visible
+		_devmenu.quick_panel_data_context = dc
+		_devmenu.quick_panel_entry_count  = count
+		UI_SetDataContext("DevMenuCHEATQuickPanel", dc)
+		-- Cross-refresh the CHEAT modal so toggle-state chrome (ON/OFF colour,
+		-- state label) stays in sync when a toggle is clicked from the Quick Panel.
+		if _devmenu.cheat_panel_data_context ~= nil and _DEVMENU_ENTRIES ~= nil then
+			local cvisible = _devmenu.cheat_panel_data_context.panel_visible
+			local _, cdc, ccount = _devmenu_build_cheat_panel_categorized(_DEVMENU_ENTRIES)
+			cdc.panel_visible = cvisible
+			_devmenu.cheat_panel_data_context = cdc
+			_devmenu.cheat_entry_count = ccount
+			UI_SetDataContext("DevMenuCHEATPanel", cdc)
+		end
+		return
+	end
+
+	if menu_type ~= "dev" and menu_type ~= "devrecent" and menu_type ~= "devcustom" and menu_type ~= "devopen" and menu_type ~= "devrun" and not string.find(menu_type or "", "^devsub_") and not string.find(menu_type or "", "^cheat_cat_") then
+		return
+	end
+	if not _devmenu.is_ui_created then
+		return
+	end
+
+	if menu_type == "dev" or menu_type == "devrecent" or menu_type == "devcustom" or menu_type == "devopen" or menu_type == "devrun" then
+		if _devmenu.dev_panel_data_context == nil then
+			return
+		end
+		local visible = _devmenu.dev_panel_data_context.panel_visible
+		local panel_xaml, dc, entry_count = _devmenu_build_dev_categories_panel()
+		dc.panel_visible = visible
+		_devmenu.dev_panel_data_context = dc
+		_devmenu.dev_entry_count = entry_count
+		UI_SetDataContext("DevMenuDEVPanel", dc)
+		return
+	end
+
+	if string.find(menu_type or "", "^cheat_cat_") then
+		-- Rebuild the whole categorized CHEAT panel so toggle-state chrome
+		-- (ON/OFF colour, state label) refreshes after any toggle click.
+		if _devmenu.cheat_panel_data_context == nil then return end
+		local visible = _devmenu.cheat_panel_data_context.panel_visible
+		local _, dc, count = _devmenu_build_cheat_panel_categorized(_DEVMENU_ENTRIES or {})
+		dc.panel_visible = visible
+		_devmenu.cheat_panel_data_context = dc
+		_devmenu.cheat_entry_count = count
+		UI_SetDataContext("DevMenuCHEATPanel", dc)
+		-- Also refresh the quick panel in case any quick-panel-mirrored toggle
+		-- was activated from the modal (e.g. Invuln, FoW, Instant Build).
+		if _devmenu.quick_panel_data_context ~= nil then
+			local qvisible = _devmenu.quick_panel_data_context.panel_visible
+			local _, qdc, qcount = _devmenu_build_quick_panel(_DEVMENU_ENTRIES or {})
+			qdc.panel_visible = qvisible
+			_devmenu.quick_panel_data_context = qdc
+			_devmenu.quick_panel_entry_count  = qcount
+			UI_SetDataContext("DevMenuCHEATQuickPanel", qdc)
+		end
+		return
+	end
+
+	if string.find(menu_type or "", "^devsub_") then
+		local key = string.gsub(menu_type, "^devsub_", "")
+		local dc_existing = _devmenu.dev_submenu_data_contexts[key]
+		local cat = _DEVMENU_DEV_CATEGORY_INDEX and _DEVMENU_DEV_CATEGORY_INDEX[key]
+		if dc_existing == nil or cat == nil then
+			return
+		end
+		local visible = dc_existing.panel_visible
+		local sub_xaml, sub_dc, _ = _devmenu_build_dev_submenu_panel(cat)
+		sub_dc.panel_visible = visible
+		-- Restore whichever section the user was viewing AND the expanded state
+		-- before the rebuild. The build path already seeds default-expanded for
+		-- first-time opens; this branch only matters after a toggle-driven rebuild.
+		local active_key = _devmenu.dev_active_section_by_cat[key]
+		local expanded   = _devmenu.dev_section_expanded_by_cat[key]
+		if expanded == nil then expanded = true end
+		if active_key ~= nil then
+			local secs = _devmenu.dev_submenu_sections[key]
+			if secs ~= nil then
+				local still_present = false
+				for _, s in ipairs(secs) do
+					if s.key == active_key then still_present = true; break end
+				end
+				if still_present then
+					_devmenu_update_submenu_nav_dc(
+						sub_dc, secs, active_key, expanded,
+						_devmenu.dev_sec_content_vis[key],
+						_devmenu.dev_pill_scroll_by_cat[key] or 0)
+				end
+			end
+		end
+		_devmenu.dev_submenu_data_contexts[key] = sub_dc
+		UI_SetDataContext("DevMenuDEVSubmenu_" .. key, sub_dc)
+		return
+	end
+end
+
+local function _devmenu_bind_category_open_handlers(categories)
+	for _, cat in ipairs(categories or {}) do
+		local key_copy = cat.key
+		_G["DevMenu_OpenCategory_" .. key_copy] = function()
+			DevMenu_OpenSubmenuByKey(key_copy)
+		end
+	end
+end
+
+_devmenu_ensure_submenu_presenter = function(key)
+	if _devmenu.dev_submenu_data_contexts[key] ~= nil then
+		return true
+	end
+	local cat = _DEVMENU_DEV_CATEGORY_INDEX and _DEVMENU_DEV_CATEGORY_INDEX[key]
+	if cat == nil then
+		return false
+	end
+	local sub_xaml, sub_dc, _ = _devmenu_build_dev_submenu_panel(cat)
+	_devmenu.dev_submenu_data_contexts[key] = sub_dc
+
+	local presenter_name = "DevMenuDEVSubmenu_" .. key
+	UI_AddChild("ScarDefault", "XamlPresenter", presenter_name, {
+		IsHitTestVisible = true,
+		Xaml             = sub_xaml,
+		DataContext      = UI_CreateDataContext(sub_dc),
+	})
+	print("[DEVMENU] lazy submenu created key=" .. tostring(key))
+	return true
+end
+
+-- Hide the L1 panel (used when navigating into a submenu).
+local function _devmenu_hide_dev_categories()
+	if _devmenu.dev_panel_data_context ~= nil then
+		_devmenu.dev_panel_data_context.panel_visible = false
+		UI_SetDataContext("DevMenuDEVPanel", _devmenu.dev_panel_data_context)
+	end
+end
+
+-- Show the L1 panel.
+local function _devmenu_show_dev_categories()
+	if _devmenu.dev_panel_data_context ~= nil then
+		_devmenu.dev_panel_data_context.panel_visible = true
+		UI_SetDataContext("DevMenuDEVPanel", _devmenu.dev_panel_data_context)
+	end
+end
+
+-- Hide every L2 submenu panel.
+_devmenu_hide_all_submenus = function()
+	for key, dc in pairs(_devmenu.dev_submenu_data_contexts) do
+		if dc ~= nil and dc.panel_visible then
+			dc.panel_visible = false
+			UI_SetDataContext("DevMenuDEVSubmenu_" .. key, dc)
+		end
+	end
+	_devmenu.dev_active_submenu_key = nil
+end
+
+-- Open a specific submenu (called by per-category dispatcher functions).
+function DevMenu_OpenSubmenuByKey(key)
+	if not _devmenu.is_ui_created then return end
+	if _devmenu.dev_submenu_data_contexts[key] == nil then
+		if not _devmenu_ensure_submenu_presenter(key) then
+			print("[DEVMENU] OpenSubmenu: unknown category '" .. tostring(key) .. "'")
+			return
+		end
+	end
+	local dc = _devmenu.dev_submenu_data_contexts[key]
+	if dc == nil then
+		print("[DEVMENU] OpenSubmenu: unknown category '" .. tostring(key) .. "'")
+		return
+	end
+	-- Always reset Back/Close to DEV-categories targets so a stale cmd_back
+	-- from a prior Spawn Panel or CHEAT open does not misdirect navigation.
+	dc.cmd_back  = UI_CreateCommand("DevMenu_BackToCategories")
+	dc.cmd_close = UI_CreateCommand("DevMenu_CloseDEVAll")
+	_devmenu_hide_all_submenus()
+	_devmenu_hide_dev_categories()
+	dc.panel_visible = true
+	UI_SetDataContext("DevMenuDEVSubmenu_" .. key, dc)
+	_devmenu.dev_active_submenu_key = key
+end
+
+-- Back navigation: close active submenu, return to categories.
+-- Falls back to the Spawn Panel when the DEV panel has never been created
+-- (CHEAT-only mode: spawner was opened from the Spawn Panel, not DEV categories).
+function DevMenu_BackToCategories()
+	if not _devmenu.is_ui_created then return end
+	_devmenu_hide_all_submenus()
+	if _devmenu.dev_panel_data_context ~= nil then
+		_devmenu_show_dev_categories()
+	elseif _devmenu.spawn_panel_enabled then
+		DevMenu_ShowSpawnPanel()
+	end
+end
+
+-- Close everything DEV (categories + any open submenu).
+function DevMenu_CloseDEVAll()
+	if not _devmenu.is_ui_created then return end
+	_devmenu_hide_all_submenus()
+	if _devmenu.dev_panel_data_context ~= nil then
+		_devmenu.dev_panel_data_context.panel_visible = false
+		UI_SetDataContext("DevMenuDEVPanel", _devmenu.dev_panel_data_context)
+	end
+end
+
+local function _devmenu_create_ui_now(source)
+	if _devmenu.is_ui_created then return end
+	print("[DEVMENU] UI create begin (source=" .. tostring(source or "direct") .. ")")
+
+	-- ===== CHEAT MENU =====
+	-- Create CHEAT button.
+	print("[DEVMENU] create phase 1/5: CHEAT button")
+	_devmenu.cheat_btn_data_context = {
+		cmd_cheat = UI_CreateCommand("DevMenu_ToggleCHEATPanel"),
+	}
+	UI_AddChild("ScarDefault", "XamlPresenter", "DevMenuCHEATButton", {
+		IsHitTestVisible = true,
+		Xaml             = _DEVMENU_BTN_CHEAT_XAML,
+		DataContext      = UI_CreateDataContext(_devmenu.cheat_btn_data_context),
+	})
+
+	-- Create CHEAT panel from _DEVMENU_ENTRIES.
+	print("[DEVMENU] create phase 2/5: CHEAT panel")
+	local cheat_panel_xaml, cheat_dc, cheat_count = _devmenu_build_cheat_panel_categorized(_DEVMENU_ENTRIES or {})
+	_devmenu.cheat_panel_data_context = cheat_dc
+	_devmenu.cheat_entry_count = cheat_count
+	UI_AddChild("ScarDefault", "XamlPresenter", "DevMenuCHEATPanel", {
+		IsHitTestVisible = true,
+		Xaml             = cheat_panel_xaml,
+		DataContext      = UI_CreateDataContext(cheat_dc),
+	})
+
+	-- Persistent (non-modal) Quick Panel — built once, shown/hidden via DC flip.
+	-- Uses "ScarAlwaysVisible" (not "ScarDefault") so it renders above all
+	-- ScarDefault content — including LimitsUI — regardless of creation order.
+	-- WPF renders later-added ScarDefault siblings on top, so LimitsUI (created
+	-- after devmenu) would otherwise cover the panel. ScarAlwaysVisible is a
+	-- separate layer that the engine places above ScarDefault unconditionally.
+	print("[DEVMENU] create phase 2b/5: CHEAT Quick Panel (ScarAlwaysVisible)")
+	local quick_xaml, quick_dc, quick_count = _devmenu_build_quick_panel(_DEVMENU_ENTRIES or {})
+	_devmenu.quick_panel_data_context = quick_dc
+	_devmenu.quick_panel_entry_count  = quick_count
+	UI_AddChild("ScarAlwaysVisible", "XamlPresenter", "DevMenuCHEATQuickPanel", {
+		IsHitTestVisible = true,
+		Xaml             = quick_xaml,
+		DataContext      = UI_CreateDataContext(quick_dc),
+	})
+
+	-- Toast notification overlay — hit-test-invisible, bottom-center, auto-dismiss.
+	print("[DEVMENU] create phase 2c/5: Toast overlay (ScarAlwaysVisible)")
+	local toast_dc = {
+		toast_visible    = false,
+		-- Inline message row: prefix + colored state word + suffix.
+		-- Plain toasts set msg_prefix to the full message; state/suffix fields default off.
+		msg_prefix       = "",
+		msg_state_word   = "",
+		msg_suffix       = "",
+		state_on_visible  = false,  -- green state word
+		state_off_visible = false,  -- red state word
+		suffix_visible    = false,
+		-- Player identity row (convert toast).
+		target_visible   = false,
+		flag_visible     = false,
+		flag_image       = "",
+		player_name      = "",
+		subtext_visible  = false,
+		subtext          = "",
+	}
+	_devmenu.toast_data_context = toast_dc
+	UI_AddChild("ScarAlwaysVisible", "XamlPresenter", "DevMenuToast", {
+		IsHitTestVisible = false,
+		Xaml             = _DEVMENU_BUILD_TOAST_XAML(),
+		DataContext      = UI_CreateDataContext(toast_dc),
+	})
+
+	-- ===== VICTIM PROMPT (interactive overlay shown to targeted units' owner) =====
+	print("[DEVMENU] create phase 2c-vp/5: Victim Prompt (ScarAlwaysVisible)")
+	local victim_prompt_dc = {
+		victim_prompt_visible = false,
+		attacker_name_text    = "",
+		btn_block_label       = "Block Actions",
+		cmd_block   = UI_CreateCommand("DevMenu_VictimPromptBlock"),
+		cmd_close   = UI_CreateCommand("DevMenu_VictimPromptClose"),
+		cmd_disable = UI_CreateCommand("DevMenu_VictimPromptDisable"),
+	}
+	_devmenu.victim_prompt_data_context = victim_prompt_dc
+	UI_AddChild("ScarAlwaysVisible", "XamlPresenter", "DevMenuVictimPrompt", {
+		IsHitTestVisible = true,
+		Xaml             = _DEVMENU_BUILD_VICTIM_PROMPT_XAML(),
+		DataContext      = UI_CreateDataContext(victim_prompt_dc),
+	})
+
+	-- ===== SPAWN PANEL (persistent right-side last-spawned history) =====
+	print("[DEVMENU] create phase 2d/5: Spawn Panel (ScarAlwaysVisible)")
+	local spawn_xaml, spawn_dc = _devmenu_build_spawn_panel()
+	_devmenu.spawn_panel_data_context = spawn_dc
+	UI_AddChild("ScarAlwaysVisible", "XamlPresenter", "DevMenuSpawnPanel", {
+		IsHitTestVisible = true,
+		Xaml             = spawn_xaml,
+		DataContext      = UI_CreateDataContext(spawn_dc),
+	})
+
+	-- (Teleport arm overlay removed 2026-05-11: Misc_GetMouseOnTerrain
+	-- is unusable from SCAR UI context, and the transparent overlay was
+	-- bugging the camera. Teleport now warps to camera center directly.)
+
+	-- ===== DEV MENU (requires -dev flag; not shown for lobby-cheats-only sessions) =====
+	local dev_count = 0
+	if _devmenu_is_dev_mode() then
+		-- Create DEV button.
+		print("[DEVMENU] create phase 3/5: DEV button (dev mode active)")
+		_devmenu.dev_btn_data_context = {
+			cmd_dev = UI_CreateCommand("DevMenu_ToggleDEVPanel"),
+		}
+		UI_AddChild("ScarDefault", "XamlPresenter", "DevMenuDEVButton", {
+			IsHitTestVisible = true,
+			Xaml             = _DEVMENU_BTN_DEV_XAML,
+			DataContext      = UI_CreateDataContext(_devmenu.dev_btn_data_context),
+		})
+
+		-- L1: DEV categories panel (with optional Top-3 Recent strip).
+		print("[DEVMENU] create phase 4/5: DEV categories panel")
+		local categories = _DEVMENU_DEV_CATEGORIES or {}
+		local dev_panel_xaml, dev_dc
+		dev_panel_xaml, dev_dc, dev_count = _devmenu_build_dev_categories_panel()
+		_devmenu.dev_panel_data_context = dev_dc
+		_devmenu.dev_entry_count = dev_count
+		UI_AddChild("ScarDefault", "XamlPresenter", "DevMenuDEVPanel", {
+			IsHitTestVisible = true,
+			Xaml             = dev_panel_xaml,
+			DataContext      = UI_CreateDataContext(dev_dc),
+		})
+
+		-- L2: bind category open handlers now; create submenu presenters lazily.
+		print("[DEVMENU] create phase 5/5: bind category handlers count=" .. tostring(#categories) .. " (lazy submenus)")
+		_devmenu_bind_category_open_handlers(categories)
+	else
+		print("[DEVMENU] DEV menu skipped: -dev flag not set")
+	end
+
+	_devmenu.is_ui_created = true
+	_devmenu.is_ui_creation_scheduled = false
+	print("[DEVMENU] UI created: CHEAT(" .. tostring(cheat_count) .. ") + QuickPanel(" .. tostring(quick_count) .. ") + DEV(" .. tostring(dev_count) .. ") entries")
+end
+
+function DevMenu_CreateUIDeferred()
+	local ok, err = pcall(function()
+		_devmenu_create_ui_now("deferred")
+	end)
+	if not ok then
+		_devmenu.is_ui_creation_scheduled = false
+		print("[DEVMENU] deferred UI create failed: " .. tostring(err))
+	end
+end
+
+-----------------------------------------------------------------------
+-- Lifecycle: create UI on play.
+--
+-- Core_OnPlay fires the <Module>_OnPlay delegates. We check if cheats
+-- are enabled and, if so, build both CHEAT and DEV button+panel presenters.
+-- The panels start hidden. If cheats are disabled, no UI is created.
+-----------------------------------------------------------------------
+
+function DevMenu_OnPlay()
+	if _devmenu.is_ui_created then return end
+
+	-- Engine sanity: bail quietly if UI APIs aren't available in this context.
+	if type(UI_AddChild)        ~= "function"
+		or type(UI_CreateCommand)     ~= "function"
+		or type(UI_CreateDataContext) ~= "function"
+	then
+		print("[DEVMENU] UI APIs unavailable; skipping creation")
+		return
+	end
+
+	-- Diagnostics: always emitted via raw print so they appear regardless of logging state.
+	local cmdline_cheat  = type(Misc_IsCommandLineOptionSet) == "function" and Misc_IsCommandLineOptionSet("cheat")
+	local cmdline_dev    = type(Misc_IsCommandLineOptionSet) == "function" and Misc_IsCommandLineOptionSet("dev")
+	local mod_debug      = _mod ~= nil and _mod.debug == true
+	local lobby_cheat    = AGS_GLOBAL_SETTINGS ~= nil and AGS_GLOBAL_SETTINGS.CheatMenu == true
+	_devmenu_print("[DEVMENU-GATE] cmdline_cheat=" .. tostring(cmdline_cheat)
+		.. " cmdline_dev=" .. tostring(cmdline_dev)
+		.. " mod_debug=" .. tostring(mod_debug)
+		.. " lobby_cheat=" .. tostring(lobby_cheat))
+
+	local enabled, source = _devmenu_are_cheats_enabled()
+	_devmenu.cheats_enabled = enabled
+	if not _devmenu.cheats_enabled then
+		_devmenu_print("[DEVMENU-GATE] disabled (source=" .. tostring(source) .. "); skipping menu creation")
+		return
+	end
+
+	if _devmenu.is_ui_creation_scheduled then return end
+
+	local delay = _DEVMENU_STARTUP_DELAY_SEC or 0
+	if delay <= 0 or type(Rule_AddOneShot) ~= "function" then
+		_devmenu_print("[DEVMENU-GATE] enabled (source=" .. tostring(source) .. "); creating menus immediately")
+		_devmenu_create_ui_now("immediate")
+		return
+	end
+
+	_devmenu.is_ui_creation_scheduled = true
+	_devmenu_print("[DEVMENU-GATE] enabled (source=" .. tostring(source) .. "); deferring UI create by " .. tostring(delay) .. "s")
+	Rule_AddOneShot(DevMenu_CreateUIDeferred, delay)
+end
+
+function DevMenu_OnGameRestore()
+	-- After a restore the UI children may be gone; rebuild on next OnPlay.
+	_devmenu.is_ui_created = false
+	_devmenu.is_ui_creation_scheduled = false
+	DevMenu_OnPlay()
+end

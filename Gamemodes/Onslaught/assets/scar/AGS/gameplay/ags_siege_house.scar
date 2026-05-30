@@ -1,0 +1,100 @@
+---------------------------------------------------------------------------------------------------
+-- Authors:
+-- Relic
+-- Woprock
+--
+-- Description:
+-- Increases 'Medic' population when building Docks
+-- Max population is set by default in Onslaught so this is not really used (yet)
+---------------------------------------------------------------------------------------------------
+AGS_DOCKHOUSE_POPULATION = 10
+AGS_DOCKHOUSE_MODULE = "AGS_DockHouse"
+---------------------------------------------------------------------------------------------------
+-- Delegates:
+---------------------------------------------------------------------------------------------------
+
+function AGS_DockHouse_UpdateModuleSettings()	
+	AGS_Print("AGS_DockHouse_UpdateModuleSettings")
+	if not AGS_GLOBAL_SETTINGS.DockHouse then
+		Core_UnregisterModule(AGS_DOCKHOUSE_MODULE)
+	end
+end
+
+function AGS_DockHouse_OnPlay()
+	AGS_Print("AGS_DockHouse_OnPlay")
+	Rule_AddGlobalEvent(AGS_DockHouse_OnConstructionComplete, GE_ConstructionComplete)
+	CBA_EntityKillBatch_SetHandler("dock_house", true)
+end
+
+function AGS_DockHouse_GameOver()
+	AGS_Print("AGS_DockHouse_GameOver")
+	Rule_RemoveGlobalEvent(AGS_DockHouse_OnConstructionComplete)
+	CBA_EntityKillBatch_SetHandler("dock_house", false)
+end
+---------------------------------------------------------------------------------------------------
+-- Functions:
+---------------------------------------------------------------------------------------------------
+
+function AGS_DockHouse_IsDock(entity_id)		
+	return Entity_IsOfType(entity_id, AGS_BP_DOCK)
+end
+
+function AGS_DockHouse_OnConstructionComplete(context)
+	if context == nil or context.player == nil or context.entity == nil then 
+		return
+	end	
+	local new_context = {
+		player = Core_GetPlayersTableEntry(context.player),
+		entity_id = context.entity,
+		entity_uwid = Entity_GetID(context.entity),
+		--entity_position = Entity_GetPosition(context.entity),
+	}	
+	-- Eliminated players are not interesting for any conditions.
+	if new_context.player == nil or new_context.player.isEliminated then
+		return
+	end
+	
+	if AGS_DockHouse_IsDock(new_context.entity_id) then
+		AGS_DockHouse_AddMinPopulation(new_context.player, AGS_DOCKHOUSE_POPULATION)
+	end
+end
+
+function AGS_DockHouse_OnEntityKilled(context)
+	if context == nil or context.victim == nil or context.victimOwner == nil then 
+		return
+	end	
+	local new_context = {
+		player = Core_GetPlayersTableEntry(context.victimOwner),
+		entity_id = context.victim,
+		entity_uwid = Entity_GetID(context.victim),
+		is_finished = Entity_GetBuildingProgress(context.victim) >= 1.0,
+		--entity_position = Entity_GetPosition(context.victim),
+	}	
+	-- Eliminated players are not interesting for any conditions.
+	if new_context.player == nil or new_context.player.isEliminated then
+		return
+	end	
+	-- Exclude incomplete building.
+	if not new_context.is_finished then
+		return
+	end
+		
+	if AGS_DockHouse_IsDock(new_context.entity_id) then
+		AGS_DockHouse_RemoveMinPopulation(new_context.player, AGS_DOCKHOUSE_POPULATION)
+	end
+end
+
+-- Apply function.
+function AGS_DockHouse_AddMaxCapPopulation(player, value)
+	Modifier_ApplyToPlayer(Modifier_Create(MAT_Player, "max_medic_cap_player_modifier", MUT_Addition, false, value, ""), player.id, 0)
+end
+function AGS_DockHouse_AddMinPopulation(player, value)
+	Modifier_ApplyToPlayer(Modifier_Create(MAT_Player, "medic_cap_player_modifier", MUT_Addition, false, value, ""), player.id, 0)
+end
+-- Apply function.
+function AGS_DockHouse_RemoveMaxCapPopulation(player, value)
+	Modifier_ApplyToPlayer(Modifier_Create(MAT_Player, "max_medic_cap_player_modifier", MUT_Addition, false, -value, ""), player.id, 0)
+end
+function AGS_DockHouse_RemoveMinPopulation(player, value)
+	Modifier_ApplyToPlayer(Modifier_Create(MAT_Player, "medic_cap_player_modifier", MUT_Addition, false, -value, ""), player.id, 0)
+end

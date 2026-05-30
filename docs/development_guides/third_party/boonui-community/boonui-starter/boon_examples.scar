@@ -1,0 +1,132 @@
+---------------------------------------------------------------------------------------------------
+-- BoonUI — Examples
+-- Drop-in, civ-agnostic examples that show how to use BoonSelection_Show.
+-- Open this file, copy any function, paste it into your own .scar file,
+-- and call it from a Rule_AddOneShot or wherever you like.
+--
+-- All examples below use only standard, documented SCAR functions:
+--   World_GetGameTime, World_GetPlayerAt, Player_GetID,
+--   Player_AddResource, Rule_AddOneShot
+-- so they will work in any game mode that includes the BoonUI engine files.
+---------------------------------------------------------------------------------------------------
+
+import("boonui/boon_selection.scar")
+
+---------------------------------------------------------------------------------------------------
+-- EXAMPLE 1 — "Welcome Bonus"
+-- Shows a 2-card menu at game start: pick extra wood OR extra food.
+-- Beginner level. Copy, paste, done.
+---------------------------------------------------------------------------------------------------
+
+function Example_WelcomeBonus()
+	-- Player 1 (the host or first player) — adjust the index for other players.
+	local player = World_GetPlayerAt(1)
+
+	BoonSelection_Show({
+		title    = "Welcome — Pick a Starting Bonus",
+		subtitle = "Choose one. The other will be lost.",
+		timeout  = 30,           -- seconds before auto-pick
+		default_choice = 1,      -- which card auto-picks if the timer runs out
+
+		choices = {
+			{
+				title = "+500 Wood",
+				unit  = "Lumberjack's Gift",
+				desc  = "Receive 500 wood immediately.",
+				icon  = "",      -- leave blank if you don't have a custom icon
+			},
+			{
+				title = "+500 Food",
+				unit  = "Farmer's Gift",
+				desc  = "Receive 500 food immediately.",
+				icon  = "",
+			},
+		},
+
+		on_select = function(index)
+			if index == 1 then
+				Player_AddResource(player, RT_Wood, 500)
+				print("[EXAMPLE] Player chose wood.")
+			else
+				Player_AddResource(player, RT_Food, 500)
+				print("[EXAMPLE] Player chose food.")
+			end
+		end,
+	})
+end
+
+
+---------------------------------------------------------------------------------------------------
+-- EXAMPLE 2 — "Tactical Decision" (3 cards)
+-- A mid-game choice that grants a small resource reward depending on the pick.
+-- Beginner level.
+---------------------------------------------------------------------------------------------------
+
+function Example_TacticalChoice()
+	local player = World_GetPlayerAt(1)
+
+	BoonSelection_Show({
+		title    = "Scouts Report In",
+		subtitle = "How will you respond?",
+		timeout  = 0,            -- 0 = no timer; the menu waits forever
+
+		choices = {
+			{ title = "Reinforce",  unit = "Defensive", desc = "Gain 200 stone for fortifications.", icon = "" },
+			{ title = "Attack",     unit = "Offensive", desc = "Gain 200 gold to fund your army.",    icon = "" },
+			{ title = "Trade",      unit = "Economic",  desc = "Gain 200 wood for trade carts.",      icon = "" },
+		},
+
+		on_select = function(index)
+			if     index == 1 then Player_AddResource(player, RT_Stone, 200)
+			elseif index == 2 then Player_AddResource(player, RT_Gold,  200)
+			else                   Player_AddResource(player, RT_Wood,  200)
+			end
+		end,
+	})
+end
+
+
+---------------------------------------------------------------------------------------------------
+-- EXAMPLE 3 — Show the menu after a 60-second delay
+-- Demonstrates wiring Example_WelcomeBonus to the game timer.
+-- Add this line to your mod's startup script (or call Rule_AddOneShot directly).
+---------------------------------------------------------------------------------------------------
+
+function Example_ScheduleWelcome()
+	-- Show the welcome bonus menu 60 seconds after the match begins.
+	Rule_AddOneShot(Example_WelcomeBonus, 60.0)
+end
+
+
+---------------------------------------------------------------------------------------------------
+-- EXAMPLE 4 (advanced) — A 4-card menu that loops over every human player
+-- Shows how to give every player their own choice. Each player sees the menu
+-- on their own screen because BoonSelection_Show is per-local-player.
+---------------------------------------------------------------------------------------------------
+
+function Example_PerPlayerWelcome()
+	for i = 1, World_GetPlayerCount() do
+		local player = World_GetPlayerAt(i)
+
+		-- Capture player into a local for the closure
+		local p = player
+		BoonSelection_Show({
+			title    = "Pick Your Path",
+			subtitle = "This choice is yours alone.",
+			timeout  = 45,
+			default_choice = 1,
+
+			choices = {
+				{ title = "Wood",  unit = "Builder",  desc = "+300 wood",  icon = "" },
+				{ title = "Food",  unit = "Farmer",   desc = "+300 food",  icon = "" },
+				{ title = "Gold",  unit = "Merchant", desc = "+300 gold",  icon = "" },
+				{ title = "Stone", unit = "Mason",    desc = "+300 stone", icon = "" },
+			},
+
+			on_select = function(index)
+				local resources = { RT_Wood, RT_Food, RT_Gold, RT_Stone }
+				Player_AddResource(p, resources[index], 300)
+			end,
+		})
+	end
+end

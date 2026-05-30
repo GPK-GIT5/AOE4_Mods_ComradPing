@@ -1,0 +1,393 @@
+-- ============================================================
+-- Roving Army System — Multiplayer-Compatible Patrol Controller
+-- ============================================================
+-- Standalone AI army controller that reproduces core campaign
+-- RovingArmy behavior without MissionOMatic dependencies.
+--
+-- Designed for multiplayer scenarios. Uses deterministic
+-- Rule_AddInterval polling — no AI encounter system.
+--
+-- Usage:
+--   local army = RovingArmy_Create({
+--       name     = "patrol_north",
+--       player   = player5,
+--       sgroup   = sg_my_patrol,
+--       targets  = { mkr_a, mkr_b, mkr_c },
+--   })
+--   RovingArmy_Start(army)
+-- ============================================================
+
+-- =========================
+-- Constants
+-- =========================
+
+ROVING_STATE_IDLE       = 0		-- Created but not started
+ROVING_STATE_PATROLLING = 1		-- Moving between targets
+ROVING_STATE_WAITING    = 2		-- Idling at a waypoint
+ROVING_STATE_PAUSED     = 3		-- Temporarily suspended
+ROVING_STATE_DISBANDED  = 4		-- Permanently stopped
+
+ROVING_ORDER_LOOP       = 0		-- 1→2→3→1→2→3→…
+ROVING_ORDER_PATROL     = 1		-- 1→2→3→2→1→2→…
+ROVING_ORDER_RANDOM     = 2		-- Random next target
+
+-- =========================
+-- Registry
+-- =========================
+
+_roving_armies = {}		-- All active army instances, keyed by name
+
+
+-- ============================================================
+-- PUBLIC API
+-- ============================================================
+
+-----------------------------------------------------------
+-- RovingArmy_Create(params) → army table
+-----------------------------------------------------------
+-- Required params:
+--   name       (string)    Unique identifier
+--   player     (PlayerID)  Owning player
+--   sgroup     (SGroupID)  Squad group containing the army
+--   targets    (table)     Array of markers/positions — patrol route
+--
+-- Optional params:
+--   target_order       (enum)    ROVING_ORDER_LOOP (default)
+--   poll_interval      (number)  Monitor frequency in seconds (default: 3)
+--   arrival_distance   (number)  Distance to target = "arrived" (default: 15)
+--   idle_time          (number)  Seconds to wait at each waypoint (default: 0)
+--   on_arrived         (func)    Callback(army, target_index) on waypoint arrival
+--   on_death           (func)    Callback(army) when all units lost
+--   on_target_changed  (func)    Callback(army, new_index) when advancing to next
+-----------------------------------------------------------
+function RovingArmy_Create(params)
+
+	if params.name == nil then
+		error("[ROVING_ARMY] Create failed: 'name' is required")
+	end
+	if params.sgroup == nil then
+		error("[ROVING_ARMY] Create failed: 'sgroup' is required")
+	end
+	if params.targets == nil or #params.targets < 2 then
+		error("[ROVING_ARMY] Create failed: 'targets' must have at least 2 entries")
+	end
+	if _roving_armies[params.name] ~= nil then
+		error("[ROVING_ARMY] Create failed: army '" .. params.name .. "' already exists")
+	end
+
+	local army = {
+		-- Identity
+		name                = params.name,
+		player              = params.player,
+		sgroup              = params.sgroup,
+
+		-- Patrol configuration
+		targets             = params.targets,
+		target_index        = 1,
+		target_direction    = 1,			-- +1 forward, -1 reverse (PATROL mode)
+		target_order        = params.target_order or ROVING_ORDER_LOOP,
+
+		-- Timing
+		poll_interval       = params.poll_interval or 3,
+		arrival_distance    = params.arrival_distance or 15,
+		idle_time           = params.idle_time or 0,
+		idle_until          = 0,			-- Game time when idle expires
+
+		-- State
+		state               = ROVING_STATE_IDLE,
+		has_arrived         = false,			-- Arrival latch for current target
+		initial_count       = SGroup_Count(params.sgroup),
+
+		-- Callbacks (all optional)
+		on_arrived          = params.on_arrived,
+		on_death            = params.on_death,
+		on_target_changed   = params.on_target_changed,
+	}
+
+	_roving_armies[army.name] = army
+	print(string.format("[ROVING_ARMY] Created '%s' — %d units, %d targets, order=%d",
+		army.name, army.initial_count, #army.targets, army.target_order))
+
+	return army
+end
+
+-----------------------------------------------------------
+-- RovingArmy_Start(army)
+-- Begin patrolling. Issues first move command and starts
+-- the monitor rule.
+-----------------------------------------------------------
+function RovingArmy_Start(army)
+
+	if army.state == ROVING_STATE_DISBANDED then
+		print("[ROVING_ARMY] Cannot start disbanded army: " .. army.name)
+		return
+	end
+	if army.state == ROVING_STATE_PATROLLING then
+		return		-- Already running
+	end
+
+	army.state = ROVING_STATE_PATROLLING
+	army.has_arrived = false
+	_RovingArmy_MoveToTarget(army)
+	Rule_AddInterval(_RovingArmy_Monitor, army.poll_interval, { army_name = army.name })
+
+	print("[ROVING_ARMY] Started: " .. army.name)
+end
+
+-----------------------------------------------------------
+-- RovingArmy_Pause(army)
+-- Suspend patrol movement. Units hold position.
+-----------------------------------------------------------
+function RovingArmy_Pause(army)
+	if army == nil then
+		print("[ROVING_ARMY] Pause ignored: army=nil")
+		return
+	end
+
+	if army.state ~= ROVING_STATE_PATROLLING and army.state ~= ROVING_STATE_WAITING then
+		return
+	end
+
+	army.state = ROVING_STATE_PAUSED
+	if SGroup_Count(army.sgroup) > 0 then
+		Cmd_Stop(army.sgroup)
+	end
+	print("[ROVING_ARMY] Paused: " .. army.name)
+end
+
+-----------------------------------------------------------
+-- RovingArmy_Resume(army)
+-- Resume from paused state. Re-issues move to current target.
+-----------------------------------------------------------
+function RovingArmy_Resume(army)
+	if army == nil then
+		print("[ROVING_ARMY] Resume ignored: army=nil")
+		return
+	end
+
+	if army.state ~= ROVING_STATE_PAUSED then
+		return
+	end
+
+	army.state = ROVING_STATE_PATROLLING
+	army.has_arrived = false
+	_RovingArmy_MoveToTarget(army)
+	print("[ROVING_ARMY] Resumed: " .. army.name)
+end
+
+-----------------------------------------------------------
+-- RovingArmy_Disband(army)
+-- Permanently stop the army. Removes monitor rule.
+-- Does NOT destroy units — caller decides their fate.
+-----------------------------------------------------------
+function RovingArmy_Disband(army)
+
+	if army.state == ROVING_STATE_DISBANDED then
+		return
+	end
+
+	army.state = ROVING_STATE_DISBANDED
+	_roving_armies[army.name] = nil
+	print("[ROVING_ARMY] Disbanded: " .. army.name)
+end
+
+-----------------------------------------------------------
+-- RovingArmy_SetTargets(army, targets)
+-- Replace the entire target list. Resets to index 1.
+-----------------------------------------------------------
+function RovingArmy_SetTargets(army, targets)
+
+	if targets == nil or #targets < 2 then
+		error("[ROVING_ARMY] SetTargets: need at least 2 targets")
+	end
+
+	army.targets = targets
+	army.target_index = 1
+	army.target_direction = 1
+	army.has_arrived = false
+
+	if army.state == ROVING_STATE_PATROLLING then
+		_RovingArmy_MoveToTarget(army)
+	end
+end
+
+-----------------------------------------------------------
+-- RovingArmy_AddTarget(army, target)
+-- Append a target to the end of the route.
+-----------------------------------------------------------
+function RovingArmy_AddTarget(army, target)
+	army.targets[#army.targets + 1] = target
+end
+
+-----------------------------------------------------------
+-- RovingArmy_GetState(army) → state enum
+-----------------------------------------------------------
+function RovingArmy_GetState(army)
+	return army.state
+end
+
+-----------------------------------------------------------
+-- RovingArmy_HasUnits(army) → boolean
+-----------------------------------------------------------
+function RovingArmy_HasUnits(army)
+	return SGroup_Count(army.sgroup) > 0
+end
+
+-----------------------------------------------------------
+-- RovingArmy_GetUnitRatio(army) → number (0.0–1.0)
+-- Current count relative to initial count.
+-----------------------------------------------------------
+function RovingArmy_GetUnitRatio(army)
+	if army.initial_count <= 0 then
+		return 0
+	end
+	return SGroup_Count(army.sgroup) / army.initial_count
+end
+
+-----------------------------------------------------------
+-- RovingArmy_GetTargetIndex(army) → number
+-----------------------------------------------------------
+function RovingArmy_GetTargetIndex(army)
+	return army.target_index
+end
+
+-----------------------------------------------------------
+-- RovingArmy_Find(name) → army or nil
+-----------------------------------------------------------
+function RovingArmy_Find(name)
+	return _roving_armies[name]
+end
+
+
+-- ============================================================
+-- INTERNAL
+-- ============================================================
+
+-----------------------------------------------------------
+-- _RovingArmy_Monitor(context, data)
+-- Polled rule. Drives the patrol state machine.
+-----------------------------------------------------------
+function _RovingArmy_Monitor(context, data)
+
+	local army = _roving_armies[data.army_name]
+
+	-- Army was disbanded or removed externally
+	if army == nil then
+		Rule_RemoveMe()
+		return
+	end
+
+	-- Paused — keep the rule alive but skip processing
+	if army.state == ROVING_STATE_PAUSED then
+		return
+	end
+
+	-- Disbanded — clean up
+	if army.state == ROVING_STATE_DISBANDED then
+		Rule_RemoveMe()
+		return
+	end
+
+	-- Death check
+	if SGroup_Count(army.sgroup) <= 0 then
+		print("[ROVING_ARMY] All units lost: " .. army.name)
+		army.state = ROVING_STATE_DISBANDED
+		_roving_armies[army.name] = nil
+		if army.on_death ~= nil then
+			army.on_death(army)
+		end
+		Rule_RemoveMe()
+		return
+	end
+
+	-- WAITING state — check if idle period expired
+	if army.state == ROVING_STATE_WAITING then
+		if World_GetGameTime() >= army.idle_until then
+			_RovingArmy_AdvanceTarget(army)
+			army.state = ROVING_STATE_PATROLLING
+			army.has_arrived = false
+			_RovingArmy_MoveToTarget(army)
+		end
+		return
+	end
+
+	-- PATROLLING state — check arrival at current target
+	if army.state == ROVING_STATE_PATROLLING then
+		local target = army.targets[army.target_index]
+		local distance_ok, dist = pcall(Util_GetDistance, army.sgroup, target)
+		if not distance_ok then
+			return
+		end
+
+		if dist <= army.arrival_distance and not army.has_arrived then
+			army.has_arrived = true
+
+			-- Fire arrival callback
+			if army.on_arrived ~= nil then
+				army.on_arrived(army, army.target_index)
+			end
+
+			-- Enter idle or advance immediately
+			if army.idle_time > 0 then
+				army.state = ROVING_STATE_WAITING
+				army.idle_until = World_GetGameTime() + army.idle_time
+			else
+				_RovingArmy_AdvanceTarget(army)
+				army.has_arrived = false
+				_RovingArmy_MoveToTarget(army)
+			end
+		end
+		return
+	end
+end
+
+-----------------------------------------------------------
+-- _RovingArmy_AdvanceTarget(army)
+-- Move target_index to the next waypoint based on order mode.
+-----------------------------------------------------------
+function _RovingArmy_AdvanceTarget(army)
+
+	local count = #army.targets
+	local old_index = army.target_index
+
+	if army.target_order == ROVING_ORDER_LOOP then
+		-- 1→2→3→1→2→3→…
+		army.target_index = (army.target_index % count) + 1
+
+	elseif army.target_order == ROVING_ORDER_PATROL then
+		-- 1→2→3→2→1→2→…  (reverse at endpoints)
+		local next_index = army.target_index + army.target_direction
+		if next_index > count then
+			army.target_direction = -1
+			next_index = army.target_index + army.target_direction
+		elseif next_index < 1 then
+			army.target_direction = 1
+			next_index = army.target_index + army.target_direction
+		end
+		army.target_index = next_index
+
+	elseif army.target_order == ROVING_ORDER_RANDOM then
+		-- Pick random target different from current
+		if count > 1 then
+			local new_index = army.target_index
+			while new_index == army.target_index do
+				new_index = World_GetRand(1, count)
+			end
+			army.target_index = new_index
+		end
+	end
+
+	if army.on_target_changed ~= nil then
+		army.on_target_changed(army, army.target_index)
+	end
+end
+
+-----------------------------------------------------------
+-- _RovingArmy_MoveToTarget(army)
+-- Issue attack-move command toward current target.
+-----------------------------------------------------------
+function _RovingArmy_MoveToTarget(army)
+	if SGroup_Count(army.sgroup) > 0 then
+		Cmd_FormationAttackMove(army.sgroup, army.targets[army.target_index])
+	end
+end

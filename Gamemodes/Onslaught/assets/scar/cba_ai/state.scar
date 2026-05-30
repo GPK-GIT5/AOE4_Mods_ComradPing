@@ -1,0 +1,537 @@
+---------------------------------------------------------------------------------------------------
+-- CBA AI Player — Global State & Getter Functions
+-- Shared mutable state, sacred site cache, debug lock, and accessor functions for local constants.
+-- Origin: cba_ai_player.scar lines 250–355
+---------------------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------
+-- State
+-----------------------------------------------------------------------
+
+-- Table of AI player entries (subset of PLAYERS). Populated in EarlyInitializations.
+_ai_players = {}
+
+-- Counter for unique SGroup/EGroup naming (must precede getter)
+_ai_group_counter = 0
+
+-- Unified tracker snapshot (for delta computation across Track() calls)
+_ai_track_snapshot = nil   -- { time=<gametime>, players={ [label]={telemetry_copy} } }
+_ai_track_call_count = 0
+
+-----------------------------------------------------------------------
+-- Getter functions (exported for debug suite access to local constants)
+-----------------------------------------------------------------------
+
+function _AI_GetBuildingPriority() return _AI_BUILDING_PRIORITY end
+function _AI_GetPlayerBuildingPriority(player)
+	if player and player.ai and player.ai.building_priority then return player.ai.building_priority end
+	return _AI_BUILDING_PRIORITY
+end
+-- _AI_SPAWN_BATCH was retired in the cba_ai/ refactor (replaced by
+-- _AI_PRODUCTION_QUEUE_TARGET / _AI_PRODUCTION_QUEUE_CYCLE_CAP in config.scar).
+-- Getter removed; reference _AI_PRODUCTION_QUEUE_TARGET directly.
+function _AI_GetMaxOutposts() return _AI_MAX_OUTPOSTS end
+function _AI_GetVillagerStage(player)
+	if player and player.ai then return player.ai.villager_stage or _AI_VILLAGER_STAGE_PRODUCTION end
+	return _AI_VILLAGER_STAGE_PRODUCTION
+end
+function _AI_GetVisionOutpostTarget() return _AI_VISION_OUTPOST_TARGET end
+function _AI_GetSpawnRadius() return _AI_SPAWN_RADIUS end
+function _AI_GetUnitRatios()
+	return { infantry = _AI_RATIO_INFANTRY, ranged = _AI_RATIO_RANGED, cavalry = _AI_RATIO_CAVALRY, siege = _AI_RATIO_SIEGE }
+end
+function _AI_GetGroupCounter() return _ai_group_counter end
+function _AI_GetPrimaryZoneMax() return _AI_PRIMARY_ZONE_MAX end
+function _AI_GetSecondaryZoneMax() return _AI_SECONDARY_ZONE_MAX end
+function _AI_GetUnitProducer() return _AI_UNIT_PRODUCER end
+
+function _AI_GetVillagerTeamMax() return _AI_VILLAGER_TEAM_MAX end
+function _AI_GetPendingFoundationLimit() return _AI_MAX_PENDING_FOUNDATIONS end
+function _AI_GetStaleTimeout() return _AI_CONSTRUCT_STALE_TIMEOUT end
+function _AI_GetMaxReissues() return _AI_CONSTRUCT_MAX_REISSUES end
+
+-- Return deterministic internal building-type keys for a source map.
+-- Priority order follows resolved producer order; unknown keys are appended sorted.
+function _AI_GetOrderedBuildingTypeKeys(player, source_map)
+	local keys = {}
+	local seen = {}
+	if source_map == nil then
+		return keys
+	end
+
+	local ai = player and player.ai or nil
+	local ordered = ai and ai.ordered_building_type_keys or nil
+	if ordered ~= nil then
+		for _, key in ipairs(ordered) do
+			if source_map[key] ~= nil and not seen[key] then
+				table.insert(keys, key)
+				seen[key] = true
+			end
+		end
+	end
+
+	local extras = {}
+	for key, _ in pairs(source_map) do
+		if not seen[key] then
+			table.insert(extras, key)
+			seen[key] = true
+		end
+	end
+	table.sort(extras, function(a, b)
+		return tostring(a) < tostring(b)
+	end)
+	for _, key in ipairs(extras) do
+		table.insert(keys, key)
+	end
+
+	return keys
+end
+
+-- Per-player AI state is stored on player.ai = { ... }
+-- See _AI_InitPlayerState() for structure.
+
+-- Map AGS bp_key to production role
+function _AI_BPKeyToRole(bp_key)
+	if bp_key == AGS_BP_BARRACKS or bp_key == "barracks" then return "infantry" end
+	if bp_key == AGS_BP_ARCHERY_RANGE or bp_key == "archery_range" then return "ranged" end
+	if bp_key == AGS_BP_STABLE or bp_key == "stable" then return "cavalry" end
+	if bp_key == AGS_BP_WORKSHOP or bp_key == "siege_workshop" then return "siege" end
+	return "infantry"
+end
+
+-- Resolve the full list of military producers a civ can build, validated against AGS entity table.
+-- Returns ordered list of { key, max, min_age, role } entries.
+function _AI_ResolveCivProducers(player_civ)
+	local resolved = {}
+	-- Standard 4 types: include only if civ has a valid blueprint
+	for _, entry in ipairs(_AI_BUILDING_PRIORITY) do
+		if AGS_GetCivilizationEntity(player_civ, entry.key) ~= nil then
+			table.insert(resolved, {
+				key = entry.key,
+				max = entry.max,
+				min_age = entry.min_age,
+				role = _AI_BPKeyToRole(entry.key),
+			})
+		end
+	end
+	-- Civ-specific variant producers
+	local variants = _AI_CIV_VARIANT_PRODUCERS[player_civ]
+	if variants ~= nil then
+		for _, v in ipairs(variants) do
+			if AGS_GetCivilizationEntity(player_civ, v.key) ~= nil then
+				table.insert(resolved, {
+					key = v.key,
+					max = v.max,
+					min_age = v.min_age,
+					role = v.role,
+				})
+			else
+				print(string.format("[AI_PLAYER] WARN: civ=%s variant producer '%s' not resolvable (AGS returned nil)",
+					player_civ, v.key))
+			end
+		end
+	end
+	return resolved
+end
+
+-- Sacred site positions (populated once in PresetFinalize)
+_ai_sacred_sites = {}
+
+-- External debug lock used by harnesses that need deterministic scripted control.
+-- When true, AI-player rules that issue construction/movement/production commands are suppressed.
+_AI_DEBUG_EXTERNAL_LOCK = false
+_AI_DEBUG_EXTERNAL_LOCK_REASON = ""
+
+function _AI_IsExternallyLocked()
+	return _AI_DEBUG_EXTERNAL_LOCK == true
+end
+
+function _AI_DebugLog(level, msg)
+	if (_AI_DEBUG_VERBOSITY or 1) >= (level or 1) then
+		print(msg)
+	end
+end
+
+function _AI_IsPatrolOwnershipCaptureEnabled()
+	return _AI_DEBUG_CAPTURE_PATROL_OWNERSHIP == true
+end
+
+function _AI_PatrolCommandTier(source)
+	if source == "combat_response" then return 1 end
+	if source == "main_dispatch" then return 2 end
+	if source == "maa_solo_engage" or source == "maa_hold_timeout_engage" or source == "maa_timeout_engage" or source == "maa_coordinated_engage" then
+		return 3
+	end
+	return 4
+end
+
+function _AI_FormatWorldPos(pos)
+	if pos == nil then return "(nil)" end
+	return string.format("(%.0f,%.0f)", pos.x or 0, pos.z or 0)
+end
+
+function _AI_IncrementPatrolSourceCounter(ai, source)
+	if ai == nil or ai.telemetry == nil then return end
+	if source == "combat_response" then
+		ai.telemetry.patrol_cmd_combat = (ai.telemetry.patrol_cmd_combat or 0) + 1
+	elseif source == "main_dispatch" then
+		ai.telemetry.patrol_cmd_dispatch = (ai.telemetry.patrol_cmd_dispatch or 0) + 1
+	elseif source == "maa_solo_engage" or source == "maa_hold_timeout_engage" or source == "maa_timeout_engage" or source == "maa_coordinated_engage" then
+		ai.telemetry.patrol_cmd_maa = (ai.telemetry.patrol_cmd_maa or 0) + 1
+	elseif source == "patrol_stop" or source == "maa_boundary_stop" then
+		ai.telemetry.patrol_cmd_stop = (ai.telemetry.patrol_cmd_stop or 0) + 1
+	else
+		ai.telemetry.patrol_cmd_patrol = (ai.telemetry.patrol_cmd_patrol or 0) + 1
+	end
+end
+
+function _AI_RecordPatrolCommand(player, source, command, target_pos, reason)
+	if player == nil or player.ai == nil then return end
+	local ai = player.ai
+	local now = World_GetGameTime()
+	local prev_source = ai.patrol_last_order_source or "none"
+	local prev_time = ai.patrol_last_order_time or -9999
+	local tier = _AI_PatrolCommandTier(source)
+	local hold_until = ai.patrol_order_hold_until or 0
+	local hold_for = math.max(0, hold_until - now)
+
+	ai.patrol_command_seq = (ai.patrol_command_seq or 0) + 1
+	ai.patrol_owner_tier = tier
+	ai.patrol_last_order_source = source
+	ai.patrol_last_order_time = now
+	ai.patrol_last_order_target = target_pos
+
+	_AI_IncrementPatrolSourceCounter(ai, source)
+
+	if prev_source ~= source then
+		ai.telemetry.patrol_owner_swaps = (ai.telemetry.patrol_owner_swaps or 0) + 1
+		if (now - prev_time) <= (_AI_PATROL_OVERWRITE_WINDOW or 2.0) then
+			ai.telemetry.patrol_overwrites = (ai.telemetry.patrol_overwrites or 0) + 1
+			if _AI_IsPatrolOwnershipCaptureEnabled() then
+				print(string.format("[AI_PLAYER][PATROL_OVR] %s prev=%s new=%s dt=%.2fs cmd=%s target=%s",
+					ai.label or "P?",
+					tostring(prev_source),
+					tostring(source),
+					now - prev_time,
+					tostring(command or "?"),
+					_AI_FormatWorldPos(target_pos)))
+			end
+		end
+	end
+
+	if _AI_IsPatrolOwnershipCaptureEnabled() then
+		print(string.format("[AI_PLAYER][PATROL_CMD] %s seq=%d src=%s tier=%d prev=%s cmd=%s target=%s hold_for=%.1fs reason=%s",
+			ai.label or "P?",
+			ai.patrol_command_seq or 0,
+			tostring(source),
+			tier,
+			tostring(prev_source),
+			tostring(command or "?"),
+			_AI_FormatWorldPos(target_pos),
+			hold_for,
+			tostring(reason or "")))
+	end
+end
+
+function _AI_SetPatrolOrderHold(player, source, hold_duration, reason)
+	if player == nil or player.ai == nil then return 0 end
+	local ai = player.ai
+	local now = World_GetGameTime()
+	local old_until = ai.patrol_order_hold_until or 0
+	local new_until = now + (hold_duration or 0)
+	ai.patrol_order_hold_until = new_until
+	ai.patrol_hold_last_source = source or "unknown"
+	ai.patrol_hold_last_reason = reason or ""
+	ai.telemetry.patrol_hold_sets = (ai.telemetry.patrol_hold_sets or 0) + 1
+	if new_until > old_until then
+		ai.telemetry.patrol_hold_extensions = (ai.telemetry.patrol_hold_extensions or 0) + 1
+	end
+	if _AI_IsPatrolOwnershipCaptureEnabled() then
+		print(string.format("[AI_PLAYER][PATROL_HOLD] %s src=%s old=%.1f new=%.1f dur=%.1fs reason=%s",
+			ai.label or "P?",
+			tostring(source or "unknown"),
+			old_until,
+			new_until,
+			new_until - now,
+			tostring(reason or "")))
+	end
+	return new_until
+end
+
+function _AI_GetPlayerEntityCount(player)
+	if player == nil then return 0 end
+	local ok_eg, eg = pcall(Player_GetEntities, player.id)
+	if not ok_eg or eg == nil then return 0 end
+	local ok_count, entity_count = pcall(EGroup_Count, eg)
+	if ok_count and entity_count ~= nil then
+		return entity_count
+	end
+	return 0
+end
+
+function _AI_GetPlayerOrdinal(player)
+	if player == nil or player.id == nil then return 0 end
+	local ok_idx, p_idx = pcall(World_GetPlayerIndex, player.id)
+	if ok_idx and type(p_idx) == "number" then
+		return p_idx
+	end
+	if player.ai ~= nil and type(player.ai.label) == "string" then
+		local label_num = tonumber(string.match(player.ai.label, "^P(%d+)$"))
+		if label_num ~= nil then
+			return label_num
+		end
+	end
+	return 0
+end
+
+function _AI_DebugOOSLog(tag, msg)
+	local debug_enabled = _cba_debug ~= nil and _cba_debug.enabled == true
+	if not debug_enabled and (_AI_DEBUG_VERBOSITY or 1) < 2 then return end
+	local line = string.format("[AI_PLAYER][OOS][%s] %s", tostring(tag or "event"), tostring(msg or ""))
+	print(line)
+	pcall(Misc_AppendToFile, "scarlog:cba_debug_frame41_ai.txt", line .. "\n")
+end
+
+function _AI_DebugSnapshot(player, tag, extra)
+	if player == nil or player.ai == nil then return end
+	local ai = player.ai
+	local ok_gt, gt = pcall(World_GetGameTime)
+	local ok_pop, pop = pcall(Player_GetCurrentPopulation, player.id, CT_Personnel)
+	local queue_count = ai.construction_queue and #ai.construction_queue or 0
+	local tracked_foundations = 0
+	local assigned_entries = 0
+	if ai.construction_queue ~= nil then
+		for _, entry in ipairs(ai.construction_queue) do
+			if entry.entity ~= nil then tracked_foundations = tracked_foundations + 1 end
+			if entry.assigned_team ~= nil then assigned_entries = assigned_entries + 1 end
+		end
+	end
+	local free_teams = -1
+	if type(_AI_CountFreeTeams) == "function" then
+		local ok_free, free = pcall(_AI_CountFreeTeams, player)
+		if ok_free and free ~= nil then free_teams = free end
+	end
+	local pending = -1
+	if type(_AI_CountPendingFoundations) == "function" then
+		local ok_pending, pending_count = pcall(_AI_CountPendingFoundations, player)
+		if ok_pending and pending_count ~= nil then pending = pending_count end
+	end
+	local line = string.format(
+		"t=%.2f player=%s id=%s civ=%s tag=%s entities=%d pop=%d queue=%d tracked=%d assigned=%d pending=%d teams=%d free=%d claim=%s seed=%s primary=%d secondary=%d total=%d extra=%s",
+		(ok_gt and gt) or -1,
+		tostring(ai.label or "P?"),
+		tostring(player.id),
+		tostring(ai.civ_name or Player_GetRaceName(player.id) or "?"),
+		tostring(tag or "snapshot"),
+		_AI_GetPlayerEntityCount(player),
+		(ok_pop and pop) or -1,
+		queue_count,
+		tracked_foundations,
+		assigned_entries,
+		pending,
+		ai.villager_teams and #ai.villager_teams or 0,
+		free_teams,
+		tostring(ai.villager_claim_done == true),
+		tostring(ai.startup_seed_done == true),
+		ai.primary_zone_count or 0,
+		ai.secondary_zone_count or 0,
+		ai.total_buildings or 0,
+		tostring(extra or ""))
+	_AI_DebugOOSLog(tag, line)
+end
+
+function _AI_DebugSnapshotAllPlayers(tag, extra)
+	if _ai_players == nil then return end
+	for _, player in ipairs(_ai_players) do
+		_AI_DebugSnapshot(player, tag or "all_players", extra)
+	end
+end
+
+-----------------------------------------------------------------------
+-- Per-tick fingerprint: emit one line per game tick that MUST be
+-- byte-identical between two peers until the divergent frame.
+--
+-- Diff two peers' scarlogs filtered on '[AI_PLAYER][HB]' to find the
+-- exact tick + field where determinism broke.  Covers ALL players
+-- (humans + AI) so divergence isn't masked by AI-side gating.
+-----------------------------------------------------------------------
+
+_AI_HEARTBEAT_INTERVAL          = 0.125     -- one game tick (8 Hz sim)
+_AI_HEARTBEAT_MAX_GAMETIME      = 75.0      -- keep early/mid-game signal for late-shifting OOS windows
+_AI_HEARTBEAT_GLOBAL_PLAYERS    = nil       -- cached on first tick
+_AI_HEARTBEAT_STARTED           = false
+_AI_HEARTBEAT_FAILED            = false
+
+_AI_BUILD_HEARTBEAT_INTERVAL    = 0.500     -- compact AI build-state heartbeat (2 Hz)
+_AI_BUILD_HEARTBEAT_MAX_GAMETIME = 75.0
+_AI_BUILD_HEARTBEAT_STARTED     = false
+_AI_BUILD_HEARTBEAT_FAILED      = false
+
+function _AI_HeartbeatGetPlayers()
+	if _AI_HEARTBEAT_GLOBAL_PLAYERS ~= nil then
+		return _AI_HEARTBEAT_GLOBAL_PLAYERS
+	end
+	local list = {}
+	local ok_count, count = pcall(World_GetPlayerCount)
+	if not ok_count or type(count) ~= "number" then
+		return list
+	end
+	for i = 0, count - 1 do
+		local ok_p, p = pcall(World_GetPlayerAt, i)
+		if ok_p and p ~= nil then
+			table.insert(list, { idx = i, id = p })
+		end
+	end
+	_AI_HEARTBEAT_GLOBAL_PLAYERS = list
+	return list
+end
+
+function _AI_HeartbeatPlayerLine(slot)
+	local pid = slot.id
+	local ent = 0
+	local ok_eg, eg = pcall(Player_GetEntities, pid)
+	if ok_eg and eg ~= nil then
+		local ok_c, c = pcall(EGroup_Count, eg)
+		if ok_c and c ~= nil then ent = c end
+	end
+	local pop = -1
+	local ok_pop, pv = pcall(Player_GetCurrentPopulation, pid, CT_Personnel)
+	if ok_pop and pv ~= nil then pop = math.floor(pv + 0.5) end
+	local function res(rt)
+		local ok_r, rv = pcall(Player_GetResource, pid, rt)
+		if ok_r and rv ~= nil then return math.floor(rv + 0.5) end
+		return -1
+	end
+	local food  = res(RT_Food)
+	local wood  = res(RT_Wood)
+	local gold  = res(RT_Gold)
+	local stone = res(RT_Stone)
+	local race = "?"
+	local ok_race, rname = pcall(Player_GetRaceName, pid)
+	if ok_race and type(rname) == "string" then race = rname end
+	return string.format("p%d:race=%s ent=%d pop=%d f=%d w=%d g=%d s=%d",
+		slot.idx, race, ent, pop, food, wood, gold, stone)
+end
+
+function _AI_HeartbeatFingerprintImpl()
+	local ok_gt, gt = pcall(World_GetGameTime)
+	if not ok_gt or type(gt) ~= "number" then return end
+	if gt > _AI_HEARTBEAT_MAX_GAMETIME then
+		if Rule_Exists(_AI_HeartbeatFingerprint) then
+			Rule_Remove(_AI_HeartbeatFingerprint)
+		end
+		return
+	end
+	local players = _AI_HeartbeatGetPlayers()
+	if #players == 0 then return end
+	if not _AI_HEARTBEAT_STARTED then
+		_AI_HEARTBEAT_STARTED = true
+		print(string.format("[AI_PLAYER][HB] started interval=%.3f players=%d", _AI_HEARTBEAT_INTERVAL or 0, #players))
+	end
+	local parts = {}
+	for _, slot in ipairs(players) do
+		table.insert(parts, _AI_HeartbeatPlayerLine(slot))
+	end
+	-- Determinism-side state: NEVER call World_GetRand from this probe;
+	-- consuming the random stream would itself be a divergence trigger.
+	local line = string.format("[AI_PLAYER][HB] t=%.3f %s", gt, table.concat(parts, " | "))
+	print(line)
+	pcall(Misc_AppendToFile, "scarlog:cba_debug_frame41_ai.txt", line .. "\n")
+end
+
+function _AI_HeartbeatFingerprint()
+	local ok, err = pcall(_AI_HeartbeatFingerprintImpl)
+	if not ok then
+		if not _AI_HEARTBEAT_FAILED then
+			_AI_HEARTBEAT_FAILED = true
+			print(string.format("[AI_PLAYER][HB_ERR] %s", tostring(err)))
+		end
+		if Rule_Exists(_AI_HeartbeatFingerprint) then
+			Rule_Remove(_AI_HeartbeatFingerprint)
+		end
+	end
+end
+
+function _AI_BuildHeartbeatPlayerLine(player)
+	if player == nil or player.ai == nil then return "P?:invalid" end
+	local ai = player.ai
+	local queue_count = ai.construction_queue and #ai.construction_queue or 0
+	local tracked_foundations = 0
+	local assigned_entries = 0
+	if ai.construction_queue ~= nil then
+		for _, entry in ipairs(ai.construction_queue) do
+			if entry.entity ~= nil then tracked_foundations = tracked_foundations + 1 end
+			if entry.assigned_team ~= nil then assigned_entries = assigned_entries + 1 end
+		end
+	end
+	local free_teams = -1
+	if type(_AI_CountFreeTeams) == "function" then
+		local ok_free, free = pcall(_AI_CountFreeTeams, player)
+		if ok_free and free ~= nil then free_teams = free end
+	end
+	local pending = -1
+	if type(_AI_CountPendingFoundations) == "function" then
+		local ok_pending, pending_count = pcall(_AI_CountPendingFoundations, player)
+		if ok_pending and pending_count ~= nil then pending = pending_count end
+	end
+	local staging_count = -1
+	if ai.staging_sg ~= nil then
+		local ok_stg, stg = pcall(SGroup_CountSpawned, ai.staging_sg)
+		if ok_stg and stg ~= nil then staging_count = stg end
+	end
+	local t = ai.telemetry or {}
+	return string.format("%s:q=%d tr=%d as=%d pd=%d free=%d stg=%d prod=%d seed=%s claim=%s pri=%d sec=%d tot=%d rej(off=%d calc=%d blk=%d pend=%d)",
+		tostring(ai.label or "P?"),
+		queue_count,
+		tracked_foundations,
+		assigned_entries,
+		pending,
+		free_teams,
+		staging_count,
+		t.units_produced or 0,
+		tostring(ai.startup_seed_done == true),
+		tostring(ai.villager_claim_done == true),
+		ai.primary_zone_count or 0,
+		ai.secondary_zone_count or 0,
+		ai.total_buildings or 0,
+		t.placement_rejects_offmap or 0,
+		t.placement_rejects_calc or 0,
+		t.placement_rejects_blacklist or 0,
+		t.placement_rejects_pending or 0)
+end
+
+function _AI_BuildStateHeartbeatImpl()
+	local ok_gt, gt = pcall(World_GetGameTime)
+	if not ok_gt or type(gt) ~= "number" then return end
+	if gt > _AI_BUILD_HEARTBEAT_MAX_GAMETIME then
+		if Rule_Exists(_AI_BuildStateHeartbeat) then
+			Rule_Remove(_AI_BuildStateHeartbeat)
+		end
+		return
+	end
+	if _ai_players == nil or #_ai_players == 0 then return end
+	if not _AI_BUILD_HEARTBEAT_STARTED then
+		_AI_BUILD_HEARTBEAT_STARTED = true
+		print(string.format("[AI_PLAYER][HB_BUILD] started interval=%.3f players=%d", _AI_BUILD_HEARTBEAT_INTERVAL or 0, #_ai_players))
+	end
+	local parts = {}
+	for _, player in ipairs(_ai_players) do
+		table.insert(parts, _AI_BuildHeartbeatPlayerLine(player))
+	end
+	local line = string.format("[AI_PLAYER][HB_BUILD] t=%.3f %s", gt, table.concat(parts, " | "))
+	print(line)
+	pcall(Misc_AppendToFile, "scarlog:cba_debug_frame41_ai.txt", line .. "\n")
+end
+
+function _AI_BuildStateHeartbeat()
+	local ok, err = pcall(_AI_BuildStateHeartbeatImpl)
+	if not ok then
+		if not _AI_BUILD_HEARTBEAT_FAILED then
+			_AI_BUILD_HEARTBEAT_FAILED = true
+			print(string.format("[AI_PLAYER][HB_BUILD_ERR] %s", tostring(err)))
+		end
+		if Rule_Exists(_AI_BuildStateHeartbeat) then
+			Rule_Remove(_AI_BuildStateHeartbeat)
+		end
+	end
+end

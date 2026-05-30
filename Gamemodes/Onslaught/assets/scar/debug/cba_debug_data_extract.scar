@@ -1,0 +1,359 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — Data Extraction
+-- Runtime extraction of blueprint inventories, costs, garrison data, and pop costs.
+-- Outputs machine-parseable log lines for offline JSON conversion.
+--
+-- Console commands:
+--   Debug_DataExtract_AllBlueprints()             Full EBP/SBP/UBP path enumeration
+--   Debug_DataExtract_RaceSquads()                Per-race squad inventory (all 22+ civs)
+--   Debug_DataExtract_BuildingData()              Garrison capacity + costs for all entity BPs
+--   Debug_DataExtract_UnitCosts()                 Pop costs + base costs for all squad BPs
+--   Debug_DataExtract_Summary()                   Quick count of what's extractable
+---------------------------------------------------------------------------------------------------
+
+-- PBG type constants (from PBGTYPE_ enum)
+local _DE_PBG_ENTITY  = 1245184
+local _DE_PBG_SQUAD   = 3014656
+local _DE_PBG_UPGRADE = 3407872
+
+---------------------------------------------------------------------------------------------------
+-- Helpers
+---------------------------------------------------------------------------------------------------
+
+function _DataExtract_SafeCall(fn, ...)
+	local ok, result = pcall(fn, ...)
+	if ok then return result end
+	return nil
+end
+
+function _DataExtract_CostToString(cost_table)
+	if cost_table == nil then return "nil" end
+	local parts = {}
+	-- Known resource types: RT_Food=0, RT_Wood=1, RT_Gold=2, RT_Stone=3
+	local resource_names = { [0] = "food", [1] = "wood", [2] = "gold", [3] = "stone" }
+	for rt, name in pairs(resource_names) do
+		local val = cost_table[rt]
+		if val ~= nil and val > 0 then
+			table.insert(parts, string.format("%s=%g", name, val))
+		end
+	end
+	if #parts == 0 then return "none" end
+	table.sort(parts)
+	return table.concat(parts, ",")
+end
+
+function _DataExtract_GetAllRaces()
+	local races = {}
+	local civ_names = {}
+	for civ, _ in pairs(AGS_ENTITY_TABLE or {}) do
+		if civ ~= "neutral" and civ ~= "common" and civ ~= "special" then
+			table.insert(civ_names, civ)
+		end
+	end
+	table.sort(civ_names)
+	for _, civ in ipairs(civ_names) do
+		local ok, race = pcall(World_GetRaceBlueprint, civ)
+		if ok and race ~= nil then
+			races[civ] = race
+		end
+	end
+	return races, civ_names
+end
+
+---------------------------------------------------------------------------------------------------
+-- Stage 2b-1: Full BP enumeration (Entity, Squad, Upgrade path names)
+---------------------------------------------------------------------------------------------------
+function Debug_DataExtract_AllBlueprints()
+	print("")
+	print("[DATA_EXTRACT] === BEGIN ALL_BLUEPRINTS ===")
+
+	local totals = { entity = 0, squad = 0, upgrade = 0 }
+
+	-- Entity blueprints
+	local ok_e, count_e = pcall(BP_GetPropertyBagGroupCount, _DE_PBG_ENTITY)
+	if ok_e and count_e then
+		totals.entity = count_e
+		print(string.format("[DATA_EXTRACT] EBP count=%d", count_e))
+		for i = 0, count_e - 1 do
+			local ok_p, path = pcall(BP_GetPropertyBagGroupPathName, _DE_PBG_ENTITY, i)
+			if ok_p and path then
+				print(string.format("[DE_EBP] %d|%s", i, path))
+			end
+		end
+	else
+		print("[DATA_EXTRACT] [WARN] EBP enumeration failed")
+	end
+
+	-- Squad blueprints
+	local ok_s, count_s = pcall(BP_GetPropertyBagGroupCount, _DE_PBG_SQUAD)
+	if ok_s and count_s then
+		totals.squad = count_s
+		print(string.format("[DATA_EXTRACT] SBP count=%d", count_s))
+		for i = 0, count_s - 1 do
+			local ok_p, path = pcall(BP_GetPropertyBagGroupPathName, _DE_PBG_SQUAD, i)
+			if ok_p and path then
+				print(string.format("[DE_SBP] %d|%s", i, path))
+			end
+		end
+	else
+		print("[DATA_EXTRACT] [WARN] SBP enumeration failed")
+	end
+
+	-- Upgrade blueprints
+	local ok_u, count_u = pcall(BP_GetPropertyBagGroupCount, _DE_PBG_UPGRADE)
+	if ok_u and count_u then
+		totals.upgrade = count_u
+		print(string.format("[DATA_EXTRACT] UBP count=%d", count_u))
+		for i = 0, count_u - 1 do
+			local ok_p, path = pcall(BP_GetPropertyBagGroupPathName, _DE_PBG_UPGRADE, i)
+			if ok_p and path then
+				print(string.format("[DE_UBP] %d|%s", i, path))
+			end
+		end
+	else
+		print("[DATA_EXTRACT] [WARN] UBP enumeration failed")
+	end
+
+	print("")
+	print(string.format("[DATA_EXTRACT] === END ALL_BLUEPRINTS === EBP=%d SBP=%d UBP=%d total=%d",
+		totals.entity, totals.squad, totals.upgrade,
+		totals.entity + totals.squad + totals.upgrade))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Stage 2b-2: Per-race squad inventory
+-- Uses World_GetPossibleSquadsCount/Blueprint to enumerate what each race can train.
+---------------------------------------------------------------------------------------------------
+function Debug_DataExtract_RaceSquads()
+	print("")
+	print("[DATA_EXTRACT] === BEGIN RACE_SQUADS ===")
+
+	local races, civ_names = _DataExtract_GetAllRaces()
+	local total_entries = 0
+
+	for _, civ in ipairs(civ_names) do
+		local race = races[civ]
+		if race ~= nil then
+			local ok_c, count = pcall(World_GetPossibleSquadsCount, race)
+			if ok_c and count then
+				print(string.format("[DE_RACE] civ=%s count=%d", civ, count))
+				for i = 0, count - 1 do
+					local ok_bp, sbp = pcall(World_GetPossibleSquadsBlueprint, race, i)
+					if ok_bp and sbp ~= nil then
+						local ok_n, name = pcall(BP_GetName, sbp)
+						local bp_name = (ok_n and name) or "?"
+						total_entries = total_entries + 1
+						print(string.format("[DE_RACE_SBP] civ=%s idx=%d sbp=%s", civ, i, bp_name))
+					end
+				end
+			else
+				print(string.format("[DE_RACE] civ=%s [WARN] enumeration failed", civ))
+			end
+		else
+			print(string.format("[DE_RACE] civ=%s [WARN] race PBG not resolved", civ))
+		end
+	end
+
+	print("")
+	print(string.format("[DATA_EXTRACT] === END RACE_SQUADS === civs=%d entries=%d",
+		#civ_names, total_entries))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Stage 2b-3: Building data (garrison capacity + base cost + build time)
+-- Iterates AGS_ENTITY_TABLE for building_ entries and extracts properties.
+---------------------------------------------------------------------------------------------------
+function Debug_DataExtract_BuildingData()
+	print("")
+	print("[DATA_EXTRACT] === BEGIN BUILDING_DATA ===")
+
+	local total = 0
+	local civ_names = {}
+	for civ, _ in pairs(AGS_ENTITY_TABLE or {}) do
+		table.insert(civ_names, civ)
+	end
+	table.sort(civ_names)
+
+	for _, civ in ipairs(civ_names) do
+		local entries = AGS_ENTITY_TABLE[civ]
+		if entries ~= nil then
+			local keys = {}
+			for k, _ in pairs(entries) do table.insert(keys, k) end
+			table.sort(keys)
+
+			for _, key in ipairs(keys) do
+				local bp_name = entries[key]
+				if type(bp_name) == "string" and string.sub(bp_name, 1, 9) == "building_" then
+					local ok_ebp, ebp = pcall(BP_GetEntityBlueprint, bp_name)
+					if ok_ebp and ebp ~= nil then
+						total = total + 1
+						local cost_str = _DataExtract_CostToString(
+							_DataExtract_SafeCall(BP_GetEntityBPCost, ebp))
+						local build_time = _DataExtract_SafeCall(BP_GetEntityBPBuildTime, ebp) or -1
+
+						print(string.format("[DE_BLDG] civ=%s key=%s bp=%s cost=%s time=%g",
+							civ, key, bp_name, cost_str, build_time))
+					end
+				end
+			end
+		end
+	end
+
+	print("")
+	print(string.format("[DATA_EXTRACT] === END BUILDING_DATA === entries=%d", total))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Stage 2b-4: Unit costs (base cost + pop cost by cap type)
+-- Iterates AGS_ENTITY_TABLE for unit_ entries and extracts cost/pop data from BPs.
+---------------------------------------------------------------------------------------------------
+function Debug_DataExtract_UnitCosts()
+	print("")
+	print("[DATA_EXTRACT] === BEGIN UNIT_COSTS ===")
+
+	local total = 0
+	local civ_names = {}
+	for civ, _ in pairs(AGS_ENTITY_TABLE or {}) do
+		table.insert(civ_names, civ)
+	end
+	table.sort(civ_names)
+
+	-- We also iterate squad BPs in the siege table for siege units
+	local all_unit_bps = {}
+
+	for _, civ in ipairs(civ_names) do
+		local entries = AGS_ENTITY_TABLE[civ]
+		if entries ~= nil then
+			for key, bp_name in pairs(entries) do
+				if type(bp_name) == "string" and string.sub(bp_name, 1, 5) == "unit_" then
+					all_unit_bps[bp_name] = all_unit_bps[bp_name] or { civs = {}, key = key }
+					table.insert(all_unit_bps[bp_name].civs, civ)
+				end
+			end
+		end
+		local siege = (CBA_SIEGE_TABLE or {})[civ]
+		if siege ~= nil then
+			for key, bp_name in pairs(siege) do
+				if type(bp_name) == "string" and string.sub(bp_name, 1, 5) == "unit_" then
+					all_unit_bps[bp_name] = all_unit_bps[bp_name] or { civs = {}, key = key }
+					table.insert(all_unit_bps[bp_name].civs, civ)
+				end
+			end
+		end
+	end
+
+	-- Sort and deduplicate
+	local sorted_bps = {}
+	for bp, _ in pairs(all_unit_bps) do
+		table.insert(sorted_bps, bp)
+	end
+	table.sort(sorted_bps)
+
+	for _, bp_name in ipairs(sorted_bps) do
+		local ok_sbp, sbp = pcall(BP_GetSquadBlueprint, bp_name)
+		if ok_sbp and sbp ~= nil then
+			total = total + 1
+			local info = all_unit_bps[bp_name]
+			local civs_str = table.concat(info.civs, ";")
+
+			-- Get first entity BP for cost data
+			local ok_ebp, ebp = pcall(SBP_GetFirstEBP, sbp)
+			local cost_str = "nil"
+			local build_time = -1
+			local speed = -1
+			if ok_ebp and ebp ~= nil then
+				cost_str = _DataExtract_CostToString(
+					_DataExtract_SafeCall(BP_GetEntityBPCost, ebp))
+				build_time = _DataExtract_SafeCall(BP_GetEntityBPBuildTime, ebp) or -1
+				speed = _DataExtract_SafeCall(BP_GetEntityBPDefaultSpeed, ebp, false) or -1
+			end
+
+			print(string.format("[DE_UNIT] bp=%s key=%s civs=%s cost=%s time=%g speed=%g",
+				bp_name, info.key, civs_str, cost_str, build_time, speed))
+		end
+	end
+
+	print("")
+	print(string.format("[DATA_EXTRACT] === END UNIT_COSTS === entries=%d", total))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Summary: quick count of extractable data (no full dump)
+---------------------------------------------------------------------------------------------------
+function Debug_DataExtract_Summary()
+	print("")
+	print("[DATA_EXTRACT] === SUMMARY ===")
+
+	-- PBG counts
+	local ebp_count = _DataExtract_SafeCall(BP_GetPropertyBagGroupCount, _DE_PBG_ENTITY) or -1
+	local sbp_count = _DataExtract_SafeCall(BP_GetPropertyBagGroupCount, _DE_PBG_SQUAD) or -1
+	local ubp_count = _DataExtract_SafeCall(BP_GetPropertyBagGroupCount, _DE_PBG_UPGRADE) or -1
+	print(string.format("  PBG counts: EBP=%d SBP=%d UBP=%d total=%d",
+		ebp_count, sbp_count, ubp_count, ebp_count + sbp_count + ubp_count))
+
+	-- AGS_ENTITY_TABLE stats
+	local ent_civs = 0
+	local ent_keys = 0
+	for civ, entries in pairs(AGS_ENTITY_TABLE or {}) do
+		ent_civs = ent_civs + 1
+		for _, _ in pairs(entries) do ent_keys = ent_keys + 1 end
+	end
+	print(string.format("  AGS_ENTITY_TABLE: %d civs, %d total keys", ent_civs, ent_keys))
+
+	-- CBA_SIEGE_TABLE stats
+	local siege_civs = 0
+	local siege_keys = 0
+	for civ, entries in pairs(CBA_SIEGE_TABLE or {}) do
+		siege_civs = siege_civs + 1
+		for _, _ in pairs(entries) do siege_keys = siege_keys + 1 end
+	end
+	print(string.format("  CBA_SIEGE_TABLE: %d civs, %d total keys", siege_civs, siege_keys))
+
+	-- AGS_UPGRADE_TABLE stats
+	local upg_civs = 0
+	local upg_keys = 0
+	for civ, entries in pairs(AGS_UPGRADE_TABLE or {}) do
+		upg_civs = upg_civs + 1
+		for key, val in pairs(entries) do
+			if type(val) == "table" then
+				upg_keys = upg_keys + #val
+			else
+				upg_keys = upg_keys + 1
+			end
+		end
+	end
+	print(string.format("  AGS_UPGRADE_TABLE: %d civs, %d total entries", upg_civs, upg_keys))
+
+	-- Race squad counts
+	local races, civ_names = _DataExtract_GetAllRaces()
+	local race_total = 0
+	for _, civ in ipairs(civ_names) do
+		local race = races[civ]
+		if race ~= nil then
+			local ok_c, count = pcall(World_GetPossibleSquadsCount, race)
+			if ok_c and count then
+				race_total = race_total + count
+			end
+		end
+	end
+	print(string.format("  Race-available squads: %d civs, %d total entries", #civ_names, race_total))
+
+	print("")
+	print("[DATA_EXTRACT] Commands:")
+	print("  Debug_DataExtract_AllBlueprints()   -- Full EBP/SBP/UBP path dump")
+	print("  Debug_DataExtract_RaceSquads()      -- Per-race squad inventory")
+	print("  Debug_DataExtract_BuildingData()    -- Building costs + garrison")
+	print("  Debug_DataExtract_UnitCosts()       -- Unit costs + speed")
+	print("[DATA_EXTRACT] === END SUMMARY ===")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Namespace Registration
+---------------------------------------------------------------------------------------------------
+if debug then
+	debug.data.extract      = Debug_DataExtract_AllBlueprints
+	debug.data.raceSquads   = Debug_DataExtract_RaceSquads
+	debug.data.buildingData = Debug_DataExtract_BuildingData
+	debug.data.unitCosts    = Debug_DataExtract_UnitCosts
+	debug.data.summary      = Debug_DataExtract_Summary
+end

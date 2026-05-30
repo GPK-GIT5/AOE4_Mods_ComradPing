@@ -1,0 +1,230 @@
+---------------------------------------------------------------------------------------------------
+-- CBA AI Player — Outposts, Sacred Sites & Scouts
+-- Vision outpost placement, sacred site discovery, scout deployment.
+-- Origin: cba_ai_player.scar lines 2154–2257, 1692–1734
+---------------------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------
+-- RULE: Build Outposts
+-----------------------------------------------------------------------
+
+function _AI_Rule_BuildOutposts()
+	if _AI_IsExternallyLocked() then return end
+	for _, player in ipairs(_ai_players) do
+		if not _AI_IsEliminated(player) then
+			_AI_BuildOutposts(player)
+		end
+	end
+end
+
+function _AI_BuildOutposts(player)
+	local ai = player.ai
+	if ai.villager_stage < _AI_VILLAGER_STAGE_OUTPOSTS then return end
+	if ai.vision_outpost_count >= _AI_VISION_OUTPOST_TARGET then return end
+
+	local obj_limit = player.obj_buildingLimit_outpost_count or 0
+	if obj_limit >= 20 then return end
+
+	local player_civ = Player_GetRaceName(player.id)
+	local outpost_ebp = AGS_GetCivilizationEntity(player_civ, "outpost")
+	if outpost_ebp == nil then
+		local parent_civ = AGS_CIV_PARENT_MAP and AGS_CIV_PARENT_MAP[player_civ]
+		if parent_civ ~= nil then
+			outpost_ebp = AGS_GetCivilizationEntity(parent_civ, "outpost")
+		end
+	end
+	if outpost_ebp == nil then
+		local ok_bp, bp = pcall(BP_GetEntityBlueprint, "building_outpost")
+		if ok_bp and bp ~= nil then
+			outpost_ebp = bp
+		else
+			if not ai._outpost_bp_warned then
+				ai._outpost_bp_warned = true
+				_AI_DebugLog(1, string.format("[AI_PLAYER] WARN: %s no outpost blueprint for civ=%s — outpost expansion disabled.",
+					ai.label or "P?", player_civ or "?"))
+			end
+			return
+		end
+	end
+
+	local base_pos = _AI_GetBasePosition(player)
+	if base_pos == nil then return end
+
+	local idx = ai.vision_outpost_count
+	local ring = math.floor(idx / 4) + 1
+	local segment = idx % 4
+	local angle = (segment * 90 + ring * 15) % 360
+	local dist = _AI_SPAWN_RADIUS + 20 + (ring * 40)
+	local rad = math.rad(angle)
+	local target_pos = Util_GetOffsetPosition(base_pos, math.cos(rad) * dist, math.sin(rad) * dist)
+
+	-- BUG E FIX: outposts are now villager-built using the synchronized
+	-- Cmd_Construct path (same command used by _AI_IssueVillagerBuildOrder for
+	-- military buildings). Previously the entity was created via
+	-- Entity_CreateFacing + Entity_ForceConstruct which bypassed villagers and
+	-- skipped foundation cost/build-time entirely. ai.villager_sg is the
+	-- claimed builder pool; queue=true so existing builders aren't disrupted.
+	if ai.villager_sg == nil or SGroup_CountSpawned(ai.villager_sg) <= 0 then
+		return
+	end
+	local ok_cmd, err = pcall(Cmd_Construct, ai.villager_sg, outpost_ebp, target_pos, nil, true)
+	if not ok_cmd then
+		_AI_DebugLog(1, string.format("[AI_PLAYER] WARN: %s outpost Cmd_Construct failed: %s",
+			ai.label or "P?", tostring(err)))
+		return
+	end
+
+	ai.outpost_count = ai.outpost_count + 1
+	ai.vision_outpost_count = ai.vision_outpost_count + 1
+	table.insert(ai.outpost_positions, target_pos)
+
+	_AI_DebugLog(1, string.format("[AI_PLAYER] %s queued vision outpost #%d/%d at (%.0f, %.0f) (villager build).",
+		ai.label or "P?", ai.vision_outpost_count, _AI_VISION_OUTPOST_TARGET,
+		target_pos.x or 0, target_pos.z or 0))
+	_AI_UpdateVillagerStage(player)
+end
+
+-----------------------------------------------------------------------
+-- Sacred Site Discovery
+-----------------------------------------------------------------------
+
+function _AI_DiscoverSacredSites()
+	_ai_sacred_sites = {}
+	local ok, eg = pcall(function()
+		local eg_temp = EGroup_Create("eg_ai_sacred_sites")
+		World_GetAllNeutralEntities(eg_temp)
+		EGroup_Filter(eg_temp, "special_beacon", FILTER_KEEP)
+		return eg_temp
+	end)
+	if ok and eg ~= nil then
+		local count = EGroup_CountSpawned(eg)
+		for i = 1, count do
+			local site = EGroup_GetEntityAt(eg, i)
+			if site ~= nil then
+				local pos = Entity_GetPosition(site)
+				if pos ~= nil then
+					table.insert(_ai_sacred_sites, pos)
+				end
+			end
+		end
+		_AI_DebugLog(1, string.format("[AI_PLAYER] Discovered %d sacred site(s) for patrol routes.", #_ai_sacred_sites))
+	end
+end
+
+function _AI_GetSacredSites()
+	return _ai_sacred_sites
+end
+
+-----------------------------------------------------------------------
+-- RULE: Scout Patrol
+-----------------------------------------------------------------------
+
+function _AI_Rule_ScoutPatrol()
+	if _AI_IsExternallyLocked() then return end
+	for _, player in ipairs(_ai_players) do
+		if not _AI_IsEliminated(player) then
+			_AI_DeployScouts(player)
+		end
+	end
+end
+
+-- BUG F FIX: previous implementation was a stub that only set scouts_deployed = true.
+-- This now sources 1-2 cavalry (or infantry fallback) from staging surplus and
+-- dispatches them on the existing _AI_PatrolScouts perimeter route. Re-runs each
+-- 45s tick if the scout group is wiped or empty.
+function _AI_DeployScouts(player)
+	local ai = player.ai
+	if ai == nil then return end
+
+	local scout_sg = ai.scout_sg
+	if scout_sg == nil then
+		scout_sg = SGroup_CreateIfNotFound("sg_ai_scouts_" .. tostring(player.id))
+		ai.scout_sg = scout_sg
+	end
+
+	-- If we still have living scouts, just re-issue the patrol route (cheap)
+	-- and exit. This keeps the perimeter sweep refreshed without poaching new
+	-- units every tick.
+	if SGroup_CountSpawned(scout_sg) > 0 then
+		local origin = _AI_GetBasePosition(player)
+		if origin ~= nil then
+			_AI_PatrolScouts(player, scout_sg, origin)
+		end
+		ai.scouts_deployed = true
+		return
+	end
+
+	-- Need to (re)source scouts from staging. Only do so when staging has a
+	-- comfortable surplus so scout sourcing never starves army dispatch.
+	local staging_count = ai.staging_sg ~= nil and SGroup_CountSpawned(ai.staging_sg) or 0
+	local threshold = (ai.squad_threshold or _AI_SQUAD_THRESHOLD_MED) + 10
+	if staging_count < threshold then
+		ai.scouts_deployed = false
+		return
+	end
+	if ai.staging_sg == nil then return end
+
+	local sg_temp = SGroup_CreateIfNotFound("sg_ai_scout_temp_" .. tostring(player.id))
+	SGroup_Clear(sg_temp)
+	SGroup_AddGroup(sg_temp, ai.staging_sg)
+	pcall(SGroup_Filter, sg_temp, "scar_horseman", FILTER_KEEP)
+	if SGroup_CountSpawned(sg_temp) <= 0 then
+		SGroup_Clear(sg_temp)
+		SGroup_AddGroup(sg_temp, ai.staging_sg)
+		pcall(SGroup_Filter, sg_temp, "scar_spearman", FILTER_KEEP)
+	end
+	if SGroup_CountSpawned(sg_temp) <= 0 then
+		ai.scouts_deployed = false
+		return
+	end
+
+	-- Take up to 2 squads
+	SGroup_Clear(scout_sg)
+	local taken = 0
+	local count = SGroup_CountSpawned(sg_temp)
+	for i = 1, math.min(count, 2) do
+		local sq = SGroup_GetSpawnedSquadAt(sg_temp, i)
+		if sq ~= nil then
+			SGroup_Add(scout_sg, sq)
+			pcall(SGroup_Remove, ai.staging_sg, sq)
+			taken = taken + 1
+		end
+	end
+	if taken <= 0 then
+		ai.scouts_deployed = false
+		return
+	end
+
+	local origin = _AI_GetBasePosition(player)
+	if origin ~= nil then
+		_AI_PatrolScouts(player, scout_sg, origin)
+	end
+	ai.scouts_deployed = true
+	ai.telemetry.scouts_deployed = (ai.telemetry.scouts_deployed or 0) + 1
+	_AI_DebugLog(1, string.format("[AI_PLAYER] %s scout patrol launched with %d squad(s) from staging.",
+		ai.label or "P?", taken))
+end
+
+function _AI_PatrolScouts(player, sg, origin)
+	local ok_min, map_min = pcall(World_GetDesignedMinimumPlayableArea)
+	local ok_max, map_max = pcall(World_GetDesignedMaximumPlayableArea)
+
+	if ok_min and ok_max then
+		local mid_x = (map_min.x + map_max.x) / 2
+		local mid_z = (map_min.z + map_max.z) / 2
+		local q1 = World_Pos(map_min.x + 30, 0, map_min.z + 30)
+		local q2 = World_Pos(map_max.x - 30, 0, map_min.z + 30)
+		local q3 = World_Pos(map_max.x - 30, 0, map_max.z - 30)
+		local q4 = World_Pos(map_min.x + 30, 0, map_max.z - 30)
+
+		pcall(Cmd_Move, sg, q1, false)
+		pcall(Cmd_Move, sg, q2, true)
+		pcall(Cmd_Move, sg, q3, true)
+		pcall(Cmd_Move, sg, q4, true)
+		pcall(Cmd_Move, sg, origin, true)
+	else
+		if _CBA.center then
+			pcall(Cmd_Move, sg, _CBA.center, false)
+		end
+	end
+end

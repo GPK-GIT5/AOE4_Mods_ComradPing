@@ -1,0 +1,303 @@
+-----------------------------------------------------------------------
+-- DevMenu: Category Manifest (source of truth for DEV menu navigation)
+--
+-- Two-level navigation structure for the DEV menu:
+--   Level 1 (categories): one card per category in `_DEVMENU_DEV_CATEGORIES`.
+--   Level 2 (submenu):    one card per submenu item under that category.
+--
+-- Each `key` matches the filename convention `cba_debug_<key>.scar` so the
+-- build-time recency generator (scripts/build_devmenu_recent.ps1) can map
+-- a category to its owning source files via `files` globs and compute
+-- `recency = max(git_last_commit_time(file))` for the Top-3 strip.
+--
+-- ADDING / RENAMING ENTRIES — REQUIRED SYNC GATE:
+--   1. Add/rename a category here (key + label + files + submenu).
+--   2. Ensure each `submenu[i].action` corresponds to a global wrapper in
+--      devmenu_dev_actions.scar (or add it).
+--   3. Run scripts/build_devmenu_recent.ps1 to refresh recency artifact.
+--   4. Verify menu boots with cheats enabled and submenu opens.
+-----------------------------------------------------------------------
+
+-- Keys are stable category identifiers; do NOT reuse keys across categories.
+-- Files are workspace-relative globs scoped to debug/* sources.
+
+-- Icon set: use specific icons when confidence is high; otherwise fallback.
+local _DEVMENU_ICON_GENERIC = _DEVMENU_ICON_DEFAULT
+local _DEVMENU_ICON_SCORE   = "pack://application:,,,/WPFGUI;component/icons/races/common/victory_conditions/victory_condition_conquest.png"
+local _DEVMENU_ICON_POPCAP  = "pack://application:,,,/WPFGUI;component/icons/resources/resource_popcap.png"
+
+_DEVMENU_DEV_CATEGORIES = {
+	{
+		key = "logging",
+		label = "Logging",
+		desc = "Per-channel startup logging controls with live ON/OFF state.",
+		icon = _DEVMENU_ICON_GENERIC,
+		files = { "Gamemodes/Onslaught/assets/scar/devmenuUI/devmenu_dev_actions.scar" },
+		submenu = {
+			{ label = "1x ALL", desc = "Master toggle for every logging entry below. Default: mixed (AI OFF; shared/debug-driven channels ON).", action = "DevMenu_ToggleAllLogging", icon = _DEVMENU_ICON_GENERIC, toggle_state_fn = "DevMenu_GetAllLoggingEnabled" },
+			{ label = "2x SHARED", desc = "AGS / shared startup logging gate used by AGS output and shared startup prints. Default: ON.", action = "DevMenu_ToggleSharedLogging", icon = _DEVMENU_ICON_GENERIC, toggle_state_fn = "DevMenu_GetSharedLoggingEnabled" },
+			{ label = "3x AI", desc = "AI_PLAYER verbosity plus patrol ownership capture. Default: OFF.", action = "DevMenu_ToggleAILogging", icon = _DEVMENU_ICON_GENERIC, toggle_state_fn = "DevMenu_GetAILoggingEnabled" },
+			{ label = "4x AUTOAGE INFO", desc = "AUTOAGE info + trace lines. Default: ON in debug sessions.", action = "DevMenu_ToggleAutoAgeInfoLogging", icon = _DEVMENU_ICON_GENERIC, toggle_state_fn = "DevMenu_GetAutoAgeInfoLoggingEnabled" },
+			{ label = "5x AUTOAGE DIAG", desc = "AUTOAGE startup diagnostics. Default: ON at startup, then auto-disables after reapply.", action = "DevMenu_ToggleAutoAgeDiagLogging", icon = _DEVMENU_ICON_GENERIC, toggle_state_fn = "DevMenu_GetAutoAgeDiagLoggingEnabled" },
+			{ label = "6x TRACE", desc = "Onslaught TRACE channel. Default: ON in debug sessions.", action = "DevMenu_ToggleTraceLogging", icon = _DEVMENU_ICON_GENERIC, toggle_state_fn = "DevMenu_GetTraceLoggingEnabled" },
+			{ label = "7x KEEP_CAP", desc = "Onslaught KEEP_CAP channel. Default: ON in debug sessions.", action = "DevMenu_ToggleKeepCapLogging", icon = _DEVMENU_ICON_GENERIC, toggle_state_fn = "DevMenu_GetKeepCapLoggingEnabled" },
+			{ label = "8x FORCE_TEAM_POSITIONS", desc = "Onslaught FORCE_TEAM_POSITIONS channel. Default: ON in debug sessions when the feature is active.", action = "DevMenu_ToggleForceTeamPositionsLogging", icon = _DEVMENU_ICON_GENERIC, toggle_state_fn = "DevMenu_GetForceTeamPositionsLoggingEnabled" },
+		},
+	},
+	{
+		key = "testing_debug",
+		label = "Testing & Debug",
+		desc = "Grouped test runners and debug probes.",
+		icon = _DEVMENU_ICON_SCORE,
+		files = {
+			"Gamemodes/Onslaught/assets/scar/debug/cba_debug_validation.scar",
+			"Gamemodes/Onslaught/assets/scar/debug/cba_debug_data_extract.scar",
+			"Gamemodes/Onslaught/assets/scar/debug/cba_debug_determinism.scar",
+			"Gamemodes/Onslaught/assets/scar/debug/cba_debug_ai_behavior.scar",
+			"Gamemodes/Onslaught/assets/scar/cba_verify_military_pipeline.scar",
+		},
+		submenu = {
+			{ label = "Full Validation", desc = "Run the full 6-phase validation pipeline.", action = "DevMenu_RunValidation", icon = _DEVMENU_ICON_SCORE, section = "core", group = "core_validation", group_label = "Core Validation", group_desc = "Primary health checks for data and runtime integrity.", group_sort = 10, sort = 10 },
+			{ label = "Data Validation", desc = "Run debug.data.run extraction and parity checks.", action = "DevMenu_RunDataValidation", icon = _DEVMENU_ICON_POPCAP, section = "core", group = "core_validation", group_label = "Core Validation", group_desc = "Primary health checks for data and runtime integrity.", group_sort = 10, sort = 20 },
+			{ label = "Faction Map Diag", desc = "Faction map + false-vs-nil + transfer audit.", action = "DevMenu_RunFactionDiag", icon = _DEVMENU_ICON_POPCAP, section = "core", group = "core_validation", group_label = "Core Validation", group_desc = "Primary health checks for data and runtime integrity.", group_sort = 10, sort = 30 },
+
+			{ label = "Dynasties Diag", desc = "Dynasties upgrade/correction and parity checks.", action = "DevMenu_RunDynastiesDiag", icon = _DEVMENU_ICON_GENERIC, section = "dynasty", group = "jin_onboarding", group_label = "Jin Onboarding", group_desc = "Dynasty-specific checks for onboarding and runtime wiring.", group_sort = 20, sort = 40 },
+			{ label = "Jin Runtime Validation", desc = "Jin wiring, BP existence, upgrades, rewards + AI hooks.", action = "DevMenu_RunJinRuntimeValidation", icon = _DEVMENU_ICON_SCORE, section = "dynasty", group = "jin_onboarding", group_label = "Jin Onboarding", group_desc = "Dynasty-specific checks for onboarding and runtime wiring.", group_sort = 20, sort = 50 },
+			{ label = "Jin Blueprint Audit", desc = "Detailed blueprint existence check for jin_dynasty.", action = "DevMenu_RunJinBlueprintAudit", icon = _DEVMENU_ICON_POPCAP, section = "dynasty", group = "jin_onboarding", group_label = "Jin Onboarding", group_desc = "Dynasty-specific checks for onboarding and runtime wiring.", group_sort = 20, sort = 60 },
+
+			{ label = "Determinism", desc = "Run deterministic divergence probe.", action = "DevMenu_RunDeterminismTest", icon = _DEVMENU_ICON_SCORE, section = "probes", group = "system_probes", group_label = "System Probes", group_desc = "Focused debug tools for drift, AI behavior, and military pipeline checks.", group_sort = 30, sort = 70 },
+			{ label = "AI Behavior", desc = "8-scenario AI knowledge tests.", action = "DevMenu_RunAIBehavior", icon = _DEVMENU_ICON_SCORE, section = "probes", group = "system_probes", group_label = "System Probes", group_desc = "Focused debug tools for drift, AI behavior, and military pipeline checks.", group_sort = 30, sort = 80 },
+			{ label = "Military Verify", desc = "Routes/heroes/stats verify.", action = "DevMenu_RunMilitaryVerify", icon = _DEVMENU_ICON_POPCAP, section = "probes", group = "system_probes", group_label = "System Probes", group_desc = "Focused debug tools for drift, AI behavior, and military pipeline checks.", group_sort = 30, sort = 90 },
+			{ label = "Limits Inspect", desc = "UI state + desync detection.", action = "DevMenu_RunLimitsInspect", icon = _DEVMENU_ICON_POPCAP, section = "probes", group = "system_probes", group_label = "System Probes", group_desc = "Focused debug tools for drift, AI behavior, and military pipeline checks.", group_sort = 30, sort = 100 },
+		},
+	},
+	{
+		key = "validation",
+		label = "Validation",
+		desc = "Boot/config/runtime/data/endstate/limits.",
+		icon = _DEVMENU_ICON_SCORE,
+		files = { "Gamemodes/Onslaught/assets/scar/debug/cba_debug_validation.scar" },
+		submenu = {
+			{ label = "Full Validation",  desc = "6-phase pipeline (~10s).",                     action = "DevMenu_RunValidation",  icon = _DEVMENU_ICON_SCORE  },
+			{ label = "Faction Map Diag", desc = "Faction map + false-vs-nil + transfer audit.", action = "DevMenu_RunFactionDiag", icon = _DEVMENU_ICON_POPCAP },
+			{ label = "Dynasties Diag",  desc = "Dynasties upgrade/correction and parity checks.", action = "DevMenu_RunDynastiesDiag", icon = _DEVMENU_ICON_GENERIC },
+			{ label = "Jin Runtime Validation", desc = "Jin wiring, BP existence, upgrades, rewards + AI hooks.", action = "DevMenu_RunJinRuntimeValidation", icon = _DEVMENU_ICON_SCORE },
+			{ label = "Jin Blueprint Audit", desc = "Detailed blueprint existence check for jin_dynasty.", action = "DevMenu_RunJinBlueprintAudit", icon = _DEVMENU_ICON_POPCAP },
+		},
+	},
+	{
+		key = "data_extract",
+		label = "Data",
+		desc = "Blueprint audit + civ overview pipeline.",
+		icon = _DEVMENU_ICON_POPCAP,
+		files = {
+			"Gamemodes/Onslaught/assets/scar/debug/cba_debug_data_extract.scar",
+			"Gamemodes/Onslaught/assets/scar/debug/cba_debug_blueprint_audit.scar",
+			"Gamemodes/Onslaught/assets/scar/debug/cba_debug_civ_overview.scar",
+		},
+		submenu = {
+			{ label = "Data Validation", desc = "Run debug.data.run pipeline.", action = "DevMenu_RunDataValidation", icon = _DEVMENU_ICON_POPCAP },
+		},
+	},
+	{
+		key = "stress",
+		label = "Stress Test Menu",
+		desc = "Unified stress hub: bundles, child suites, and controls in execution order.",
+		icon = _DEVMENU_ICON_SCORE,
+		files = {
+			"Gamemodes/Onslaught/assets/scar/debug/cba_debug_core.scar",
+			"Gamemodes/Onslaught/assets/scar/debug/cba_debug_validation.scar",
+			"Gamemodes/Onslaught/assets/scar/debug/cba_debug_coverage.scar",
+			"Gamemodes/Onslaught/assets/scar/debug/cba_debug_event_probes.scar",
+			"Gamemodes/Onslaught/assets/scar/debug/cba_debug_stress.scar",
+			"Gamemodes/Onslaught/assets/scar/debug/cba_debug_advanced_stress.scar",
+			"Gamemodes/Onslaught/assets/scar/debug/cba_debug_session_stress.scar",
+			"Gamemodes/Onslaught/assets/scar/debug/cba_debug_ai_stress.scar",
+			"Gamemodes/Onslaught/assets/scar/debug/cba_debug_ai_player.scar",
+			"Gamemodes/Onslaught/assets/scar/debug/cba_debug_battle_lag.scar",
+			"Gamemodes/Onslaught/assets/scar/debug/cba_debug_limits_ui.scar",
+			"Gamemodes/Onslaught/assets/scar/debug/cba_debug_playerui.scar",
+			"Gamemodes/Onslaught/assets/scar/debug/cba_debug_playerui_anim.scar",
+			"Gamemodes/Onslaught/assets/scar/debug/cba_debug_leaver.scar",
+			"Gamemodes/Onslaught/assets/scar/debug/cba_debug_destructive.scar",
+			"Gamemodes/Onslaught/assets/scar/debug/cba_debug_siege_test.scar",
+		},
+		submenu = {
+			-- ─── WHOLE GAMEMODE ──────────────────────────────────────────────────────
+			-- Session Bundles: top-level orchestrators that run multiple suites in one go.
+			{ label = "UI Session Bundle",   desc = "Runs all UI-related test suites back-to-back in a single automated session.", action = "DevMenu_RunStressUIBundle", icon = _DEVMENU_ICON_POPCAP, section = "whole_game", group = "bundles", group_label = "Session Bundles", group_desc = "Top-level orchestrators — start here to run multiple suites end-to-end automatically.", group_sort = 10, sort = 10 },
+			{ label = "Gamemode Bundle",     desc = "Runs the full test suite for the entire gamemode from start to finish — the best first choice.", action = "DevMenu_RunStressGamemodeBundle", icon = _DEVMENU_ICON_SCORE, section = "whole_game", group = "bundles", group_label = "Session Bundles", group_desc = "Top-level orchestrators — start here to run multiple suites end-to-end automatically.", group_sort = 10, sort = 20, warning = "Prompt-safe bundle; interactive comprehensive run excluded." },
+			{ label = "Advanced Stress All", desc = "Chains all six advanced edge-case scenarios in authored order for a thorough deep-dive.", action = "DevMenu_RunAdvancedStress", icon = _DEVMENU_ICON_GENERIC, section = "whole_game", group = "bundles", group_label = "Session Bundles", group_desc = "Top-level orchestrators — start here to run multiple suites end-to-end automatically.", group_sort = 10, sort = 30, included_by = "Gamemode Bundle" },
+
+			-- Gamemode Foundation: individual whole-game checks the Gamemode Bundle runs.
+			{ label = "Smoke Tests",    desc = "Quick 7-check sweep — players, keeps, and limits — to confirm the game booted correctly.", action = "DevMenu_RunSmokeTests", icon = _DEVMENU_ICON_GENERIC, section = "whole_game", group = "foundation", group_label = "Gamemode Foundation", group_desc = "Individual whole-gamemode checks run by the Gamemode Bundle — use these for targeted re-runs.", group_sort = 20, sort = 10, included_by = "Gamemode Bundle" },
+			{ label = "Full Validation", desc = "6-phase pipeline that checks boot config, runtime state, data integrity, and limits.", action = "DevMenu_RunValidation", icon = _DEVMENU_ICON_SCORE, section = "whole_game", group = "foundation", group_label = "Gamemode Foundation", group_desc = "Individual whole-gamemode checks run by the Gamemode Bundle — use these for targeted re-runs.", group_sort = 20, sort = 20, included_by = "Gamemode Bundle" },
+			{ label = "Coverage Test",  desc = "Calls every major game function once to confirm nothing crashes or is missing.", action = "DevMenu_RunCoverageTest", icon = _DEVMENU_ICON_SCORE, section = "whole_game", group = "foundation", group_label = "Gamemode Foundation", group_desc = "Individual whole-gamemode checks run by the Gamemode Bundle — use these for targeted re-runs.", group_sort = 20, sort = 30, included_by = "Gamemode Bundle" },
+			{ label = "Event Probes",   desc = "Fires all event handlers with fake inputs to confirm they won't crash during real play.", action = "DevMenu_RunEventProbes", icon = _DEVMENU_ICON_POPCAP, section = "whole_game", group = "foundation", group_label = "Gamemode Foundation", group_desc = "Individual whole-gamemode checks run by the Gamemode Bundle — use these for targeted re-runs.", group_sort = 20, sort = 40, included_by = "Gamemode Bundle" },
+			{ label = "Standard Stress", desc = "8-stage stress test across all 17 civilizations — the classic multi-civ sanity check.", action = "DevMenu_RunStressTest", icon = _DEVMENU_ICON_SCORE, section = "whole_game", group = "foundation", group_label = "Gamemode Foundation", group_desc = "Individual whole-gamemode checks run by the Gamemode Bundle — use these for targeted re-runs.", group_sort = 20, sort = 50, included_by = "Gamemode Bundle" },
+
+			-- ─── AI SYSTEM ───────────────────────────────────────────────────────────
+			{ label = "AI Player Test", desc = "10-phase check of the AI opponent: economy, building, army, scouting, outposts, and events.", action = "DevMenu_RunAIPlayerTest", icon = _DEVMENU_ICON_SCORE, section = "ai", group = "ai_tests", group_label = "AI Tests", group_desc = "Validation and robustness tests for the AI opponent module.", group_sort = 10, sort = 10, included_by = "Gamemode Bundle" },
+			{ label = "AI Stress",      desc = "15-category robustness test that hammers the AI under extreme conditions to find edge cases.", action = "DevMenu_RunAIStress", icon = _DEVMENU_ICON_SCORE, section = "ai", group = "ai_tests", group_label = "AI Tests", group_desc = "Validation and robustness tests for the AI opponent module.", group_sort = 10, sort = 20, included_by = "Gamemode Bundle" },
+
+			-- ─── SIEGE SYSTEM ────────────────────────────────────────────────────────
+			{ label = "Siege Test",         desc = "13-phase deep validation of siege limits, blueprints, thresholds, workshops, and field builds.", action = "DevMenu_RunSiegeTest", icon = _DEVMENU_ICON_SCORE, section = "siege", group = "siege_tests", group_label = "Siege Tests", group_desc = "Standard validation for the siege limit system — blueprints, workshops, and thresholds.", group_sort = 10, sort = 10, included_by = "Gamemode Bundle" },
+			{ label = "Siege Limit Stress", desc = "Focused pressure test that pushes siege limits to their breaking point repeatedly.", action = "DevMenu_RunSiegeLimitStressTest", icon = _DEVMENU_ICON_SCORE, section = "siege", group = "siege_tests", group_label = "Siege Tests", group_desc = "Standard validation for the siege limit system — blueprints, workshops, and thresholds.", group_sort = 10, sort = 20 },
+			{ label = "Siege Cascade",      desc = "Fills all siege tiers simultaneously to verify the limit lock/unlock cascade fires at each threshold.", action = "DevMenu_RunAdvancedStressSiegeCascade", icon = _DEVMENU_ICON_GENERIC, section = "siege", group = "siege_advanced", group_label = "Advanced Siege Scenarios", group_desc = "Advanced scenarios that stress siege limits under extreme conditions.", group_sort = 20, sort = 10, included_by = "Advanced Stress All" },
+
+			-- ─── PLAYER UI & ELIMINATION ─────────────────────────────────────────────
+			{ label = "PlayerUI Test",      desc = "Full 4-phase PlayerUI check: local player binding, data snapshot, display cycle, and ranking.", action = "DevMenu_RunPlayerUITest", icon = _DEVMENU_ICON_POPCAP, section = "player_ui", group = "elimination_tests", group_label = "Elimination Tests", group_desc = "Tests for the player scorecard display, defeat classification, and the leaver conversion pipeline.", group_sort = 10, sort = 10, included_by = "UI Session Bundle" },
+			{ label = "PlayerUI Anim Diag", desc = "Checks ranking flip animations, score pulse, and transition-lock to catch animation crashes.", action = "DevMenu_RunPlayerUIAnimTest", icon = _DEVMENU_ICON_POPCAP, section = "player_ui", group = "elimination_tests", group_label = "Elimination Tests", group_desc = "Tests for the player scorecard display, defeat classification, and the leaver conversion pipeline.", group_sort = 10, sort = 20, included_by = "UI Session Bundle" },
+			{ label = "Classify Test All",  desc = "Verifies the UI correctly labels a defeated player as 'eliminated', 'surrender', or 'disconnect'.", action = "DevMenu_RunClassifyTestAll", icon = _DEVMENU_ICON_GENERIC, section = "player_ui", group = "elimination_tests", group_label = "Elimination Tests", group_desc = "Tests for the player scorecard display, defeat classification, and the leaver conversion pipeline.", group_sort = 10, sort = 30, included_by = "UI Session Bundle" },
+			{ label = "Leaver Stress",      desc = "Disconnects players one by one and validates the ownership-transfer pipeline after each.", action = "DevMenu_RunLeaverStress", icon = _DEVMENU_ICON_GENERIC, section = "player_ui", group = "elimination_tests", group_label = "Elimination Tests", group_desc = "Tests for the player scorecard display, defeat classification, and the leaver conversion pipeline.", group_sort = 10, sort = 40, mp_locked = true },
+
+			-- ─── LIMITS & UI PRESSURE ────────────────────────────────────────────────
+			{ label = "Limits UI Stress",       desc = "Rapidly changes building and siege counts to verify the limit display stays accurate under pressure.", action = "DevMenu_RunLimitsUIStress", icon = _DEVMENU_ICON_POPCAP, section = "ui_pressure", group = "ui_pressure_tests", group_label = "UI Pressure Tests", group_desc = "Rapid-fire stress tests that hammer UI counters and animations to find display inconsistencies.", group_sort = 10, sort = 10, included_by = "UI Session Bundle" },
+			{ label = "PlayerUI Anim Stress",   desc = "Rapid animation swap stress test to catch transition-lock failures under fast conditions.", action = "DevMenu_RunPlayerUIAnimStress", icon = _DEVMENU_ICON_POPCAP, section = "ui_pressure", group = "ui_pressure_tests", group_label = "UI Pressure Tests", group_desc = "Rapid-fire stress tests that hammer UI counters and animations to find display inconsistencies.", group_sort = 10, sort = 20 },
+			{ label = "PlayerUI Staged Stress", desc = "6-stage progressive toggle stress for HUD, scores, and objective display paths.", action = "DevMenu_RunPlayerUIStagedStress", icon = _DEVMENU_ICON_GENERIC, section = "ui_pressure", group = "ui_pressure_tests", group_label = "UI Pressure Tests", group_desc = "Rapid-fire stress tests that hammer UI counters and animations to find display inconsistencies.", group_sort = 10, sort = 30 },
+
+			-- ─── ADVANCED EDGE CASES ─────────────────────────────────────────────────
+			{ label = "Limit Oscillation", desc = "Oscillates building count across the limit boundary to check for counter drift.", action = "DevMenu_RunAdvancedStressBuildingLimitOscillation", icon = _DEVMENU_ICON_GENERIC, section = "advanced", group = "advanced_scenarios", group_label = "Advanced Scenarios", group_desc = "Individual edge-case scenarios from the Advanced Stress All bundle — run separately for targeted investigation.", group_sort = 10, sort = 10, included_by = "Advanced Stress All" },
+			{ label = "Max Pop Pressure",  desc = "Pushes population cap to maximum and tests all cap-related edge cases.", action = "DevMenu_RunAdvancedStressMaxPopPressure", icon = _DEVMENU_ICON_GENERIC, section = "advanced", group = "advanced_scenarios", group_label = "Advanced Scenarios", group_desc = "Individual edge-case scenarios from the Advanced Stress All bundle — run separately for targeted investigation.", group_sort = 10, sort = 20, included_by = "Advanced Stress All" },
+			{ label = "Blueprint Storm",   desc = "Creates and destroys blueprint lookups at high volume to stress the resolution cache.", action = "DevMenu_RunAdvancedStressBlueprintStorm", icon = _DEVMENU_ICON_GENERIC, section = "advanced", group = "advanced_scenarios", group_label = "Advanced Scenarios", group_desc = "Individual edge-case scenarios from the Advanced Stress All bundle — run separately for targeted investigation.", group_sort = 10, sort = 30, included_by = "Advanced Stress All" },
+			{ label = "Concurrent Thrash", desc = "Fires multiple subsystems at the same time to find timing or ordering conflicts.", action = "DevMenu_RunAdvancedStressConcurrentThrash", icon = _DEVMENU_ICON_GENERIC, section = "advanced", group = "advanced_scenarios", group_label = "Advanced Scenarios", group_desc = "Individual edge-case scenarios from the Advanced Stress All bundle — run separately for targeted investigation.", group_sort = 10, sort = 40, included_by = "Advanced Stress All" },
+			{ label = "Rapid Elimination", desc = "Eliminates players in rapid succession to stress the leaver pipeline and building recounts.", action = "DevMenu_RunAdvancedStressRapidElimination", icon = _DEVMENU_ICON_GENERIC, section = "advanced", group = "advanced_scenarios", group_label = "Advanced Scenarios", group_desc = "Individual edge-case scenarios from the Advanced Stress All bundle — run separately for targeted investigation.", group_sort = 10, sort = 50, included_by = "Advanced Stress All" },
+
+			-- ─── PERFORMANCE PROFILER ────────────────────────────────────────────────
+			{ label = "Battle Lag Start",  desc = "Starts the long-match profiler: spawns large armies and logs FPS/lag metrics every 10 seconds.", action = "DevMenu_RunBattleLagTest", icon = _DEVMENU_ICON_SCORE, section = "perf", group = "battle_lag", group_label = "Battle Lag Controls", group_desc = "Controls for the long-match performance profiler — always run Stop when finished.", group_sort = 10, sort = 10 },
+			{ label = "Battle Lag Status", desc = "Prints the current profiler counters and state without interrupting the test.", action = "DevMenu_BattleLagStatus", icon = _DEVMENU_ICON_POPCAP, section = "perf", group = "battle_lag", group_label = "Battle Lag Controls", group_desc = "Controls for the long-match performance profiler — always run Stop when finished.", group_sort = 10, sort = 20 },
+			{ label = "Battle Lag Config", desc = "Shows the current profiler configuration (batch sizes, intervals, and enabled features).", action = "DevMenu_BattleLagConfig", icon = _DEVMENU_ICON_GENERIC, section = "perf", group = "battle_lag", group_label = "Battle Lag Controls", group_desc = "Controls for the long-match performance profiler — always run Stop when finished.", group_sort = 10, sort = 30 },
+			{ label = "Battle Lag Stop",   desc = "Stops the profiler and cleans up all spawned units — always run this after Battle Lag Start.", action = "DevMenu_BattleLagStop", icon = _DEVMENU_ICON_GENERIC, section = "perf", group = "battle_lag", group_label = "Battle Lag Controls", group_desc = "Controls for the long-match performance profiler — always run Stop when finished.", group_sort = 10, sort = 40 },
+
+			-- ─── SESSION CONTROLS ────────────────────────────────────────────────────
+			{ label = "Session Status", desc = "Shows which test suites are queued, running, or finished in the current session bundle.", action = "DevMenu_StressSessionStatus", icon = _DEVMENU_ICON_POPCAP, section = "controls", group = "session_controls", group_label = "Session Bundle Controls", group_desc = "Start, inspect, or abort the top-level session bundle currently running.", group_sort = 10, sort = 10 },
+			{ label = "Session Abort",  desc = "Immediately cancels the running session bundle and stops all queued suites.", action = "DevMenu_StressSessionAbort", icon = _DEVMENU_ICON_GENERIC, section = "controls", group = "session_controls", group_label = "Session Bundle Controls", group_desc = "Start, inspect, or abort the top-level session bundle currently running.", group_sort = 10, sort = 20 },
+		},
+	},
+	{
+		key = "ai_behavior",
+		label = "AI Behavior",
+		desc = "AI knowledge / decision tests.",
+		icon = _DEVMENU_ICON_SCORE,
+		files = { "Gamemodes/Onslaught/assets/scar/debug/cba_debug_ai_behavior.scar" },
+		submenu = {
+			{ label = "AI Behavior", desc = "8-scenario knowledge tests.", action = "DevMenu_RunAIBehavior", icon = _DEVMENU_ICON_SCORE },
+		},
+	},
+	{
+		key = "leaver",
+		label = "Leaver",
+		desc = "Leaver pipeline + military verify.",
+		icon = _DEVMENU_ICON_POPCAP,
+		files = {
+			"Gamemodes/Onslaught/assets/scar/debug/cba_debug_leaver.scar",
+			"Gamemodes/Onslaught/assets/scar/cba_verify_military_pipeline.scar",
+		},
+		submenu = {
+			{ label = "Military Verify", desc = "Routes/heroes/stats verify.",          action = "DevMenu_RunMilitaryVerify", icon = _DEVMENU_ICON_POPCAP  },
+			{ label = "Leaver Test",     desc = "6-stage conversion + coverage.",       action = "DevMenu_RunLeaverTest",     icon = _DEVMENU_ICON_SCORE,  mp_locked = true },
+			{ label = "Leaver Matrix",   desc = "All-player pair coverage matrix.",     action = "DevMenu_RunLeaverMatrix",   icon = _DEVMENU_ICON_GENERIC, mp_locked = true },
+		},
+	},
+	{
+		key = "limits_ui",
+		label = "Limits",
+		desc = "Building/siege limit UI diagnostics.",
+		icon = _DEVMENU_ICON_POPCAP,
+		files = { "Gamemodes/Onslaught/assets/scar/debug/cba_debug_limits_ui.scar" },
+		submenu = {
+			{ label = "Limits Inspect", desc = "UI state + desync detection.", action = "DevMenu_RunLimitsInspect", icon = _DEVMENU_ICON_POPCAP },
+		},
+	},
+	{
+		key = "determinism",
+		label = "Determinism",
+		desc = "Checksums + divergence detection.",
+		icon = _DEVMENU_ICON_SCORE,
+		files = { "Gamemodes/Onslaught/assets/scar/debug/cba_debug_determinism.scar" },
+		submenu = {
+			{ label = "Determinism", desc = "Run determinism probe.", action = "DevMenu_RunDeterminismTest", icon = _DEVMENU_ICON_SCORE },
+			{ label = "MP Safety Audit", desc = "DevMenu MP-safety audit: modifier accountant + replication probe (safe in MP).", action = "DevMenu_RunMPSafetyAudit", icon = _DEVMENU_ICON_SCORE },
+			{ label = "MP Gate: Cycle", desc = "Cycle warn -> block -> allow -> warn. Default 'warn' lets actions run with risk-class warnings; 'block' fail-closes HIGH/CRIT handlers.", action = "DevMenu_CycleMPGateMode", icon = _DEVMENU_ICON_SCORE, mp_locked = true },
+		},
+	},
+	-- debugger_tools is decorative (locked) in the DEV menu — its runtime-inspection
+	-- tools are now consolidated under Spawner Debugger for one-stop access.
+	{
+		key = "debugger_tools",
+		label = "Debugger Tools",
+		desc = "Runtime state inspection, replication probes, and frame-timing brackets.",
+		icon = _DEVMENU_ICON_SCORE,
+		files = {
+			"Gamemodes/Onslaught/assets/scar/devmenuUI/devmenu_diag.scar",
+			"Gamemodes/Onslaught/assets/scar/devmenuUI/devmenu_mp_gate.scar",
+		},
+		submenu = {
+			-- ─── MP SAFETY ───────────────────────────────────────────────────────────
+			{ label = "MP Safety Audit",       desc = "Combined replication probe + modifier accountant audit. Safe in MP; read-only.", action = "DevMenu_RunMPSafetyAudit", icon = _DEVMENU_ICON_SCORE,   section = "mp_safety", group = "mp_tools", group_label = "MP Safety Tools", group_desc = "Multiplayer safety probes and gate controls for DevMenu sim mutations.", group_sort = 20, sort = 10 },
+			{ label = "Replication: Invuln",   desc = "Snapshot Invulnerability state per player and print to scarlog. Diff two peers' logs to detect OOS.", action = "DevMenu_DiagReplInvuln",  icon = _DEVMENU_ICON_GENERIC, section = "mp_safety", group = "mp_tools", group_label = "MP Safety Tools", group_desc = "Multiplayer safety probes and gate controls for DevMenu sim mutations.", group_sort = 20, sort = 20 },
+			{ label = "Replication: FoW",      desc = "Snapshot Fog-of-War state per player.", action = "DevMenu_DiagReplFoW",     icon = _DEVMENU_ICON_GENERIC, section = "mp_safety", group = "mp_tools", group_label = "MP Safety Tools", group_desc = "Multiplayer safety probes and gate controls for DevMenu sim mutations.", group_sort = 20, sort = 30 },
+			{ label = "Replication: InstBuild",desc = "Snapshot Instant-Build state per player.", action = "DevMenu_DiagReplInstBuild", icon = _DEVMENU_ICON_GENERIC, section = "mp_safety", group = "mp_tools", group_label = "MP Safety Tools", group_desc = "Multiplayer safety probes and gate controls for DevMenu sim mutations.", group_sort = 20, sort = 40 },
+			{ label = "MP Gate: Cycle",        desc = "Cycle DevMenu MP gate: warn -> block -> allow -> warn.", action = "DevMenu_CycleMPGateMode",  icon = _DEVMENU_ICON_POPCAP, section = "mp_safety", group = "mp_tools", group_label = "MP Safety Tools", group_desc = "Multiplayer safety probes and gate controls for DevMenu sim mutations.", group_sort = 20, sort = 50, mp_locked = true },
+			-- ─── FRAME TIMING ────────────────────────────────────────────────────────
+			{ label = "Frame Bracket: Invuln", desc = "Fires the Invuln sim mutation wrapped in pre/post frame-bracket lines for lockstep timing analysis. Check scarlog for [DEVMENU-FRAME].", action = "DevMenu_DiagFrameInvuln", icon = _DEVMENU_ICON_GENERIC, section = "timing", group = "frame_timing", group_label = "Frame Timing Brackets", group_desc = "Wraps specific actions in timestamped pre/post markers for multi-peer scarlog diff.", group_sort = 30, sort = 10, mp_locked = true },
+		},
+	},
+	{
+		key = "spawner_debug",
+		label = "Devmenu Debugger",
+		desc = "Cheat-menu spawn debug, icon & visual audit, and DevMenu self-diagnostics.",
+		icon = _DEVMENU_ICON_SCORE,
+		files = {
+			"Gamemodes/Onslaught/assets/scar/devmenuUI/devmenu_unit_spawner.scar",
+			"Gamemodes/Onslaught/assets/scar/devmenuUI/devmenu_unit_spawner_debug.scar",
+			"Gamemodes/Onslaught/assets/scar/devmenuUI/devmenu_diag.scar",
+		},
+		submenu = {
+			-- ─── CHEAT MENU TOOLS ────────────────────────────────────────────────────
+			{ label = "Dump Dispatch Table", desc = "Verify the cheat-menu was built correctly — prints all dispatch idx→SBP entries to ScarLog.",            action = "DevMenu_UnitSpawner_Dump",              icon = _DEVMENU_ICON_SCORE,   section = "cheat_menu",  group = "cheat_tools",  group_label = "Cheat Menu Tools",     group_desc = "Inspect and test the Unit Spawner cheat-menu dispatch table and SBP catalog.", group_sort = 10, sort = 10 },
+			{ label = "Run SBP Debug",       desc = "Batch-test every dispatch-table SBP via pcall to find entries that fail to spawn at runtime.",           action = "DevMenu_UnitSpawner_RunDebug",          icon = _DEVMENU_ICON_SCORE,   section = "cheat_menu",  group = "cheat_tools",  group_label = "Cheat Menu Tools",     group_desc = "Inspect and test the Unit Spawner cheat-menu dispatch table and SBP catalog.", group_sort = 10, sort = 20 },
+			{ label = "Cancel SBP Debug",    desc = "Stop a batch SBP debug run that is currently in progress.",                                              action = "DevMenu_UnitSpawner_CancelDebug",       icon = _DEVMENU_ICON_GENERIC, section = "cheat_menu",  group = "cheat_tools",  group_label = "Cheat Menu Tools",     group_desc = "Inspect and test the Unit Spawner cheat-menu dispatch table and SBP catalog.", group_sort = 10, sort = 30 },
+			-- ─── SPAWNER DIAGNOSTICS ────────────────────────────────────────────────
+			{ label = "Age Sel Validate",    desc = "Validate every age-selector tier group: BP resolve, TierSel global registration, DC state_ coherence. Prefix [SPAWNER-AGE-VALIDATE].",    action = "DevMenu_UnitSpawner_ValidateAgeSelectors", icon = _DEVMENU_ICON_SCORE,   section = "spawner_diag", group = "spawner_diag_tools", group_label = "Spawner Diagnostics", group_desc = "Unit Spawner self-diagnostic probes: age-selector correctness and full behavioral validation.", group_sort = 15, sort = 10 },
+			{ label = "Spawner Full Diag",   desc = "4-phase full behavioral diagnostic: structure, DC bindings, selector card ownership, BP resolve. Prefix [SPAWNER-FULL-DIAG].",            action = "DevMenu_UnitSpawner_FullDiag",             icon = _DEVMENU_ICON_SCORE,   section = "spawner_diag", group = "spawner_diag_tools", group_label = "Spawner Diagnostics", group_desc = "Unit Spawner self-diagnostic probes: age-selector correctness and full behavioral validation.", group_sort = 15, sort = 20 },
+			-- ─── ICON & VISUAL AUDIT ─────────────────────────────────────────────────
+			{ label = "Icon Audit",          desc = "Validate all unit card icons and civ section flags — expected: 0 errors.",                               action = "DevMenu_UnitSpawner_AuditIconCoverage", icon = _DEVMENU_ICON_SCORE,   section = "icon_audit",  group = "visual_audit", group_label = "Icon & Visual Audit",  group_desc = "Verify icon paths for all unit cards and civilization section headers in the spawner menu.", group_sort = 20, sort = 10 },
+			{ label = "Icon Full Report",    desc = "Print the resolved icon URI and BP_GetSquadUIInfo metadata (screenName, helpText) for every catalog entry.", action = "DevMenu_UnitSpawner_AuditIconFull",        icon = _DEVMENU_ICON_SCORE,   section = "icon_audit",  group = "visual_audit", group_label = "Icon & Visual Audit",  group_desc = "Verify icon paths for all unit cards and civilization section headers in the spawner menu.", group_sort = 20, sort = 20 },
+			{ label = "Icon Civ-Match",      desc = "Flag every unit+age where the resolved icon uses a different civ's folder. [PATCH] = confirmed alternative exists; [SHARED-OK] = game-canonical shared icon. Prefix [ICON-CIVMATCH].", action = "DevMenu_UnitSpawner_AuditIconCivMatch", icon = _DEVMENU_ICON_SCORE,   section = "icon_audit",  group = "visual_audit", group_label = "Icon & Visual Audit",  group_desc = "Verify icon paths for all unit cards and civilization section headers in the spawner menu.", group_sort = 20, sort = 25 },
+			-- ─── DEVMENU DIAGNOSTICS ─────────────────────────────────────────────────
+			{ label = "Full Diag Run",       desc = "Run the full DevMenu self-diagnostic: API probes, sim mutations, spawn, and environment checks.",         action = "DevMenu_DiagRunAll",                    icon = _DEVMENU_ICON_SCORE,   section = "devmenu_diag", group = "diag_tools",  group_label = "DevMenu Diagnostics", group_desc = "DevMenu self-diagnostic probes and modifier-leak detection.", group_sort = 30, sort = 10 },
+			{ label = "Modifier Account",    desc = "Print the apply/remove tally for DevMenu modifier calls; net != 0 indicates a leak.",                     action = "DevMenu_DiagModifierAccount",           icon = _DEVMENU_ICON_POPCAP,  section = "devmenu_diag", group = "diag_tools",  group_label = "DevMenu Diagnostics", group_desc = "DevMenu self-diagnostic probes and modifier-leak detection.", group_sort = 30, sort = 20 },
+			{ label = "DEVMENU_DIAG", desc = "Sequential cheat-action debugger with runtime hooks. Triggers each cheat action, captures output, and compares against expected results. Selection prompts shown for unit/building actions. SP-only. Check scarlog [DEVMENU-CDBG].", action = "DevMenu_RunCheatsDebugger", icon = _DEVMENU_ICON_SCORE, section = "devmenu_diag", group = "diag_tools", group_label = "DevMenu Diagnostics", group_desc = "DevMenu self-diagnostic probes and modifier-leak detection.", group_sort = 30, sort = 30 },
+		},
+	},
+}
+
+-- Archived categories intentionally disabled from active DEV menu.
+-- Prompts and QA debuggers are kept here for traceability only.
+_DEVMENU_DEV_CATEGORIES_ARCHIVED = {
+	{
+		key = "qa_runner",
+		label = "QA",
+		desc = "Archived/disabled QA debugger.",
+		icon = _DEVMENU_ICON_POPCAP,
+		files = { "Gamemodes/Onslaught/assets/scar/debug/cba_debug_qa_runner.scar" },
+		submenu = {},
+	},
+	{
+		key = "ui_prompts",
+		label = "Prompts",
+		desc = "Interactive YES/NO + multi-choice tests.",
+		icon = _DEVMENU_ICON_GENERIC,
+		files = { "Gamemodes/Onslaught/assets/scar/debug/cba_debug_ui_prompts.scar" },
+		submenu = {
+			{ label = "Prompts", desc = "Interactive XamlPresenter tests.", action = "DevMenu_RunPrompts", icon = _DEVMENU_ICON_GENERIC },
+		},
+	},
+}
+
+-- Index: key -> category record (built once at load).
+_DEVMENU_DEV_CATEGORY_INDEX = {}
+for _, cat in ipairs(_DEVMENU_DEV_CATEGORIES) do
+	_DEVMENU_DEV_CATEGORY_INDEX[cat.key] = cat
+end

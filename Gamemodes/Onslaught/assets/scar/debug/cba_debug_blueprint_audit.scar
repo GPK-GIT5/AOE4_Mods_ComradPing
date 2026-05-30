@@ -1,0 +1,468 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — Blueprint Audit
+-- Runtime validation of AGS_ENTITY_TABLE blueprint existence via EBP_Exists / SBP_Exists.
+--
+-- Console commands:
+--   Debug_BlueprintAudit()                        Full cross-civ audit
+--   Debug_BlueprintAudit_Civ("lancaster")         Single-civ detail
+--   Debug_DumpBlueprintsForSuffix("_lan")         Enumerate all PBGs matching suffix
+---------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------
+-- Full audit: checks every blueprint string in AGS_ENTITY_TABLE
+---------------------------------------------------------------------------------------------------
+function Debug_BlueprintAudit()
+	print("")
+	print("[BLUEPRINT_AUDIT] Starting cross-civ blueprint validation...")
+	print("")
+
+	-- Check DLC parent-fallback coverage
+	local dlc_civs = {
+		"mongol_ha_gol", "lancaster", "templar",
+		"byzantine_ha_mac", "japanese_ha_sen", "sultanate_ha_tug",
+		"jin_dynasty",
+	}
+	local fallback_count = 0
+	for _, civ in ipairs(dlc_civs) do
+		if AGS_ENTITY_TABLE[civ] == nil then
+			print(string.format("  [FALLBACK] %s -> parent %s (no own entry)",
+				civ, tostring(AGS_CIV_PARENT_MAP[civ])))
+			fallback_count = fallback_count + 1
+		end
+	end
+	if fallback_count == 0 then
+		print("  [OK] All 7 DLC variants have own AGS_ENTITY_TABLE entries")
+	end
+	print("")
+
+	-- Check CBA_CIV_BP_SUFFIX coverage
+	if CBA_CIV_BP_SUFFIX ~= nil then
+		local suffix_missing = {}
+		for civ, _ in pairs(AGS_ENTITY_TABLE) do
+			if civ ~= "neutral" and CBA_CIV_BP_SUFFIX[civ] == nil then
+				table.insert(suffix_missing, civ)
+			end
+		end
+		if #suffix_missing > 0 then
+			print(string.format("  [WARN] CBA_CIV_BP_SUFFIX missing %d civs: %s",
+				#suffix_missing, table.concat(suffix_missing, ", ")))
+		else
+			print("  [OK] CBA_CIV_BP_SUFFIX covers all AGS_ENTITY_TABLE civs")
+		end
+		print("")
+	end
+
+	-- Main audit
+	local total_checks = 0
+	local total_ok = 0
+	local total_missing = 0
+	local total_false = 0
+	local civs_checked = 0
+
+	-- Sort civ names for deterministic output
+	local civ_names = {}
+	for civ, _ in pairs(AGS_ENTITY_TABLE) do
+		table.insert(civ_names, civ)
+	end
+	table.sort(civ_names)
+
+	for _, civ in ipairs(civ_names) do
+		local entries = AGS_ENTITY_TABLE[civ]
+		civs_checked = civs_checked + 1
+		local civ_ok = 0
+		local civ_miss = 0
+		local civ_false = 0
+		local miss_keys = {}
+
+		for key, bp_name in pairs(entries) do
+			if bp_name == false then
+				civ_false = civ_false + 1
+				total_false = total_false + 1
+			elseif type(bp_name) == "string" and bp_name ~= "" then
+				total_checks = total_checks + 1
+				local exists = false
+				local ok_call, result = pcall(function()
+					if string.sub(bp_name, 1, 9) == "building_" then
+						return EBP_Exists(bp_name)
+					elseif string.sub(bp_name, 1, 5) == "unit_" then
+						return SBP_Exists(bp_name)
+					else
+						return EBP_Exists(bp_name) or SBP_Exists(bp_name)
+					end
+				end)
+				if ok_call and result then
+					civ_ok = civ_ok + 1
+					total_ok = total_ok + 1
+				else
+					civ_miss = civ_miss + 1
+					total_missing = total_missing + 1
+					table.insert(miss_keys, key)
+				end
+			end
+		end
+
+		if civ_miss > 0 then
+			table.sort(miss_keys)
+			print(string.format("  [MISS] %s: %d ok, %d missing, %d disabled -- %s",
+				civ, civ_ok, civ_miss, civ_false, table.concat(miss_keys, ", ")))
+		else
+			print(string.format("  [OK]   %s: %d ok, %d disabled",
+				civ, civ_ok, civ_false))
+		end
+	end
+
+	print("")
+	print(string.format("[BLUEPRINT_AUDIT] %d civs | %d checked | %d ok | %d MISSING | %d disabled(false)",
+		civs_checked, total_checks, total_ok, total_missing, total_false))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Single-civ detail: shows every key and its blueprint + exists status
+---------------------------------------------------------------------------------------------------
+function Debug_BlueprintAudit_Civ(civ_name)
+	print("")
+	local entries = AGS_ENTITY_TABLE[civ_name]
+	if entries == nil then
+		local parent = AGS_CIV_PARENT_MAP and AGS_CIV_PARENT_MAP[civ_name]
+		if parent then
+			print(string.format("[BLUEPRINT_AUDIT] %s has no own entry -- falling back to parent: %s",
+				civ_name, parent))
+			entries = AGS_ENTITY_TABLE[parent]
+		end
+		if entries == nil then
+			print(string.format("[BLUEPRINT_AUDIT] %s not found in AGS_ENTITY_TABLE", civ_name))
+			return
+		end
+	end
+
+	print(string.format("[BLUEPRINT_AUDIT] Detail for: %s", civ_name))
+	print("")
+
+	local keys = {}
+	for k, _ in pairs(entries) do
+		table.insert(keys, k)
+	end
+	table.sort(keys)
+
+	local ok_count = 0
+	local miss_count = 0
+	for _, key in ipairs(keys) do
+		local bp = entries[key]
+		if bp == false then
+			print(string.format("  %-28s = false (disabled)", key))
+		elseif type(bp) == "string" then
+			local ok_call, result = pcall(function()
+				if string.sub(bp, 1, 9) == "building_" then
+					return EBP_Exists(bp)
+				elseif string.sub(bp, 1, 5) == "unit_" then
+					return SBP_Exists(bp)
+				else
+					return EBP_Exists(bp) or SBP_Exists(bp)
+				end
+			end)
+			if ok_call and result then
+				ok_count = ok_count + 1
+				print(string.format("  %-28s = %s [OK]", key, bp))
+			else
+				miss_count = miss_count + 1
+				print(string.format("  %-28s = %s [MISSING]", key, bp))
+			end
+		end
+	end
+
+	print("")
+	print(string.format("[BLUEPRINT_AUDIT] %s: %d ok, %d missing", civ_name, ok_count, miss_count))
+end
+
+---------------------------------------------------------------------------------------------------
+-- PBG suffix dump: enumerates all Entity/Squad blueprints whose path contains suffix
+-- Usage: Debug_DumpBlueprintsForSuffix("_lan") or Debug_DumpBlueprintsForSuffix("_mon_ha_gol")
+---------------------------------------------------------------------------------------------------
+function Debug_DumpBlueprintsForSuffix(suffix)
+	print("")
+	print(string.format("[BP_DUMP] Searching for PBGs containing: '%s'", suffix))
+	print("")
+
+	local PBG_ENTITY = 1245184
+	local PBG_SQUAD = 3014656
+	local matches = 0
+
+	-- Entity blueprints
+	local ok_e, count_e = pcall(BP_GetPropertyBagGroupCount, PBG_ENTITY)
+	if ok_e and count_e then
+		for i = 0, count_e - 1 do
+			local ok_p, path = pcall(BP_GetPropertyBagGroupPathName, PBG_ENTITY, i)
+			if ok_p and path and string.find(path, suffix, 1, true) then
+				matches = matches + 1
+				print(string.format("  EBP %s", path))
+			end
+		end
+	else
+		print("  [WARN] BP_GetPropertyBagGroupCount(Entity) failed -- PBG enumeration unavailable")
+	end
+
+	-- Squad blueprints
+	local ok_s, count_s = pcall(BP_GetPropertyBagGroupCount, PBG_SQUAD)
+	if ok_s and count_s then
+		for i = 0, count_s - 1 do
+			local ok_p, path = pcall(BP_GetPropertyBagGroupPathName, PBG_SQUAD, i)
+			if ok_p and path and string.find(path, suffix, 1, true) then
+				matches = matches + 1
+				print(string.format("  SBP %s", path))
+			end
+		end
+	else
+		print("  [WARN] BP_GetPropertyBagGroupCount(Squad) failed -- PBG enumeration unavailable")
+	end
+
+	print("")
+	print(string.format("[BP_DUMP] %d matches for suffix '%s'", matches, suffix))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Leaver Fallback Audit: validates _LEAVER_CIV_UNIQUE_FALLBACK entries resolve
+-- for every receiver civ. Reports which civ×fallback pairs would fail at runtime.
+-- Usage: Debug_BlueprintAudit_LeaverFallback()
+---------------------------------------------------------------------------------------------------
+function Debug_BlueprintAudit_LeaverFallback()
+	print("")
+	print("[BLUEPRINT_AUDIT] Leaver civ-unique fallback validation...")
+	print("")
+
+	if _LEAVER_CIV_UNIQUE_FALLBACK == nil then
+		print("  [SKIP] _LEAVER_CIV_UNIQUE_FALLBACK not loaded")
+		return
+	end
+	if AGS_CIV_PREFIXES == nil then
+		print("  [SKIP] AGS_CIV_PREFIXES not loaded")
+		return
+	end
+
+	local total_ok = 0
+	local total_miss = 0
+	local total_checks = 0
+
+	-- Sort civ names deterministically
+	local civs = {}
+	for civ, _ in pairs(AGS_CIV_PREFIXES) do
+		table.insert(civs, civ)
+	end
+	table.sort(civs)
+
+	for _, entry in ipairs(_LEAVER_CIV_UNIQUE_FALLBACK) do
+		print(string.format("  --- %s (ratio=%.0f%%) ---", entry.prefix, (entry.ratio or 1) * 100))
+		local ok_civs = {}
+		local miss_civs = {}
+		for _, civ in ipairs(civs) do
+			local prefix = AGS_CIV_PREFIXES[civ]
+			local suffix = string.sub(prefix, 1, -2)
+			-- Test with default tier
+			local target_name = entry.target .. tostring(entry.default_tier) .. "_" .. suffix
+			local ok, exists = pcall(SBP_Exists, target_name)
+			total_checks = total_checks + 1
+			if ok and exists then
+				total_ok = total_ok + 1
+				table.insert(ok_civs, civ)
+			else
+				total_miss = total_miss + 1
+				table.insert(miss_civs, civ)
+			end
+		end
+		if #miss_civs > 0 then
+			print(string.format("    [MISS] %d civs: %s", #miss_civs, table.concat(miss_civs, ", ")))
+		end
+		print(string.format("    [OK] %d/%d civs resolve %s%d_*",
+			#ok_civs, #ok_civs + #miss_civs, entry.target, entry.default_tier))
+	end
+
+	print("")
+	print(string.format("[BLUEPRINT_AUDIT] Fallback: %d checked | %d ok | %d MISSING",
+		total_checks, total_ok, total_miss))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Safe Enumeration: read-only BP existence check for all base unit types across civs.
+-- No spawning. Prints a matrix of which SBPs resolve per civ.
+--
+-- Usage:
+--   Debug_EnumerateAllCivUnits()                   All civs
+--   Debug_EnumerateAllCivUnits("english")          Single civ
+---------------------------------------------------------------------------------------------------
+
+-- Base unit stems and the age tiers to probe for each.
+-- Format: "unit_{stem}_{tier}_{civSuffix}"
+_ENUMERATE_UNIT_STEMS = {
+	{ stem = "spearman",        tiers = {1,2,3,4} },
+	{ stem = "manatarms",      tiers = {1,2,3,4} },
+	{ stem = "landsknecht",    tiers = {3,4} },
+	{ stem = "archer",         tiers = {2,3,4} },
+	{ stem = "crossbowman",    tiers = {3,4} },
+	{ stem = "handcannoneer",  tiers = {4} },
+	{ stem = "horseman",       tiers = {2,3,4} },
+	{ stem = "knight",         tiers = {2,3,4} },
+	{ stem = "lancer",         tiers = {2,3,4} },
+	{ stem = "camelrider",     tiers = {2,3,4} },
+	{ stem = "camelarcher",    tiers = {3,4} },
+	{ stem = "war_elephant",    tiers = {3,4} },
+	{ stem = "springald",      tiers = {3,4} },
+	{ stem = "mangonel",       tiers = {3,4} },
+	{ stem = "bombard",        tiers = {4} },
+	{ stem = "trebuchet",      tiers = {3,4} },
+	{ stem = "culverin",       tiers = {4} },
+	{ stem = "ribauldequin",   tiers = {4} },
+	{ stem = "ram",            tiers = {3} },
+	{ stem = "siege_tower",    tiers = {3} },
+	{ stem = "villager",       tiers = {1} },
+	{ stem = "scout",          tiers = {1,2} },
+	{ stem = "monk",           tiers = {3,4} },
+	{ stem = "religious",      tiers = {3,4} },
+	{ stem = "galley",         tiers = {2,3} },
+	{ stem = "warship",        tiers = {3,4} },
+	{ stem = "demolition_ship",tiers = {3,4} },
+	{ stem = "fishing_boat",   tiers = {1} },
+	{ stem = "transport_ship", tiers = {2} },
+	{ stem = "gbeto",          tiers = {3,4} },
+	{ stem = "javelin",        tiers = {2,3} },
+	{ stem = "musofadi",       tiers = {3,4} },
+	{ stem = "streltsy",       tiers = {4} },
+	{ stem = "janissary",      tiers = {3,4} },
+	{ stem = "longbow",        tiers = {2,3,4} },
+	{ stem = "zhugenu",        tiers = {2,3,4} },
+	{ stem = "grenadier",      tiers = {4} },
+	{ stem = "sipahi",         tiers = {3,4} },
+	{ stem = "royal_knight",   tiers = {2,3,4} },
+	{ stem = "samurai",        tiers = {3,4} },
+	{ stem = "shinobi",        tiers = {3,4} },
+}
+
+function Debug_EnumerateAllCivUnits(opt_civ)
+	print("")
+	print("[ENUM] Safe BP enumeration — no spawning, read-only")
+	print("")
+
+	if AGS_CIV_PREFIXES == nil then
+		print("  [SKIP] AGS_CIV_PREFIXES not loaded")
+		return
+	end
+
+	-- Build sorted civ list (optionally filtered)
+	local civs = {}
+	if opt_civ ~= nil then
+		if AGS_CIV_PREFIXES[opt_civ] == nil then
+			print(string.format("  [ERROR] Unknown civ: %s", tostring(opt_civ)))
+			return
+		end
+		table.insert(civs, opt_civ)
+	else
+		for civ, _ in pairs(AGS_CIV_PREFIXES) do
+			table.insert(civs, civ)
+		end
+		table.sort(civs)
+	end
+
+	local grand_total = 0
+	local grand_found = 0
+	local grand_missing = 0
+
+	for _, civ in ipairs(civs) do
+		local prefix = AGS_CIV_PREFIXES[civ]
+		local suffix = string.sub(prefix, 1, -2) -- strip trailing _
+		local civ_found = 0
+		local civ_total = 0
+		local found_list = {}
+		local miss_list = {}
+
+		for _, entry in ipairs(_ENUMERATE_UNIT_STEMS) do
+			for _, tier in ipairs(entry.tiers) do
+				local bp_name = "unit_" .. entry.stem .. "_" .. tostring(tier) .. "_" .. suffix
+				local ok, sbp = pcall(BP_GetSquadBlueprint, bp_name)
+				civ_total = civ_total + 1
+				if ok and sbp ~= nil then
+					civ_found = civ_found + 1
+					table.insert(found_list, entry.stem .. "_" .. tostring(tier))
+				else
+					table.insert(miss_list, entry.stem .. "_" .. tostring(tier))
+				end
+			end
+		end
+
+		grand_total = grand_total + civ_total
+		grand_found = grand_found + civ_found
+		grand_missing = grand_missing + (civ_total - civ_found)
+
+		print(string.format("  [%s] %d/%d resolved (suffix: %s)",
+			civ, civ_found, civ_total, suffix))
+		if #found_list > 0 and opt_civ ~= nil then
+			print(string.format("    FOUND: %s", table.concat(found_list, ", ")))
+		end
+		if #miss_list > 0 and opt_civ ~= nil then
+			print(string.format("    MISS:  %s", table.concat(miss_list, ", ")))
+		end
+	end
+
+	print("")
+	print(string.format("[ENUM] Total: %d/%d resolved | %d missing across %d civ(s)",
+		grand_found, grand_total, grand_missing, #civs))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Namespace Registration
+---------------------------------------------------------------------------------------------------
+if debug then
+	debug.data.blueprints    = Debug_BlueprintAudit
+	debug.data.blueprintCiv  = Debug_BlueprintAudit_Civ
+	debug.data.bpDump        = Debug_DumpBlueprintsForSuffix
+	debug.data.bpLeaver      = Debug_BlueprintAudit_LeaverFallback
+	debug.data.enumCivUnits  = Debug_EnumerateAllCivUnits
+
+	--- System master: runs Blueprint Audit → Civ Overview → Data Extraction summary.
+	-- All sync — no async chaining needed.
+	function debug.data.run()
+		_cba_debug.enabled = true
+		local ok, gt = pcall(World_GetGameTime)
+		local start_time = ok and gt or 0
+
+		print("")
+		print("[DEBUG] === Data System Master ===")
+		print("[DEBUG] 3 stages: Blueprint Audit → Civ Overview → Data Summary")
+		print("")
+
+		-- Stage 1: Blueprint audit
+		print("[DEBUG] >>> Stage 1: Blueprint Audit")
+		local ok1, err1 = pcall(Debug_BlueprintAudit)
+		if not ok1 then
+			print(string.format("[DEBUG] Blueprint Audit CRASHED: %s", tostring(err1)))
+		end
+
+		-- Stage 2: Civ overview build + audit
+		print("")
+		print("[DEBUG] >>> Stage 2: Civ Overview")
+		local ok2, err2 = pcall(Debug_CivOverview_Build)
+		if ok2 then
+			pcall(Debug_CivOverview_Audit)
+		else
+			print(string.format("[DEBUG] Civ Overview CRASHED: %s", tostring(err2)))
+		end
+
+		-- Stage 3: Data extraction summary
+		print("")
+		print("[DEBUG] >>> Stage 3: Data Summary")
+		local ok3, err3 = pcall(Debug_DataExtract_Summary)
+		if not ok3 then
+			print(string.format("[DEBUG] Data Summary CRASHED: %s", tostring(err3)))
+		end
+
+		local ok_gt2, gt2 = pcall(World_GetGameTime)
+		local elapsed = (ok_gt2 and gt2) and (gt2 - start_time) or 0
+		local stages_ok = 0
+		if ok1 then stages_ok = stages_ok + 1 end
+		if ok2 then stages_ok = stages_ok + 1 end
+		if ok3 then stages_ok = stages_ok + 1 end
+
+		print("")
+		print(string.format("[DEBUG] ── Data System Complete ── %d/3 stages OK  elapsed=%.1fs", stages_ok, elapsed))
+		_Debug_EndMarker("DataAll", stages_ok, 3, elapsed)
+	end
+
+	debug._register("data", debug.data.run, "Data full pipeline: blueprint audit + civ overview + data extraction", 2)
+end

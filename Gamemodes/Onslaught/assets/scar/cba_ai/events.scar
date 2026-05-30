@@ -1,0 +1,82 @@
+---------------------------------------------------------------------------------------------------
+-- CBA AI Player — Events
+-- Global event listeners for entity killed (rebuild trigger) and upgrade complete
+-- (economy re-suppression).
+-- Origin: cba_ai_player.scar lines 3724–3827
+---------------------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------
+-- Event: Entity Killed (rebuild destroyed buildings)
+-----------------------------------------------------------------------
+
+function _AI_OnEntityKilled(context)
+	if _AI_IsExternallyLocked() then return end
+	if context == nil or context.victim == nil then return end
+	if context.victimOwner == nil then return end
+
+	-- PERF: Skip if victim owner is being processed by leaver pipeline
+	local victim_entry = Core_GetPlayersTableEntry(context.victimOwner)
+	if victim_entry ~= nil and victim_entry._leaver_eliminated then return end
+
+	-- PERF: Pre-filter — only iterate AI buildings if victim belongs to an AI player
+	for _, player in ipairs(_ai_players) do
+		if context.victimOwner == player.id then
+			-- Check if the killed entity was one of our tracked buildings
+			local building_types = _AI_GetOrderedBuildingTypeKeys(player, player.ai.buildings)
+			for _, type_key in ipairs(building_types) do
+				local type_data = player.ai.buildings[type_key]
+				for i, rec in ipairs(type_data.entities) do
+					local ent = rec.entity or rec
+					if ent == context.victim then
+						local zone = rec.zone or "primary"
+						table.remove(type_data.entities, i)
+						type_data.count = math.max(0, type_data.count - 1)
+						player.ai.total_buildings = math.max(0, player.ai.total_buildings - 1)
+						-- Decrement zone count
+						if zone == "secondary" then
+							player.ai.secondary_zone_count = math.max(0, player.ai.secondary_zone_count - 1)
+						else
+							player.ai.primary_zone_count = math.max(0, player.ai.primary_zone_count - 1)
+						end
+						-- Also remove from production egroups
+						local pegs = player.ai.production_egroups[type_key]
+						if pegs ~= nil then
+							for k = #pegs, 1, -1 do
+								local eg = EGroup_CreateIfNotFound(pegs[k])
+								if EGroup_CountSpawned(eg) <= 0 then
+									table.remove(pegs, k)
+								end
+							end
+						end
+						_AI_RecordBuildEvent(player, "destroyed", type_key,
+							string.format("zone=%s total=%d", zone, player.ai.total_buildings))
+						_AI_DebugLog(1, string.format("[AI_PLAYER] %s lost %s [%s zone] - will rebuild (total=%d).", 
+							player.ai.label or "P?", type_key, zone, player.ai.total_buildings))
+						return
+					end
+				end
+			end
+			return  -- victim owner matched this AI player but entity wasn't tracked; done
+		end
+	end
+end
+
+-----------------------------------------------------------------------
+-- Event: Upgrade Complete (re-suppress economy)
+-----------------------------------------------------------------------
+
+function _AI_OnUpgradeComplete(context)
+	if context == nil then return end
+
+	-- GE_UpgradeComplete context shape can differ; probe common fields defensively.
+	local player_id = context.player or context.upgradePlayer or context.playerID
+	if player_id == nil then return end
+
+	for _, player in ipairs(_ai_players) do
+		if player ~= nil and player.id == player_id and not _AI_IsEliminated(player) then
+			_AI_EnsureNativeAIDisabled(player, "upgrade_complete", true)
+			_AI_EnsureEconomySuppressed(player, "upgrade_complete", true)
+			return
+		end
+	end
+end

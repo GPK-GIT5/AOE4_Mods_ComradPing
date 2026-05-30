@@ -1,0 +1,92 @@
+
+import("training.scar")
+import("training/campaigntraininggoals.scar")
+
+-- Repair damaged Town Center
+function Wallingford_AddHintToRepair()
+	
+	local repairGoal = Training_Goal("Entity", 
+		{Message="$ae948c95a8c5425d8de28e0c193e0be9:44", DataTemplate="RightClickTrainingDataTemplate"}, -- "Town center must survive! Select a villager to repair the damage"
+		UserIsRepairing)
+	
+	local repairWallGoalSequence = Training_GoalSequence(
+		"select",									-- id 
+		1,											-- repeatMax
+		0,											-- remindMax
+		BuildingIsDamaged,							-- trigger
+		CheckIgnore,								-- ignore
+		nil, 										-- remind
+		RepairBypass,								-- bypass
+		true, 										-- canRegress
+		{ repairGoal })
+	
+	Training_AddGoalSequence(repairWallGoalSequence)
+	Training_EnableGoalSequenceByID(repairWallGoalSequence, true)
+end
+
+-- ignore
+function CheckIgnore(goalSequence)
+	if goalSequence.isActive == true then
+		--local villager_is_alive = Squad_IsValid(goalSequence.goals[1].key.SquadID)
+		
+		local e_tc = goalSequence.goals[1].key
+		if Entity_GetHealth(e_tc) == 0 then
+			print("Ignore Repair Hint Because Building is Dead")
+			return true
+		end
+	end
+	return false
+end
+
+-- triggers
+function BuildingIsDamaged(goalSequence) -- Initial Check (Filters TC)
+	if AShortPeriodOfTimeHasPassed(goalSequence) then
+		local damaged_building = nil
+		local CheckForDamage = function(group_id, entity_index, entity)
+			if Entity_GetHealth(entity) < 0.7 * Entity_GetHealthMax(entity) and Entity_IsOfType(entity, "town_center") then
+				damaged_building = entity
+				return true
+			else
+				return false
+			end
+		end
+		
+		local buildings = Player_GetEntities(player5)
+		EGroup_ForEach(buildings, CheckForDamage)
+		if damaged_building ~= nil then
+			goalSequence.goals[1].key = damaged_building
+			return true
+		end
+	end
+	return false
+end
+
+function UserIsRepairing(goal)
+	local is_under_repair = Entity_IsUnderRepair(goal.key)
+	if is_under_repair then 
+		--print("Is under repair")
+	else
+		--print("Is not under repair")
+	end
+	return is_under_repair
+end
+
+function RepairBypass(goalSequence)
+	local building_under_repair = nil
+	local _CheckEntity = function(gid, idx, eid)
+		if Entity_IsUnderRepair(eid) then
+			building_under_repair = eid
+			return true
+		end
+	end
+	Player_GetAll()
+	EGroup_ForEach(eg_temp, _CheckEntity)
+	if building_under_repair ~= nil then
+		print("Repair bypassed because building dead")
+		return true
+	end
+	return false
+end
+
+
+

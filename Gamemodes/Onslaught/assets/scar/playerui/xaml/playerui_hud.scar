@@ -1,0 +1,761 @@
+-----------------------------------------------------------------------
+-- PlayerUI: Main HUD XAML Template
+-- Full-width row layout: allies left of center, enemies right
+-- Center panel shows team comparison stats + extensible content area
+-- Unit composition strip below (local player only)
+-- No bottom HUD — everything anchored to the top
+-- Enemy data sanitized: only name, color, age visible
+-- Unified row template; visibility flags control depth per tier
+--
+-- XAML safety: no Width/Height/Opacity/RenderTransform bound via DataContext
+-- Dynamic widths use MultiBinding converters only (proven in observer UI)
+-----------------------------------------------------------------------
+
+_PlayerUI_HudXaml =
+[[<Grid	xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+		xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+		Visibility="Visible">
+
+	<Grid.Resources>
+		<DropShadowEffect x:Key="PlayerUiDropShadow" BlurRadius="0.5" ShadowDepth="1.5" />
+		<SolidColorBrush x:Key="BalanceBorderBrush" Color="#5e6989"/>
+		<SolidColorBrush x:Key="BalanceTickBrush" Color="#41485C"/>
+
+		<Style x:Key="PlayerUiPrimaryText" TargetType="TextBlock">
+			<Setter Property="FontSize" Value="18"/>
+			<Setter Property="VerticalAlignment" Value="Center"/>
+			<Setter Property="Foreground" Value="#FFFFFF"/>
+			<Setter Property="FontWeight" Value="Bold" />
+			<Setter Property="FontFamily" Value="{StaticResource Syntax}"/>
+			<Setter Property="Effect" Value="{StaticResource PlayerUiDropShadow}"/>
+		</Style>
+		<Style x:Key="PlayerUiSecondaryText" TargetType="TextBlock">
+			<Setter Property="FontSize" Value="18"/>
+			<Setter Property="Foreground" Value="#C2C2C2"/>
+			<Setter Property="FontStyle" Value="Italic" />
+			<Setter Property="FontFamily" Value="{StaticResource Syntax}"/>
+			<Setter Property="Effect" Value="{StaticResource PlayerUiDropShadow}"/>
+		</Style>
+		<Style x:Key="PlayerUiTimeText" TargetType="TextBlock">
+			<Setter Property="FontSize" Value="18"/>
+			<Setter Property="Foreground" Value="#FFFFFF"/>
+			<Setter Property="FontFamily" Value="{StaticResource Syntax}"/>
+			<Setter Property="Effect" Value="{StaticResource PlayerUiDropShadow}"/>
+		</Style>
+
+		<!-- Resource/income templates removed — Onslaught uses kill scores instead -->
+
+		<!-- ============================================================ -->
+		<!-- Unit icon with count + queued overlay                        -->
+		<!-- ============================================================ -->
+		<DataTemplate x:Key="PlayerUiUnit">
+			<Border Margin="2,2,2,0" BorderThickness="2" BorderBrush="{Binding [Color]}"
+					VerticalAlignment="Top">
+				<Grid>
+					<Rectangle Name="UnitBg1"
+							Width="{StaticResource HUDBuildQueueIconSize}"
+							Height="{StaticResource HUDBuildQueueIconSize}"
+							Fill="{StaticResource MilitaryButtonBgBrush}" />
+					<Rectangle Name="UnitBg2"
+							Width="{StaticResource HUDBuildQueueIconSize}"
+							Height="{StaticResource HUDBuildQueueIconSize}"
+							Fill="{StaticResource MilitaryLightButtonBgHighlightBrush}" />
+					<Image Width="{StaticResource HUDBuildQueueIconSize}"
+							Height="{StaticResource HUDBuildQueueIconSize}"
+							Source="{Binding [icon]}"/>
+					<TextBlock VerticalAlignment="Top" HorizontalAlignment="Right"
+							Style="{StaticResource HUDWhiteBaseTextBlock14ptStyle}"
+							FontStyle="Italic"
+							Foreground="#C2C2C2"
+							Effect="{StaticResource PlayerUiDropShadow}"
+							Text="{Binding [queued], Converter={StaticResource CastToIntOperator}}"
+							Visibility="{Binding [queuedNot0], Converter={StaticResource BoolToVis}}" />
+					<TextBlock VerticalAlignment="Bottom" HorizontalAlignment="Left"
+							Style="{StaticResource HUDWhiteBaseTextBlock14ptStyle}"
+							Effect="{StaticResource PlayerUiDropShadow}"
+							Text="{Binding [count], Converter={StaticResource CastToIntOperator}}"
+							Visibility="{Binding [countNot0], Converter={StaticResource BoolToVis}}" />
+				</Grid>
+			</Border>
+		</DataTemplate>
+
+		<!-- ============================================================ -->
+		<!-- Units list (horizontal, right-to-left stacking)             -->
+		<!-- ============================================================ -->
+		<DataTemplate x:Key="PlayerUiUnits">
+			<ItemsControl ItemsSource="{Binding}"
+					HorizontalAlignment="Left"
+					ItemTemplate="{StaticResource PlayerUiUnit}">
+				<ItemsControl.ItemsPanel>
+					<ItemsPanelTemplate>
+						<StackPanel Orientation="Horizontal" FlowDirection="RightToLeft"/>
+					</ItemsPanelTemplate>
+				</ItemsControl.ItemsPanel>
+			</ItemsControl>
+		</DataTemplate>
+
+		<!-- ============================================================ -->
+		<!-- Queued upgrades (research icons)                             -->
+		<!-- ============================================================ -->
+		<DataTemplate x:Key="PlayerUiUpgradesQueued">
+			<ItemsControl ItemsSource="{Binding [upgradesQueued]}" Margin="-2,0,-2,0">
+				<ItemsControl.ItemsPanel>
+					<ItemsPanelTemplate>
+						<DockPanel/>
+					</ItemsPanelTemplate>
+				</ItemsControl.ItemsPanel>
+				<ItemsControl.ItemContainerStyle>
+					<Style TargetType="ContentPresenter">
+						<Setter Property="DockPanel.Dock" Value="Left"/>
+					</Style>
+				</ItemsControl.ItemContainerStyle>
+				<ItemsControl.ItemTemplate>
+					<DataTemplate>
+						<Grid Margin="2,2,2,0">
+							<Rectangle Width="{StaticResource HUDBuildQueueIconSize}"
+									Height="{StaticResource HUDBuildQueueIconSize}"
+									Fill="{StaticResource ResearchButtonBgBrush}" />
+							<Rectangle Width="{StaticResource HUDBuildQueueIconSize}"
+									Height="{StaticResource HUDBuildQueueIconSize}"
+									Fill="{StaticResource ResearchLightButtonBgHighlightBrush}" />
+							<Image Width="{StaticResource HUDBuildQueueIconSize}"
+									Height="{StaticResource HUDBuildQueueIconSize}"
+									Source="{Binding [icon]}"/>
+						</Grid>
+					</DataTemplate>
+				</ItemsControl.ItemTemplate>
+			</ItemsControl>
+		</DataTemplate>
+
+		<!-- ============================================================ -->
+		<!-- Age-up progress (compact, for inline row display)           -->
+		<!-- ============================================================ -->
+		<DataTemplate x:Key="PlayerUiAgeUp">
+			<Grid Visibility="{Binding [isUpping], Converter={StaticResource BoolToVis}}"
+					Margin="4,2,4,2">
+				<StackPanel Orientation="Horizontal">
+					<Image Width="20" Height="20"
+							Source="{Binding [upIcon]}"/>
+					<ProgressBar Height="6" Width="80" Margin="4,0,0,0"
+							HorizontalAlignment="Left"
+							Template="{StaticResource ConstructionProgressBar}"
+							Value="{Binding [ageUpProgress]}" />
+				</StackPanel>
+			</Grid>
+		</DataTemplate>
+
+		<!-- ============================================================ -->
+		<!-- Team player-name panel (vertical list hugging center)        -->
+		<!-- Left side: civ + name + age icon in 260px block              -->
+		<!-- Right side: mirrors via IsRightSide DataTrigger              -->
+		<!-- ============================================================ -->
+		<DataTemplate x:Key="PlayerUiTeamNames">
+			<Grid>
+				<Rectangle Fill="#1A1E2D"/>
+				<Border BorderThickness="2,0,2,2" BorderBrush="#3e5369">
+					<ItemsControl ItemsSource="{Binding}" AlternationCount="2">
+						<ItemsControl.ItemTemplate>
+							<DataTemplate>
+										<Grid Height="34" Margin="{Binding [rankOffsetMargin]}">
+											<!-- Rank highlight fill is SCAR-driven (alpha-decay by rank change severity). -->
+											<Rectangle Name="RankChangeHighlight" Fill="{Binding [rankHighlightFill]}" Visibility="Visible"/>
+									<Grid Name="NameContent" Width="260">
+										<Image Name="PlayerUiCivFlag" Height="26" Margin="5,0,5,0"
+												VerticalAlignment="Center" HorizontalAlignment="Left"
+												Source="{Binding [civIcon]}"/>
+										<Grid Name="PlayerUiNameBlock" Margin="20,0,0,0">
+											<TextBlock Name="PlayerUiPlayerName"
+													VerticalAlignment="Center" TextAlignment="Center"
+													Style="{StaticResource PlayerUiPrimaryText}"
+													Foreground="{Binding [color]}"
+													Text="{Binding [name]}"/>
+											<!-- Eliminated strikethrough -->
+											<Rectangle Effect="{StaticResource PlayerUiDropShadow}"
+													Height="1.2"
+													VerticalAlignment="Center"
+													Fill="{Binding [elimStrikethroughFill]}"
+													Visibility="{Binding [showEliminationStrikethrough], Converter={StaticResource BoolToVis}}"/>
+										</Grid>
+										<Grid Name="PlayerUiAgeIcon" Height="30" Width="41" Margin="2,0,2,0"
+												VerticalAlignment="Center" HorizontalAlignment="Right">
+											<Image Height="30"
+													VerticalAlignment="Center" HorizontalAlignment="Center"
+													Source="{Binding [ageIcon]}"/>
+										</Grid>
+									</Grid>
+									<!-- Eliminated: dark overlay -->
+											<Rectangle Name="EliminatedNameOverlay" Fill="{Binding [elimOverlayNameFill]}" Visibility="Collapsed"/>
+									<Rectangle Name="EliminatedNameGlow"
+													Fill="{Binding [elimGlowFill]}"
+											IsHitTestVisible="False" Visibility="Collapsed"/>
+									<Rectangle Name="NameRowDimOverlay" Fill="{Binding [rowDimFill]}" IsHitTestVisible="False"/>
+								</Grid>
+								<DataTemplate.Triggers>
+									<DataTrigger Binding="{Binding [IsRightSide]}" Value="true">
+										<Setter TargetName="PlayerUiAgeIcon" Property="HorizontalAlignment" Value="Left"/>
+										<Setter TargetName="PlayerUiCivFlag" Property="HorizontalAlignment" Value="Right"/>
+										<Setter TargetName="PlayerUiNameBlock" Property="Margin" Value="0,0,20,0"/>
+									</DataTrigger>
+									<DataTrigger Binding="{Binding [showEliminationPresentation]}" Value="true">
+										<Setter TargetName="EliminatedNameOverlay" Property="Visibility" Value="Visible"/>
+										<Setter TargetName="EliminatedNameGlow" Property="Visibility" Value="Visible"/>
+									</DataTrigger>
+
+								</DataTemplate.Triggers>
+							</DataTemplate>
+						</ItemsControl.ItemTemplate>
+					</ItemsControl>
+				</Border>
+			</Grid>
+		</DataTemplate>
+
+		<!-- ============================================================ -->
+		<!-- Team stats rows: kill score + pop + reward (reward last)     -->
+		<!-- Replaces resources/pop/military for Onslaught gamemode       -->
+		<!-- Right side mirrors column order via IsRightSide DataTrigger  -->
+		<!-- ============================================================ -->
+		<DataTemplate x:Key="PlayerUiTeamResources">
+			<Grid>
+				<Rectangle Fill="#1A1E2D"/>
+				<Border BorderThickness="2,0,2,2" BorderBrush="#3e5369">
+					<ItemsControl ItemsSource="{Binding}" AlternationCount="2">
+						<ItemsControl.ItemTemplate>
+							<DataTemplate>
+										<Grid Height="34" Margin="{Binding [rankOffsetMargin]}">
+									<Grid.ColumnDefinitions>
+										<ColumnDefinition Width="Auto"/>
+										<ColumnDefinition Width="Auto"/>
+										<ColumnDefinition Width="Auto"/>
+									</Grid.ColumnDefinitions>
+
+									<!-- Kill score (adjacent to reward) -->
+									<Grid Name="KillScoreGrid" Grid.Column="1" Width="100">
+										<Grid.ColumnDefinitions>
+											<ColumnDefinition Width="Auto" />
+											<ColumnDefinition Width="*" />
+											<ColumnDefinition Width="Auto" />
+										</Grid.ColumnDefinitions>
+										<!-- Rank prediction arrows: vertically stacked (1x primary + 2x/3x shuffle-imminent) -->
+										<StackPanel Orientation="Vertical" Grid.Column="0" Width="12" VerticalAlignment="Center" Margin="2,0,2,0">
+											<!-- Primary direction arrow (1x): pulses at update start, team-synchronized -->
+											<Viewbox Name="RankPredictionUpArrow1Vb" Width="10" Height="8" Visibility="Collapsed">
+												<Path Data="M0,6 L4,0 L8,6 Z" Fill="{Binding [rankPredictionUpGlowFill]}"/>
+											</Viewbox>
+											<Viewbox Name="RankPredictionDownArrow1Vb" Width="10" Height="8" Visibility="Collapsed">
+												<Path Data="M0,0 L4,6 L8,0 Z" Fill="{Binding [rankPredictionDownGlowFill]}"/>
+											</Viewbox>
+											<Viewbox Name="RankPredictionContestedVb" Width="10" Height="8" Visibility="Collapsed">
+												<Path Data="M0,3 L4,0 L8,3 Z M0,5 L4,8 L8,5 Z" Fill="{Binding [rankPredictionContestedGlowFill]}"/>
+											</Viewbox>
+											<!-- Shuffle-imminent arrows (2x/3x): smaller, faster independent pulse -->
+											<Viewbox Name="RankPredictionUpArrow2Vb" Width="7" Height="6" Visibility="Collapsed"
+												Margin="0,1,0,0">
+												<Path Data="M0,6 L4,0 L8,6 Z" Fill="{Binding [rankPredictionShuffleUpGlowFill]}"/>
+											</Viewbox>
+											<Viewbox Name="RankPredictionDownArrow2Vb" Width="7" Height="6" Visibility="Collapsed"
+												Margin="0,1,0,0">
+												<Path Data="M0,0 L4,6 L8,0 Z" Fill="{Binding [rankPredictionShuffleDownGlowFill]}"/>
+											</Viewbox>
+											<Viewbox Name="RankPredictionUpArrow3Vb" Width="7" Height="6" Visibility="Collapsed"
+												Margin="0,1,0,0">
+												<Path Data="M0,6 L4,0 L8,6 Z" Fill="{Binding [rankPredictionShuffleUpGlowFill]}"/>
+											</Viewbox>
+											<Viewbox Name="RankPredictionDownArrow3Vb" Width="7" Height="6" Visibility="Collapsed"
+												Margin="0,1,0,0">
+												<Path Data="M0,0 L4,6 L8,0 Z" Fill="{Binding [rankPredictionShuffleDownGlowFill]}"/>
+											</Viewbox>
+										</StackPanel>
+										    <TextBlock Name="KillScoreText" Grid.Column="1"
+											    VerticalAlignment="Center"
+											    TextAlignment="Center"
+											    Style="{StaticResource PlayerUiPrimaryText}"
+											    FontSize="{Binding [killScorePulseFontSize]}"
+											    Foreground="{Binding [killScoreColor]}"
+											    Text="{Binding [killScore], Converter={StaticResource CastToIntOperator}}"/>
+										<Image Grid.Column="2" Width="24" Height="24"
+												VerticalAlignment="Center" Margin="4,0,4,0"
+												Source="pack://application:,,,/WPFGUI;component/icons/races/common/victory_conditions/victory_condition_conquest.png"/>
+									</Grid>
+
+									<!-- Population: ObserverUI military-style entry (number + icon) -->
+										<Grid Name="PopulationGrid" Grid.Column="0" Width="112">
+										<Grid.ColumnDefinitions>
+											<ColumnDefinition Width="*" />
+											<ColumnDefinition Width="Auto" />
+										</Grid.ColumnDefinitions>
+										<TextBlock Grid.Column="0"
+												VerticalAlignment="Center"
+												TextAlignment="Right"
+												Style="{StaticResource PlayerUiPrimaryText}"
+												Text="{Binding [populationVsMaximumPopulation]}"/>
+										<Image Grid.Column="1" Width="24" Height="24"
+												VerticalAlignment="Center" Margin="4,0,4,0"
+												Source="pack://application:,,,/WPFGUI;component/icons/resources/resource_popcap.png"/>
+									</Grid>
+
+									<!-- Reward title + next-reward icon (max 1) + milestone star -->
+									<StackPanel Name="RewardGrid" Grid.Column="2" Orientation="Horizontal" Margin="4,0,4,0" VerticalAlignment="Center">
+										<!-- Reward milestone star (brief flash on reward earned) -->
+										<Viewbox Width="14" Height="14" Margin="0,0,3,0" VerticalAlignment="Center">
+											<Path Name="RewardStar"
+												Data="M12,2 L14.9,8.6 L22,9.2 L16.5,14 L18.2,21 L12,17.3 L5.8,21 L7.5,14 L2,9.2 L9.1,8.6 Z"
+												Fill="#FFFFD700" Visibility="Collapsed">
+												<Path.Effect>
+													<DropShadowEffect Color="#FFD700" BlurRadius="4" ShadowDepth="0"/>
+												</Path.Effect>
+											</Path>
+										</Viewbox>
+										<TextBlock Text="{Binding [rewardNextTitle]}"
+												Style="{StaticResource PlayerUiSecondaryText}"
+												FontSize="10" Foreground="#CCCCCC"
+												TextTrimming="CharacterEllipsis" Width="118"/>
+										<Image Width="28" Height="28" Margin="4,0,0,0"
+												VerticalAlignment="Center"
+												Source="{Binding [rewardNextIcon]}"/>
+									</StackPanel>
+
+									<!-- Eliminated final row: same slot order as alive: Score(col0=112) > Status(col1=100) > Icon(col2=*) -->
+									<Grid Name="EliminatedFinalRow" Grid.ColumnSpan="3" Margin="{Binding [elimRevealMargin]}" Visibility="Collapsed">
+										<Grid.ColumnDefinitions>
+											<ColumnDefinition Width="112"/>
+											<ColumnDefinition Width="100"/>
+											<ColumnDefinition Width="*"/>
+										</Grid.ColumnDefinitions>
+										<!-- Score: col0 = same slot as Population, identical 2-col layout (number + icon) -->
+										<Grid Name="EliminFinalScore" Grid.Column="0" Width="112">
+											<Grid.ColumnDefinitions>
+												<ColumnDefinition Width="*"/>
+												<ColumnDefinition Width="Auto"/>
+											</Grid.ColumnDefinitions>
+											<TextBlock Grid.Column="0"
+													Text="{Binding [killScore], Converter={StaticResource CastToIntOperator}}"
+													Style="{StaticResource PlayerUiPrimaryText}"
+													Foreground="{Binding [elimScoreForeground]}"
+													TextAlignment="Right"
+													VerticalAlignment="Center"/>
+											<Image Grid.Column="1" Width="24" Height="24" Margin="4,0,4,0" Opacity="0.4"
+													VerticalAlignment="Center"
+													Source="pack://application:,,,/WPFGUI;component/icons/races/common/victory_conditions/victory_condition_conquest.png"/>
+										</Grid>
+										<!-- Status label: col1 = same slot as KillScore -->
+										<Grid Name="EliminFinalStatusHost" Grid.Column="1" Width="100">
+											<TextBlock Name="EliminFinalStatusPlaceholder"
+													Text=" "
+													FontSize="13" FontWeight="Bold"
+													Foreground="#FF888888"
+													Effect="{StaticResource PlayerUiDropShadow}"
+													HorizontalAlignment="Center" VerticalAlignment="Center"
+													Visibility="Collapsed"/>
+											<TextBlock Name="EliminFinalStatus"
+													Text="{Binding [eliminationLabel]}"
+													FontSize="13" FontWeight="Bold"
+													Foreground="{Binding [elimStatusForeground]}"
+													Effect="{StaticResource PlayerUiDropShadow}"
+													HorizontalAlignment="Center" VerticalAlignment="Center"/>
+										</Grid>
+										<!-- State icon: col2 = same slot as Reward, centered in remaining space -->
+										<Grid Name="EliminFinalIcon" Grid.Column="2" HorizontalAlignment="Center" VerticalAlignment="Center">
+											<Viewbox Name="ElimStatIconSkull" Width="18" Height="18" Visibility="Collapsed">
+												<Path Data="M10,1 C5,1 2,4 2,8 C2,11 4,13 6,14 L6,18 L8,18 L8,15 L12,15 L12,18 L14,18 L14,14 C16,13 18,11 18,8 C18,4 15,1 10,1 Z M7,8 A1,1 0 1 0 7,7.99 Z M13,8 A1,1 0 1 0 13,7.99 Z"
+													Fill="#FFDD3333"/>
+											</Viewbox>
+											<Viewbox Name="ElimStatIconFlag" Width="18" Height="18" Visibility="Collapsed">
+												<Path Data="M4,1 L6,1 L6,7 L16,4 L16,11 L6,14 L6,19 L4,19 Z"
+													Fill="#FFDDAA22"/>
+											</Viewbox>
+											<Viewbox Name="ElimStatIconDisconnect" Width="18" Height="18" Visibility="Collapsed">
+												<Path Data="M3,10 L7,6 L10,9 L13,6 L17,10 L13,14 L10,11 L7,14 Z M9,5 L11,5 L11,3 L9,3 Z M9,17 L11,17 L11,15 L9,15 Z"
+													Fill="#FF6699BB"/>
+											</Viewbox>
+										</Grid>
+									</Grid>
+									<Rectangle Name="EliminatedStatsOverlay" Fill="{Binding [elimOverlayStatsFill]}"
+											Grid.ColumnSpan="3" Visibility="Collapsed"/>
+									<Rectangle Name="EliminatedStatsGlow"
+											Fill="{Binding [elimGlowFill]}"
+											Grid.ColumnSpan="3" IsHitTestVisible="False" Visibility="Collapsed"/>
+									<Rectangle Name="StatsRowDimOverlay" Fill="{Binding [rowDimFill]}" Grid.ColumnSpan="3" IsHitTestVisible="False"/>
+								</Grid>
+								<DataTemplate.Triggers>
+									<DataTrigger Binding="{Binding [showEliminationPresentation]}" Value="true">
+										<Setter TargetName="EliminatedStatsOverlay" Property="Visibility" Value="Visible"/>
+										<Setter TargetName="EliminatedStatsGlow" Property="Visibility" Value="Visible"/>
+										<Setter TargetName="EliminatedFinalRow" Property="Visibility" Value="Visible"/>
+									</DataTrigger>
+									<!-- Phase 3A: alive grids hidden after reveal completes (crossfade behind overlay) -->
+									<DataTrigger Binding="{Binding [hideAliveStats]}" Value="true">
+										<Setter TargetName="PopulationGrid" Property="Visibility" Value="Hidden"/>
+										<Setter TargetName="RewardGrid" Property="Visibility" Value="Hidden"/>
+										<Setter TargetName="KillScoreGrid" Property="Visibility" Value="Hidden"/>
+									</DataTrigger>
+									<DataTrigger Binding="{Binding [showElimIconEliminated]}" Value="true">
+										<Setter TargetName="ElimStatIconSkull" Property="Visibility" Value="Visible"/>
+									</DataTrigger>
+									<DataTrigger Binding="{Binding [showElimIconSurrender]}" Value="true">
+										<Setter TargetName="ElimStatIconFlag" Property="Visibility" Value="Visible"/>
+									</DataTrigger>
+									<DataTrigger Binding="{Binding [showElimIconDisconnect]}" Value="true">
+										<Setter TargetName="ElimStatIconDisconnect" Property="Visibility" Value="Visible"/>
+									</DataTrigger>
+									<!-- Left side ordering: Reward < Score < Population and Icon < Status < Score -->
+									<DataTrigger Binding="{Binding [IsRightSide]}" Value="false">
+										<Setter TargetName="RewardGrid" Property="Grid.Column" Value="0"/>
+										<Setter TargetName="KillScoreGrid" Property="Grid.Column" Value="1"/>
+										<Setter TargetName="PopulationGrid" Property="Grid.Column" Value="2"/>
+										<Setter TargetName="EliminFinalIcon" Property="Grid.Column" Value="0"/>
+										<Setter TargetName="EliminFinalStatusHost" Property="Grid.Column" Value="1"/>
+										<Setter TargetName="EliminFinalScore" Property="Grid.Column" Value="2"/>
+									</DataTrigger>
+									<DataTrigger Binding="{Binding [eliminationLabel]}" Value="">
+										<Setter TargetName="EliminFinalStatus" Property="Visibility" Value="Collapsed"/>
+										<Setter TargetName="EliminFinalStatusPlaceholder" Property="Visibility" Value="Visible"/>
+									</DataTrigger>
+									<DataTrigger Binding="{Binding [eliminationLabel]}" Value="{x:Null}">
+										<Setter TargetName="EliminFinalStatus" Property="Visibility" Value="Collapsed"/>
+										<Setter TargetName="EliminFinalStatusPlaceholder" Property="Visibility" Value="Visible"/>
+									</DataTrigger>
+										<!-- Rank prediction: up arrow 1 (always shown when up=true) -->
+											<DataTrigger Binding="{Binding [rankPredictionUp]}" Value="true">
+												<Setter TargetName="RankPredictionUpArrow1Vb" Property="Visibility" Value="Visible"/>
+											</DataTrigger>
+											<DataTrigger Binding="{Binding [rankPredictionUp]}" Value="false">
+												<Setter TargetName="RankPredictionUpArrow1Vb" Property="Visibility" Value="Collapsed"/>
+											</DataTrigger>
+										<!-- Rank prediction: up arrow 2 (delta >= 2) -->
+											<DataTrigger Binding="{Binding [rankPredictionUp2]}" Value="true">
+												<Setter TargetName="RankPredictionUpArrow2Vb" Property="Visibility" Value="Visible"/>
+											</DataTrigger>
+											<DataTrigger Binding="{Binding [rankPredictionUp2]}" Value="false">
+												<Setter TargetName="RankPredictionUpArrow2Vb" Property="Visibility" Value="Collapsed"/>
+											</DataTrigger>
+										<!-- Rank prediction: up arrow 3 (delta >= 3) -->
+											<DataTrigger Binding="{Binding [rankPredictionUp3]}" Value="true">
+												<Setter TargetName="RankPredictionUpArrow3Vb" Property="Visibility" Value="Visible"/>
+											</DataTrigger>
+											<DataTrigger Binding="{Binding [rankPredictionUp3]}" Value="false">
+												<Setter TargetName="RankPredictionUpArrow3Vb" Property="Visibility" Value="Collapsed"/>
+											</DataTrigger>
+										<!-- Rank prediction: down arrow 1 (always shown when down=true) -->
+											<DataTrigger Binding="{Binding [rankPredictionDown]}" Value="true">
+												<Setter TargetName="RankPredictionDownArrow1Vb" Property="Visibility" Value="Visible"/>
+											</DataTrigger>
+											<DataTrigger Binding="{Binding [rankPredictionDown]}" Value="false">
+												<Setter TargetName="RankPredictionDownArrow1Vb" Property="Visibility" Value="Collapsed"/>
+											</DataTrigger>
+										<!-- Rank prediction: down arrow 2 (delta >= 2) -->
+											<DataTrigger Binding="{Binding [rankPredictionDown2]}" Value="true">
+												<Setter TargetName="RankPredictionDownArrow2Vb" Property="Visibility" Value="Visible"/>
+											</DataTrigger>
+											<DataTrigger Binding="{Binding [rankPredictionDown2]}" Value="false">
+												<Setter TargetName="RankPredictionDownArrow2Vb" Property="Visibility" Value="Collapsed"/>
+											</DataTrigger>
+										<!-- Rank prediction: down arrow 3 (delta >= 3) -->
+											<DataTrigger Binding="{Binding [rankPredictionDown3]}" Value="true">
+												<Setter TargetName="RankPredictionDownArrow3Vb" Property="Visibility" Value="Visible"/>
+											</DataTrigger>
+											<DataTrigger Binding="{Binding [rankPredictionDown3]}" Value="false">
+												<Setter TargetName="RankPredictionDownArrow3Vb" Property="Visibility" Value="Collapsed"/>
+											</DataTrigger>
+										<!-- Rank prediction: contested double-chevron (overrides arrow 1s) -->
+											<DataTrigger Binding="{Binding [rankPredictionContested]}" Value="true">
+												<Setter TargetName="RankPredictionContestedVb" Property="Visibility" Value="Visible"/>
+												<Setter TargetName="RankPredictionUpArrow1Vb" Property="Visibility" Value="Collapsed"/>
+												<Setter TargetName="RankPredictionDownArrow1Vb" Property="Visibility" Value="Collapsed"/>
+											</DataTrigger>
+											<DataTrigger Binding="{Binding [rankPredictionContested]}" Value="false">
+												<Setter TargetName="RankPredictionContestedVb" Property="Visibility" Value="Collapsed"/>
+											</DataTrigger>
+											<!-- Reward milestone star flash -->
+											<DataTrigger Binding="{Binding [rewardEarnedFlash]}" Value="true">
+												<Setter TargetName="RewardStar" Property="Visibility" Value="Visible"/>
+											</DataTrigger>
+								</DataTemplate.Triggers>
+							</DataTemplate>
+						</ItemsControl.ItemTemplate>
+					</ItemsControl>
+				</Border>
+			</Grid>
+		</DataTemplate>
+
+		<!-- ============================================================ -->
+		<!-- Center Panel: Onslaught — kill scores, military bars,        -->
+		<!-- limits display, reward progression strip                     -->
+		<!-- Static 280px wide — no Width via DataContext (XAML safety)   -->
+		<!-- Multi-section layout; proportional bars use MultiBinding     -->
+		<!-- ============================================================ -->
+		<DataTemplate x:Key="PlayerUiCenterPanel">
+			<Grid>
+				<Grid HorizontalAlignment="Center">
+					<Grid Width="280" ClipToBounds="True">
+						<Border BorderThickness="2" BorderBrush="#3e5369"/>
+						<Grid.Background>
+							<ImageBrush ImageSource="pack://application:,,,/WPFGUI;component/icons/caster_mode/balance_panel/background.png"
+									TileMode="Tile"
+									Viewport="0,0,128,138" ViewportUnits="Absolute" />
+						</Grid.Background>
+						<StackPanel>
+							<!-- ========== KILL SCORE COMPARISON ========== -->
+							<StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,4,0,0">
+							    <TextBlock Width="46"
+								    Text="{Binding [TeamSummaryLeft][KillScore], Converter={StaticResource CastToIntOperator}}"
+								    TextAlignment="Center" VerticalAlignment="Bottom"
+								    Style="{StaticResource PlayerUiPrimaryText}"/>
+							    <Image Margin="6,0,6,0" Height="42"
+								    Source="pack://application:,,,/WPFGUI;component/icons/races/common/victory_conditions/victory_condition_conquest.png"/>
+							    <TextBlock Width="46"
+								    Text="{Binding [TeamSummaryRight][KillScore], Converter={StaticResource CastToIntOperator}}"
+								    TextAlignment="Center" VerticalAlignment="Bottom"
+								    Style="{StaticResource PlayerUiPrimaryText}"/>
+							</StackPanel>
+
+							<!-- Kill score proportional bars -->
+							<StackPanel Width="232">
+								<Grid>
+									<Border Height="10" HorizontalAlignment="Left"
+											BorderBrush="{StaticResource BalanceBorderBrush}" BorderThickness="1">
+										<Border.Width>
+											<MultiBinding Converter="{StaticResource MultiDivideOperator}">
+												<Binding Path="[TeamSummaryLeft][KillScore]"
+														Converter="{StaticResource MultiplyOperator}" ConverterParameter="233" />
+												<Binding Path="[AllPlayersSummary][CombinedKillScore]" />
+											</MultiBinding>
+										</Border.Width>
+										<Grid>
+											<Rectangle Name="CenterLeftKillPulseFlash" Fill="#28FFD700" Visibility="Collapsed"/>
+											<Rectangle Fill="{Binding [teamLeft][0][color]}" />
+											<Rectangle Fill="{DynamicResource CasterTransparentToWhiteOverlayBrush}" RenderTransformOrigin=".5,.5">
+												<Rectangle.RenderTransform>
+													<ScaleTransform ScaleX="-1" />
+												</Rectangle.RenderTransform>
+											</Rectangle>
+										</Grid>
+									</Border>
+									<Border Height="10" HorizontalAlignment="Right"
+											BorderBrush="{StaticResource BalanceBorderBrush}" BorderThickness="1">
+										<Border.Width>
+											<MultiBinding Converter="{StaticResource MultiDivideOperator}">
+												<Binding Path="[TeamSummaryRight][KillScore]"
+														Converter="{StaticResource MultiplyOperator}" ConverterParameter="233" />
+												<Binding Path="[AllPlayersSummary][CombinedKillScore]" />
+											</MultiBinding>
+										</Border.Width>
+										<Grid>
+											<Rectangle Name="CenterRightKillPulseFlash" Fill="#28FFD700" Visibility="Collapsed"/>
+											<Rectangle Fill="{Binding [teamRight][0][color]}" />
+											<Rectangle Fill="{DynamicResource CasterTransparentToWhiteOverlayBrush}" />
+										</Grid>
+									</Border>
+									<Path HorizontalAlignment="Center" VerticalAlignment="Top"
+											Data="M3,8 L6,0 L0,0 Z" Fill="{StaticResource BalanceTickBrush}" />
+									<Path HorizontalAlignment="Left" Margin="77,0,0,0" VerticalAlignment="Top"
+											Data="M0,5 L-3,0 L3,0 Z" Fill="{StaticResource BalanceTickBrush}" />
+									<Path HorizontalAlignment="Left" Margin="155,0,0,0" VerticalAlignment="Top"
+											Data="M0,5 L-3,0 L3,0 Z" Fill="{StaticResource BalanceTickBrush}" />
+								</Grid>
+
+<!-- Reward progress bar (replaces military population bars) -->
+									<Grid Margin="0,4,0,0">
+										<Rectangle Height="16" Fill="#1A1E2D"/>
+										<Border Height="16" HorizontalAlignment="Left"
+												BorderBrush="{Binding [rewardBarBorderColor]}" BorderThickness="1">
+											<Border.Width>
+												<MultiBinding Converter="{StaticResource MultiDivideOperator}">
+													<Binding Path="[rewardProgress_current]"
+															Converter="{StaticResource MultiplyOperator}" ConverterParameter="232"/>
+													<Binding Path="[rewardProgress_max]"/>
+												</MultiBinding>
+											</Border.Width>
+											<Grid>
+												<Rectangle Fill="{Binding [rewardBarFillColor]}"/>
+												<Rectangle>
+													<Rectangle.Fill>
+														<LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+															<GradientStop Offset="0" Color="#33000000"/>
+															<GradientStop Offset="0.55" Color="#00000000"/>
+															<GradientStop Offset="1" Color="#22000000"/>
+														</LinearGradientBrush>
+													</Rectangle.Fill>
+												</Rectangle>
+												<Rectangle Fill="{DynamicResource CasterTransparentToWhiteOverlayBrush}"/>
+											</Grid>
+										</Border>
+										<Path HorizontalAlignment="Left" Margin="58,0,0,0" VerticalAlignment="Top"
+												Data="M0,4 L-2,0 L2,0 Z" Fill="{StaticResource BalanceTickBrush}" />
+										<Path HorizontalAlignment="Left" Margin="116,0,0,0" VerticalAlignment="Top"
+												Data="M0,4 L-2,0 L2,0 Z" Fill="{StaticResource BalanceTickBrush}" />
+										<Path HorizontalAlignment="Left" Margin="174,0,0,0" VerticalAlignment="Top"
+												Data="M0,4 L-2,0 L2,0 Z" Fill="{StaticResource BalanceTickBrush}" />
+										<TextBlock Text="Next Reward" HorizontalAlignment="Left"
+												FontSize="9" Foreground="{Binding [rewardProgressLabelColor]}" VerticalAlignment="Center"
+												Margin="4,0,0,0"/>
+										<TextBlock Text="{Binding [rewardProgressText]}" HorizontalAlignment="Right"
+												FontSize="9" Foreground="#FFD700" VerticalAlignment="Center"
+												Margin="0,0,4,0"/>
+								</Grid>
+							</StackPanel>
+
+							<!-- ========== NEXT REWARD DISPLAY (replaces team pop) ========== -->
+							<Rectangle Fill="{Binding [rewardSeparatorColor]}" Height="1" Margin="8,2,8,2"/>
+
+							<!-- Reward title centered above icons -->
+							<TextBlock Text="{Binding [rewardNextTitle]}"
+									HorizontalAlignment="Center"
+									Style="{StaticResource PlayerUiSecondaryText}" FontSize="11" FontStyle="Normal"
+									Foreground="{Binding [rewardNextTitleColor]}" TextTrimming="CharacterEllipsis"
+									Margin="8,0,8,1"/>
+
+<!-- Reward icons (centered to full panel, fixed-width anchor for stability) -->
+								<Grid Width="150" HorizontalAlignment="Center" Margin="{Binding [rewardStripOffsetMargin]}">
+								<ItemsControl ItemsSource="{Binding [rewardIcons]}"
+											HorizontalAlignment="Center" VerticalAlignment="Center">
+									<ItemsControl.ItemsPanel>
+										<ItemsPanelTemplate>
+											<StackPanel Orientation="Horizontal"/>
+										</ItemsPanelTemplate>
+									</ItemsControl.ItemsPanel>
+									<ItemsControl.ItemTemplate>
+										<DataTemplate>
+											<Grid Margin="{Binding [offsetXMargin]}">
+											<StackPanel Margin="3,0,3,0">
+												<Grid>
+													<Rectangle Width="30" Height="30"
+															Fill="{StaticResource MilitaryButtonBgBrush}"/>
+													<Image Width="30" Height="30"
+															Source="{Binding [icon]}"/>
+													<Rectangle Width="30" Height="30"
+															Stroke="{Binding [borderColor]}" StrokeThickness="2"
+															Fill="Transparent"/>
+													<Rectangle Width="30" Height="30"
+															Fill="{Binding [glowFill]}"
+															IsHitTestVisible="False"/>
+												</Grid>
+												<TextBlock Text="{Binding [thresholdText]}" TextAlignment="Center"
+														FontSize="9" Foreground="#999999"/>
+											</StackPanel>
+											</Grid>
+										</DataTemplate>
+									</ItemsControl.ItemTemplate>
+								</ItemsControl>
+								</Grid>
+
+							<!-- Elapsed game time -->
+							<TextBlock Width="140"
+									Text="{Binding [elapsedTimeDisplay]}"
+									TextAlignment="Center" VerticalAlignment="Top"
+									Style="{StaticResource PlayerUiTimeText}"
+									Margin="0,-2,0,2"/>
+						</StackPanel>
+					</Grid>
+				</Grid>
+			</Grid>
+			<DataTemplate.Triggers>
+				<DataTrigger Binding="{Binding [TeamSummaryLeft][KillScorePulseActive]}" Value="true">
+					<Setter TargetName="CenterLeftKillPulseFlash" Property="Visibility" Value="Visible"/>
+				</DataTrigger>
+				<DataTrigger Binding="{Binding [TeamSummaryRight][KillScorePulseActive]}" Value="true">
+					<Setter TargetName="CenterRightKillPulseFlash" Property="Visibility" Value="Visible"/>
+				</DataTrigger>
+			</DataTemplate.Triggers>
+		</DataTemplate>
+
+	</Grid.Resources>
+
+	<!-- ================================================================ -->
+	<!-- MAIN LAYOUT: L/C/R grid anchored to top                          -->
+	<!-- Left = allies (names + resources), Center = team comparison,     -->
+	<!-- Right = enemies. Unit strip below, centered.                     -->
+	<!-- ================================================================ -->
+	<Grid VerticalAlignment="Top">
+		<Grid.ColumnDefinitions>
+			<ColumnDefinition Width="*" />
+			<ColumnDefinition Width="Auto" />
+			<ColumnDefinition Width="*" />
+		</Grid.ColumnDefinitions>
+		<Grid.RowDefinitions>
+			<RowDefinition Height="Auto" />
+			<RowDefinition Height="8" />
+			<RowDefinition Height="Auto" />
+		</Grid.RowDefinitions>
+
+		<!-- ============================================================ -->
+		<!-- LEFT: Allied team — names panel + resources panel             -->
+		<!-- Names panel right-aligned (hugging center panel)             -->
+		<!-- Resources panel further left (offset by name panel width)    -->
+		<!-- ============================================================ -->
+		<Grid Grid.Column="0">
+			<!-- Player name/flag panel (right-aligned, touching center) -->
+			<ContentControl HorizontalAlignment="Right" VerticalAlignment="Top"
+					Margin="0,0,-2,0"
+					ContentTemplate="{StaticResource PlayerUiTeamNames}"
+					Content="{Binding [teamLeft]}" />
+
+			<!-- Per-player kill scores (further left, offset by ~260px name panel) -->
+			<Grid Margin="0,0,260,0">
+				<ContentControl HorizontalAlignment="Right" VerticalAlignment="Top"
+						ContentTemplate="{StaticResource PlayerUiTeamResources}"
+						Content="{Binding [teamLeft]}" />
+			</Grid>
+		</Grid>
+
+		<!-- ============================================================ -->
+		<!-- CENTER: Team comparison panel + extensible content area      -->
+		<!-- Fills the gap between teams — sized by content (~280px)      -->
+		<!-- ============================================================ -->
+		<Grid Grid.Column="1">
+			<ContentControl HorizontalAlignment="Center" VerticalAlignment="Top"
+					Margin="0,-2,0,0"
+					ContentTemplate="{StaticResource PlayerUiCenterPanel}"
+					Content="{Binding}" />
+		</Grid>
+
+		<!-- ============================================================ -->
+		<!-- RIGHT: Enemy team — names panel + resources panel             -->
+		<!-- Names panel left-aligned (hugging center panel)              -->
+		<!-- Resources panel further right (offset by name panel width)   -->
+		<!-- ============================================================ -->
+		<Grid Grid.Column="2">
+			<!-- Player name/flag panel (left-aligned, touching center) -->
+			<ContentControl HorizontalAlignment="Left" VerticalAlignment="Top"
+					Margin="-2,0,0,0"
+					ContentTemplate="{StaticResource PlayerUiTeamNames}"
+					Content="{Binding [teamRight]}" />
+
+			<!-- Per-player kill scores (further right, offset by ~260px name panel) -->
+			<Grid Margin="260,0,0,0">
+				<ContentControl HorizontalAlignment="Left" VerticalAlignment="Top"
+						ContentTemplate="{StaticResource PlayerUiTeamResources}"
+						Content="{Binding [teamRight]}" />
+			</Grid>
+		</Grid>
+
+		<!-- ============================================================ -->
+		<!-- ROW 2: Unit composition strip (local player only, centered) -->
+		<!-- ============================================================ -->
+		<Grid Grid.Row="2" Grid.ColumnSpan="3"
+				HorizontalAlignment="Center" Margin="0,0,0,0"
+				Visibility="Collapsed">
+			<Grid.ColumnDefinitions>
+				<ColumnDefinition Width="Auto" />
+				<ColumnDefinition Width="Auto" />
+				<ColumnDefinition Width="Auto" />
+			</Grid.ColumnDefinitions>
+
+			<!-- Civil units (villagers, trade) -->
+			<ContentControl Grid.Column="0"
+					ContentTemplate="{StaticResource PlayerUiUnits}"
+					Content="{Binding [localPlayer][unitsWorkers]}" />
+
+			<!-- Military units -->
+			<ContentControl Grid.Column="1" Margin="4,0,0,0"
+					ContentTemplate="{StaticResource PlayerUiUnits}"
+					Content="{Binding [localPlayer][units]}" />
+
+			<!-- Queued upgrades -->
+			<ContentControl Grid.Column="2" Margin="4,0,0,0"
+					ContentTemplate="{StaticResource PlayerUiUpgradesQueued}"
+					Content="{Binding [localPlayer]}" />
+		</Grid>
+
+	</Grid>
+</Grid>
+]]

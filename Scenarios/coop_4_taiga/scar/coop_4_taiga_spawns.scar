@@ -1,0 +1,663 @@
+-------------------------------------------
+-- Generic Spawn Helpers
+-------------------------------------------
+
+-- Deploy starting squad using composition map lookup
+function _Deploy_Starting_Squad(player, civ, sg_start, role, spawn)
+	local map = (role == "melee") and CIV_MELEE_MAP or CIV_RANGED_MAP
+	local default = (role == "melee") and "start_player_melee" or "start_player_ranged"
+	local key = ResolveCivMapKey(map, civ, default)
+	UnitEntry_DeploySquads(player, sg_start, Unit_Types[key], spawn)
+end
+
+-- Deploy unique unit (Khan, King, Jeanne, or default Monks)
+function _Deploy_Unique_Unit(player, civ, sg_unique, role, spawn)
+	local map = (role == "melee") and UNIQUE_UNIT_MELEE or UNIQUE_UNIT_RANGED
+	local entry = ResolveUniqueUnit(map, civ)
+	local deploy = {numSquads = entry.numSquads, spawn = spawn}
+	if entry.type then deploy.type = entry.type end
+	if entry.sbp then deploy.sbp = entry.sbp end
+	UnitEntry_DeploySquads(player, sg_unique, deploy, spawn)
+end
+
+-- Deploy reinforcements using composition map lookup
+function _Deploy_Reinforcements(player, civ, sg_reinforce, role, spawn)
+	local map = (role == "melee") and REINFORCE_MELEE_MAP or REINFORCE_RANGED_MAP
+	local default = (role == "melee") and "units_player_melee_reinforce" or "units_player_ranged_reinforce"
+	local key = ResolveCivMapKey(map, civ, default)
+	UnitEntry_DeploySquads(player, sg_reinforce, Unit_Types[key], spawn)
+end
+
+-------------------------------------------
+-- Start
+-------------------------------------------
+
+-- Setup allied starter units / Reinforcements
+function Start_Setup_Players()
+	
+	-- Player config: { player id, start sgroup, unique sgroup, reinforcement sgroup, spawn marker, role }
+	local player_configs = {
+		{ id = player1, sg_start = sg_player1_start, sg_unique = sg_player1_unique, sg_reinforce = sg_player1_reinforcements, mkr = mkr_spawn_1, role = "melee", outpost_group = sg_outpost_group_1, outpost_count = "count_checkpoint_side1" },
+		{ id = player2, sg_start = sg_player2_start, sg_unique = sg_player2_unique, sg_reinforce = sg_player2_reinforcements, mkr = mkr_spawn_2, role = "ranged", outpost_group = sg_outpost_group_1, outpost_count = "count_checkpoint_side1" },
+		{ id = player3, sg_start = sg_player3_start, sg_unique = sg_player3_unique, sg_reinforce = sg_player3_reinforcements, mkr = mkr_spawn_3, role = "melee", outpost_group = sg_outpost_group_2, outpost_count = "count_checkpoint_side2" },
+		{ id = player4, sg_start = sg_player4_start, sg_unique = sg_player4_unique, sg_reinforce = sg_player4_reinforcements, mkr = mkr_spawn_4, role = "ranged", outpost_group = sg_outpost_group_2, outpost_count = "count_checkpoint_side2" },
+	}
+	
+	-- Deploy starting squads + unique units for each player
+	for _, p in ipairs(player_configs) do
+		local civ = Player_GetRaceName(p.id)
+		_Deploy_Starting_Squad(p.id, civ, p.sg_start, p.role, p.mkr)
+		_Deploy_Unique_Unit(p.id, civ, p.sg_unique, p.role, p.mkr)
+	end
+	
+	-- Setup Reinforcements_Player rules 
+	if DC.reinforcement_squad_count > 0 then
+		for _, p in ipairs(player_configs) do
+			p.count_start = SGroup_Count(p.sg_start) + SGroup_Count(p.sg_unique)
+			p.precapture_remaining = DC.reinforcement_squad_count
+			p.precapture_index = 1
+			p.thresholds = DC.player_reinforcement_thresholds
+			Rule_AddInterval(Reinforcements_PlayerRule, 5, { player_config = p })
+		end
+	end
+	
+	-- Objective: Regroup / Merge all player units
+	for _, p in ipairs(player_configs) do
+		SGroup_AddGroup(sg_players_all_start, p.sg_start)
+		SGroup_AddGroup(sg_players_all_start, p.sg_unique)
+	end
+end
+-- Setup enemey starting units / Patrols
+function Start_Setup_Enemies()
+	
+	----------------------------------
+	-- Objective: Capture Checkpoint
+	----------------------------------
+	
+	-- Spawn defenders / Ranged
+	UnitEntry_DeploySquads(player6, sg_checkpoint_units_2, Unit_Types.units_ranged_light, mkr_spawn_checkpoint_2)
+	UnitEntry_DeploySquads(player6, sg_checkpoint_units_3, Unit_Types.units_ranged_light, mkr_spawn_checkpoint_3)
+	
+	-- Spawn defenders  (Difficulty: Hard + / Improved unit groups)
+	if AI_Difficulty >= 2 then 
+		UnitEntry_DeploySquads(player6, sg_checkpoint_units_1, Unit_Types.units_camp_hard, mkr_spawn_checkpoint_1)
+		UnitEntry_DeploySquads(player6, sg_checkpoint_units_4, Unit_Types.units_camp_hard, mkr_spawn_checkpoint_4)
+	else
+		UnitEntry_DeploySquads(player6, sg_checkpoint_units_1, Unit_Types.units_camp, mkr_spawn_checkpoint_1)
+		UnitEntry_DeploySquads(player6, sg_checkpoint_units_4, Unit_Types.units_camp, mkr_spawn_checkpoint_4)
+	end
+	
+	-- Set direction & formation
+	Cmd_Ability(sg_checkpoint_units_1, BP_GetAbilityBlueprint("core_formation_line"))
+	Cmd_FormationMove(sg_checkpoint_units_1, mkr_spawn_checkpoint_1, false, false, mkr_direction_temp)
+	Cmd_FormationMove(sg_checkpoint_units_2, mkr_spawn_checkpoint_2, false, false, mkr_direction_temp)
+	Cmd_FormationMove(sg_checkpoint_units_3, mkr_spawn_checkpoint_3, false, false, mkr_direction_temp)
+	
+	-- Objective: Capture Checkpoint  
+	SGroup_AddGroup(sg_checkpoint_group_all, sg_checkpoint_units_1) 
+	SGroup_AddGroup(sg_checkpoint_group_all, sg_checkpoint_units_2)
+	SGroup_AddGroup(sg_checkpoint_group_all, sg_checkpoint_units_3)
+	SGroup_AddGroup(sg_checkpoint_group_all, sg_checkpoint_units_4)
+	
+	-- Count foward groups / Objective: Tower conversion
+	count_checkpoint_all = SGroup_Count(sg_checkpoint_units_1) + SGroup_Count(sg_checkpoint_units_2) + SGroup_Count(sg_checkpoint_units_3)
+	-- Count reserve group / Objective: Attack Raid #2
+	count_checkpoint_reserves = SGroup_Count(sg_checkpoint_units_4)
+	
+	----------------------------------
+	-- Objective: Capture Outposts
+	----------------------------------
+	
+	-- Spawn defenders
+	UnitEntry_DeploySquads(player6, sg_outpost_guards_1, Unit_Types.units_camp, mkr_spawn_outpost_1)
+	UnitEntry_DeploySquads(player6, sg_outpost_guards_2, Unit_Types.units_camp, mkr_spawn_outpost_2)
+	UnitEntry_DeploySquads(player6, sg_outpost_guards_3, Unit_Types.units_camp, mkr_spawn_outpost_3)
+	UnitEntry_DeploySquads(player6, sg_outpost_guards_4, Unit_Types.units_camp, mkr_spawn_outpost_4)
+	-- Set direction
+	Cmd_FormationMove(sg_outpost_guards_1, mkr_spawn_outpost_1, false, false, mkr_spawn_1)
+	Cmd_FormationMove(sg_outpost_guards_2, mkr_spawn_outpost_2, false, false, mkr_spawn_4)
+	Cmd_FormationMove(sg_outpost_guards_3, mkr_spawn_outpost_3, false, false, mkr_spawn_3)
+	Cmd_FormationMove(sg_outpost_guards_4, mkr_spawn_outpost_4, false, false, mkr_spawn_4)
+	
+	-- Spawn defenders / Ranged (Difficulty: Hard +)
+	if AI_Difficulty >= 2 then 
+		-- Spawn defenders
+		UnitEntry_DeploySquads(player6, sg_outpost_guards_rng_1, Unit_Types.units_ranged_light, mkr_spawn_outpost_1_rng)
+		UnitEntry_DeploySquads(player6, sg_outpost_guards_rng_2, Unit_Types.units_ranged_light, mkr_spawn_outpost_2_rng)
+		UnitEntry_DeploySquads(player6, sg_outpost_guards_rng_3, Unit_Types.units_ranged_light, mkr_spawn_outpost_3_rng)
+		UnitEntry_DeploySquads(player6, sg_outpost_guards_rng_4, Unit_Types.units_ranged_light, mkr_spawn_outpost_4_rng)
+		-- Set direction
+		Cmd_FormationMove(sg_outpost_guards_rng_1, mkr_spawn_outpost_1_rng, false, false, mkr_spawn_1)
+		Cmd_FormationMove(sg_outpost_guards_rng_2, mkr_spawn_outpost_2_rng, false, false, mkr_spawn_4)
+		Cmd_FormationMove(sg_outpost_guards_rng_3, mkr_spawn_outpost_3_rng, false, false, mkr_spawn_3)
+		Cmd_FormationMove(sg_outpost_guards_rng_4, mkr_spawn_outpost_4_rng, false, false, mkr_spawn_4)
+		
+		-- Merge defender groups
+		SGroup_AddGroup(sg_outpost_guards_1, sg_outpost_guards_rng_1) -- Group units / Side 1
+		SGroup_AddGroup(sg_outpost_guards_2, sg_outpost_guards_rng_2)
+		SGroup_AddGroup(sg_outpost_guards_3, sg_outpost_guards_rng_3) -- Group units / Side 2
+		SGroup_AddGroup(sg_outpost_guards_4, sg_outpost_guards_rng_4)
+	end
+
+	-- Objective: Capture Outposts  
+	SGroup_AddGroup(sg_outpost_group_1, sg_outpost_guards_1) -- Group #1 units 
+	SGroup_AddGroup(sg_outpost_group_1, sg_outpost_guards_2)
+	SGroup_AddGroup(sg_outpost_group_2, sg_outpost_guards_3) -- Group #2 units 
+	SGroup_AddGroup(sg_outpost_group_2, sg_outpost_guards_4)
+	-- Merge both groups to main
+	SGroup_AddGroup(sg_outpost_group_all, sg_outpost_group_1)
+	SGroup_AddGroup(sg_outpost_group_all, sg_outpost_group_2)
+	-- Get group counts for objective
+	count_checkpoint_side1 = SGroup_Count(sg_outpost_group_1)
+	count_checkpoint_side2 = SGroup_Count(sg_outpost_group_2)
+	
+	----------------------------------
+	-- Objective: Capture Village (N)
+	----------------------------------
+	
+	-- Spawn defenders
+	UnitEntry_DeploySquads(player6, sg_village_north_guards_1, Unit_Types.units_camp, mkr_spawn_village_1)
+	UnitEntry_DeploySquads(player6, sg_village_north_guards_2, Unit_Types.units_camp, mkr_spawn_village_2)
+	UnitEntry_DeploySquads(player6, sg_village_north_guards_3, Unit_Types.units_camp, mkr_spawn_village_3)
+	UnitEntry_DeploySquads(player6, sg_village_north_guards_4, Unit_Types.units_camp, mkr_spawn_village_4)
+	
+	-- Set direction
+	Cmd_FormationMove(sg_village_north_guards_1, mkr_spawn_village_1, false, false, mkr_spawn_outpost_1)
+	Cmd_FormationMove(sg_village_north_guards_2, mkr_spawn_village_2, false, false, mkr_spawn_village_1)
+	Cmd_FormationMove(sg_village_north_guards_3, mkr_spawn_village_3, false, false, mkr_spawn_village_4)
+	Cmd_FormationMove(sg_village_north_guards_4, mkr_spawn_village_4, false, false, mkr_spawn_outpost_4_rng)
+	
+	-- Spawn defenders / Ranged (Difficulty: Intermediate +)
+	if AI_Difficulty >= 1 then 
+		-- Spawn defenders
+		UnitEntry_DeploySquads(player6, sg_village_north_guards_rng_1, Unit_Types.units_ranged_light, mkr_spawn_village_1_rng)
+		UnitEntry_DeploySquads(player6, sg_village_north_guards_rng_2, Unit_Types.units_ranged_light, mkr_spawn_village_2_rng)
+		UnitEntry_DeploySquads(player6, sg_village_north_guards_rng_3, Unit_Types.units_ranged_light, mkr_spawn_village_3_rng)
+		UnitEntry_DeploySquads(player6, sg_village_north_guards_rng_4, Unit_Types.units_ranged_light, mkr_spawn_village_4_rng)
+		
+		-- Set direction
+		Cmd_FormationMove(sg_village_north_guards_rng_1, mkr_spawn_village_1_rng, false, false, mkr_spawn_outpost_1)
+		Cmd_FormationMove(sg_village_north_guards_rng_2, mkr_spawn_village_2_rng, false, false, mkr_spawn_village_2)
+		Cmd_FormationMove(sg_village_north_guards_rng_3, mkr_spawn_village_3_rng, false, false, mkr_spawn_village_4_rng)
+		Cmd_FormationMove(sg_village_north_guards_rng_4, mkr_spawn_village_4_rng, false, false, mkr_spawn_outpost_4_rng)
+		
+		-- Merge defender groups
+		SGroup_AddGroup(sg_village_north_guards_1, sg_village_north_guards_rng_1) 
+		SGroup_AddGroup(sg_village_north_guards_2, sg_village_north_guards_rng_2)
+		SGroup_AddGroup(sg_village_north_guards_3, sg_village_north_guards_rng_3) 
+		SGroup_AddGroup(sg_village_north_guards_4, sg_village_north_guards_rng_4)
+		
+		
+	end
+	
+	-- Merge all Northen Village defender groups
+	SGroup_AddGroup(sg_village_north_group_all, sg_village_north_guards_1) 
+	SGroup_AddGroup(sg_village_north_group_all, sg_village_north_guards_2)
+	SGroup_AddGroup(sg_village_north_group_all, sg_village_north_guards_3) 
+	SGroup_AddGroup(sg_village_north_group_all, sg_village_north_guards_4)
+	
+	----------------------------------
+	-- Static defenders / Patrols
+	----------------------------------
+	
+	-- River Guards
+	UnitEntry_DeploySquads(player6, sg_river_guards_1, Unit_Types.units_river_guards, mkr_spawn_river_1)
+	UnitEntry_DeploySquads(player6, sg_river_guards_2, Unit_Types.units_river_guards, mkr_spawn_river_2)
+	-- Set direction/formation
+	Cmd_Ability(sg_river_guards_1, BP_GetAbilityBlueprint("core_formation_line"))
+	Cmd_Ability(sg_river_guards_2, BP_GetAbilityBlueprint("core_formation_line"))
+	Cmd_FormationMove(sg_river_guards_1, mkr_spawn_river_1, false, false, mkr_wave_1_path_flank)
+	Cmd_FormationMove(sg_river_guards_2, mkr_spawn_river_2, false, false, mkr_wave_2_path_flank)
+	
+	-- Camp Guards
+	if AI_Difficulty >= 2 then
+		UnitEntry_DeploySquads(player6, sg_camp_guards_1, Unit_Types.units_camp, mkr_spawn_camp_1)
+		UnitEntry_DeploySquads(player6, sg_camp_guards_2, Unit_Types.units_camp, mkr_spawn_camp_2)
+	else
+		UnitEntry_DeploySquads(player6, sg_camp_guards_1, Unit_Types.units_camp_easy, mkr_spawn_camp_1)
+		UnitEntry_DeploySquads(player6, sg_camp_guards_2, Unit_Types.units_camp_easy, mkr_spawn_camp_2)
+	end
+	
+	-- Patrols
+	if AI_Difficulty >= 3 then
+		
+		-- Spawn patrol #1 / Starting area 
+		UnitEntry_DeploySquads(player6, sg_middle_patrol_1, Unit_Types.units_patrol_hard, mkr_wave_2_resources_1)
+		Cmd_FormationAttackMove(sg_middle_patrol_1, mkr_spawn_camp_1)
+		Rule_AddInterval(Patrol_Cycle, 240, { sgroup = sg_middle_patrol_1, path = patrol_mid_1 })
+		-- Spawn patrol #2 / Starting area
+		UnitEntry_DeploySquads(player6, sg_middle_patrol_2, Unit_Types.units_patrol_hard, mkr_wave_1_resources_1)
+		Cmd_FormationAttackMove(sg_middle_patrol_2, mkr_wave_2_resources_1)
+		Rule_AddInterval(Patrol_Cycle, 240, { sgroup = sg_middle_patrol_2, path = patrol_mid_2 })
+	else
+		
+		-- Spawn patrol #1 / Starting area 
+		UnitEntry_DeploySquads(player6, sg_middle_patrol_1, Unit_Types.units_patrol, mkr_wave_2_resources_1)
+		Cmd_FormationAttackMove(sg_middle_patrol_1, mkr_spawn_camp_1)
+		Rule_AddInterval(Patrol_Cycle, 240, { sgroup = sg_middle_patrol_1, path = patrol_mid_1 })
+		-- Spawn patrol #2 / Starting area
+		UnitEntry_DeploySquads(player6, sg_middle_patrol_2, Unit_Types.units_patrol, mkr_wave_2_resources_1)
+		Cmd_FormationAttackMove(sg_middle_patrol_2, mkr_wave_2_resources_1)
+		Rule_AddInterval(Patrol_Cycle, 240, { sgroup = sg_middle_patrol_2, path = patrol_mid_2 })
+	end
+	-- Enable respawns / Difficulty: Intermediate +
+	if AI_Difficulty >= 1 then
+		Rule_AddInterval(Patrol_Respawn, 60)
+	end
+	
+end
+
+-- Generic reinforcement handler — stepped threshold budget system
+-- context.player_config = { id, sg_start, sg_unique, sg_reinforce, mkr, role,
+--   outpost_group, outpost_count, count_start, precapture_remaining, precapture_index, thresholds }
+function Reinforcements_PlayerRule(context, data)
+	local p = data.player_config
+
+	-- Budget exhausted AND all thresholds consumed → done
+	if p.precapture_remaining <= 0 and p.precapture_index > #p.thresholds then
+		Rule_RemoveMe()
+		return
+	end
+
+	local civ = Player_GetRaceName(p.id)
+	local total_alive = SGroup_Count(p.sg_start) + SGroup_Count(p.sg_unique)
+	local ratio = total_alive / p.count_start
+
+	-- Stepped depletion check: breach current threshold → deploy
+	if p.precapture_index <= #p.thresholds and ratio <= p.thresholds[p.precapture_index] then
+		if p.precapture_remaining > 0 then
+			_Deploy_Reinforcements(p.id, civ, p.sg_reinforce, p.role, p.mkr)
+			SendReinforceNotification(p.mkr, "$11176787") -- Reinforcements have arrived!
+			p.precapture_remaining = p.precapture_remaining - 1
+		end
+		p.precapture_index = p.precapture_index + 1
+		return
+	end
+
+	-- Outpost captured (group < 10%) — spend budget if available
+	local outpost_threshold = _G[p.outpost_count] or 0
+	if outpost_threshold > 0 and SGroup_Count(p.outpost_group) < 0.1 * outpost_threshold then
+		if p.precapture_remaining > 0 then
+			_Deploy_Reinforcements(p.id, civ, p.sg_reinforce, p.role, p.mkr)
+			p.precapture_remaining = p.precapture_remaining - 1
+		end
+		Rule_RemoveMe()
+		return
+	end
+end
+
+-------------------------------------------
+-- Objectives
+-------------------------------------------
+
+-- Setup enemey defenders / Village South side 
+function Spawn_Village_South_Enemey()
+	
+	if village_south_spawned == false then
+		-- Spawn defenders
+		UnitEntry_DeploySquads(player6, sg_village_south_defender_1, Unit_Types.units_camp_hard, mkr_spawn_south_1)
+		UnitEntry_DeploySquads(player6, sg_village_south_defender_2, Unit_Types.units_camp_hard, mkr_spawn_south_2)
+		UnitEntry_DeploySquads(player6, sg_village_south_defender_3, Unit_Types.units_camp_hard, mkr_spawn_south_3) -- Reserve
+		UnitEntry_DeploySquads(player6, sg_village_south_defender_4, Unit_Types.units_camp_hard, mkr_spawn_south_4)
+		UnitEntry_DeploySquads(player6, sg_village_south_defender_5, Unit_Types.units_camp_hard, mkr_spawn_south_5) -- Reserve 
+		UnitEntry_DeploySquads(player6, sg_village_south_defender_6, Unit_Types.units_camp_hard, mkr_wave_2_path_1) -- Reserve  #5 replacement
+		-- Set direction
+		Cmd_FormationMove(sg_village_south_defender_1, mkr_spawn_south_1, false, false, mkr_village_rally_2)
+		Cmd_FormationMove(sg_village_south_defender_2, mkr_spawn_south_2, false, false, mkr_village_rally_1)
+		Cmd_FormationMove(sg_village_south_defender_3, mkr_spawn_south_3, false, false, mkr_spawn_south_2)
+		Cmd_FormationMove(sg_village_south_defender_4, mkr_spawn_south_4, false, false, mkr_ally_raid4_2)
+		
+		-- Spawn defenders / Hard
+		if AI_Difficulty >= 2 then
+			UnitEntry_DeploySquads(player6, sg_village_south_defender_1_rng, Unit_Types.units_ranged_light, mkr_spawn_south_1_rng)
+			UnitEntry_DeploySquads(player6, sg_village_south_defender_2_rng, Unit_Types.units_ranged_light, mkr_spawn_south_2_rng)
+			UnitEntry_DeploySquads(player6, sg_village_south_defender_3_rng, Unit_Types.units_ranged_light, mkr_spawn_south_3_rng)
+			UnitEntry_DeploySquads(player6, sg_village_south_defender_4_rng, Unit_Types.units_ranged_light, mkr_spawn_south_4_rng)
+			UnitEntry_DeploySquads(player6, sg_village_south_defender_5_rng, Unit_Types.units_ranged_light, mkr_spawn_south_5) -- Reserve
+			-- Set direction
+			Cmd_FormationMove(sg_village_south_defender_1_rng, mkr_spawn_south_1_rng, false, false, mkr_village_rally_2)
+			Cmd_FormationMove(sg_village_south_defender_2_rng, mkr_spawn_south_2_rng, false, false, mkr_village_rally_1)
+			Cmd_FormationMove(sg_village_south_defender_3_rng, mkr_spawn_south_3_rng, false, false, mkr_spawn_south_2)
+			Cmd_FormationMove(sg_village_south_defender_4_rng, mkr_spawn_south_4_rng, false, false, mkr_ally_raid4_2)
+			-- Merge Groups (Ranged)
+			SGroup_AddGroup(sg_village_south_defender_1, sg_village_south_defender_1_rng)
+			SGroup_AddGroup(sg_village_south_defender_2, sg_village_south_defender_2_rng)
+			SGroup_AddGroup(sg_village_south_defender_3, sg_village_south_defender_3_rng)
+			SGroup_AddGroup(sg_village_south_defender_4, sg_village_south_defender_4_rng)
+			SGroup_AddGroup(sg_village_south_defender_5, sg_village_south_defender_5_rng)
+			
+		end
+		
+		-- Merge Groups (ALL)
+		SGroup_AddGroup(sg_village_south_defender_all, sg_village_south_defender_1)
+		SGroup_AddGroup(sg_village_south_defender_all, sg_village_south_defender_2)
+		SGroup_AddGroup(sg_village_south_defender_all, sg_village_south_defender_3)
+		SGroup_AddGroup(sg_village_south_defender_all, sg_village_south_defender_4)
+		SGroup_AddGroup(sg_village_south_defender_all, sg_village_south_defender_5)
+		SGroup_AddGroup(sg_village_south_defender_all, sg_village_south_defender_6)
+		
+		village_south_spawned = true
+	end
+	
+	
+end
+
+-- Setup player villager Reinforcements 
+function Spawn_Village_South_Players()
+	
+	local event_cue_reinforcements = Loc_FormatText("$42813")  -- "Reinforcements have arrived!"
+	
+	-- Player config: { player, villager sgroup, spawn marker, role }
+	local villager_configs = {
+		{ id = player1, sg_villagers = sg_player1_villagers, mkr = mkr_tc_north, role = "melee" },
+		{ id = player2, sg_villagers = sg_player2_villagers, mkr = mkr_tc_north, role = "ranged" },
+		{ id = player3, sg_villagers = sg_player3_villagers, mkr = mkr_tc_north, role = "melee" },
+		{ id = player4, sg_villagers = sg_player4_villagers, mkr = mkr_tc_north, role = "ranged" },
+	}
+	
+	for _, p in ipairs(villager_configs) do
+		if SGroup_Count(p.sg_villagers) <= 5 then
+			local civ = Player_GetRaceName(p.id)
+			local map = (p.role == "melee") and VILLAGER_MELEE_MAP or VILLAGER_RANGED_MAP
+			local default = (p.role == "melee") and "units_player_melee" or "units_player_ranged"
+			local key = ResolveCivMapKey(map, civ, default)
+			
+			-- French HA_01 expansion: cavalry + faction villagers
+			if IsCivExact(p.id, "french_ha_01") then
+				UnitEntry_DeploySquads(p.id, p.sg_villagers, Unit_Types.units_player_melee_reinforce_cav, p.mkr)
+				UnitEntry_DeploySquads(p.id, p.sg_villagers, { sbp = SBP.FRENCH_HA_01.UNIT_VILLAGER_1_FRE_HA_01, numSquads = 10}, p.mkr)
+			else
+				UnitEntry_DeploySquads(p.id, p.sg_villagers, Unit_Types[key], p.mkr)
+			end
+			
+			UI_CreateMinimapBlip(p.mkr, 30, "general")
+			group_spawned = true
+		end
+	end
+	
+	-- Notification: Reinforcements have arrived! 
+	if group_spawned == true then
+		UI_CreateEventCueClickable(-1, 30, -1, 0, event_cue_reinforcements, "", "low_priority", "", "sfx_ui_event_queue_campaign_high_priority", 255, 255, 255, 255, ECV_Queue, nothing)
+		group_spawned = false
+	end
+end
+
+-- Setup enemey counter attack / Village South side
+function Spawn_SiegeCamp_Enemey()
+	
+	-- Spawn defenders
+	UnitEntry_DeploySquads(player6, sg_siege_defender_1, Unit_Types.units_camp_hard, mkr_spawn_siege_1)
+	UnitEntry_DeploySquads(player6, sg_siege_defender_2, Unit_Types.units_camp_hard, mkr_spawn_siege_2)
+	UnitEntry_DeploySquads(player6, sg_siege_defender_3, Unit_Types.units_camp_hard, mkr_spawn_siege_3)
+	UnitEntry_DeploySquads(player6, sg_siege_defender_4, Unit_Types.units_camp_hard, mkr_spawn_siege_4)
+	UnitEntry_DeploySquads(player6, sg_siege_defender_5, Unit_Types.units_camp_hard, mkr_spawn_siege_5) -- Reserve
+	
+	-- Set direction
+	Cmd_FormationMove(sg_siege_defender_1, mkr_spawn_siege_1, false, false, mkr_spawn_south_4_rng)
+	Cmd_FormationMove(sg_siege_defender_2, mkr_spawn_siege_2, false, false, mkr_spawn_south_4_rng) 
+	Cmd_FormationMove(sg_siege_defender_3, mkr_spawn_siege_3, false, false, mkr_wave_2_path_flank)
+	Cmd_FormationMove(sg_siege_defender_4, mkr_spawn_siege_4, false, false, mkr_spawn_siege_3)
+	Cmd_FormationMove(sg_siege_defender_5, mkr_spawn_siege_5, false, false, mkr_spawn_siege_3)
+	
+	-- Merge groups for objective
+	SGroup_AddGroup(sg_siege_defender_all, sg_siege_defender_1)
+	SGroup_AddGroup(sg_siege_defender_all, sg_siege_defender_2)
+	SGroup_AddGroup(sg_siege_defender_all, sg_siege_defender_3)
+	SGroup_AddGroup(sg_siege_defender_all, sg_siege_defender_4)
+	SGroup_AddGroup(sg_siege_defender_all, sg_siege_defender_5)
+	
+	
+	
+end
+
+-- Setup enemey defenders / Outer city
+function Spawn_CityDefenders_enemey_ex()
+	
+	-- Spawn defenders / Side #1
+	if AI_Difficulty >= 2 then -- Hard +
+		
+		-- Side #1
+		UnitEntry_DeploySquads(player6, sg_city_defender_ex_1, Unit_Types.units_cityguards_hard, mkr_spawn_outer_city_1a) -- Melee
+		UnitEntry_DeploySquads(player6, sg_city_defender_ex_2, Unit_Types.units_cityguards_hard, mkr_spawn_outer_city_1b)
+		UnitEntry_DeploySquads(player6, sg_city_defender_ex_1_rng, Unit_Types.units_ranged_hard, mkr_spawn_outer_city_1a_rng) -- Ranged
+		UnitEntry_DeploySquads(player6, sg_city_defender_ex_2_rng, Unit_Types.units_ranged_hard, mkr_spawn_outer_city_1b_rng)
+		-- Side #2
+		UnitEntry_DeploySquads(player6, sg_city_defender_ex_3, Unit_Types.units_cityguards_hard, mkr_spawn_outer_city_2a) -- Melee
+		UnitEntry_DeploySquads(player6, sg_city_defender_ex_4, Unit_Types.units_cityguards_hard, mkr_spawn_outer_city_2b)
+		UnitEntry_DeploySquads(player6, sg_city_defender_ex_3_rng, Unit_Types.units_ranged_hard, mkr_spawn_outer_city_2a_rng) -- Ranged
+		UnitEntry_DeploySquads(player6, sg_city_defender_ex_4_rng, Unit_Types.units_ranged_hard, mkr_spawn_outer_city_2b_rng)
+		-- Side #3
+		UnitEntry_DeploySquads(player6, sg_city_defender_ex_5, Unit_Types.units_cityguards_hard, mkr_spawn_outer_city_3a) -- Melee
+		UnitEntry_DeploySquads(player6, sg_city_defender_ex_6, Unit_Types.units_cityguards_hard, mkr_spawn_outer_city_3b)
+		UnitEntry_DeploySquads(player6, sg_city_defender_ex_5_rng, Unit_Types.units_ranged_hard, mkr_spawn_outer_city_3a_rng) -- Ranged
+		UnitEntry_DeploySquads(player6, sg_city_defender_ex_6_rng, Unit_Types.units_ranged_hard, mkr_spawn_outer_city_3b_rng)
+		
+	else -- Below Normal difficulty
+		
+		-- Side #1
+		UnitEntry_DeploySquads(player6, sg_city_defender_ex_1, Unit_Types.units_cityguards, mkr_spawn_outer_city_1a) -- Melee
+		UnitEntry_DeploySquads(player6, sg_city_defender_ex_2, Unit_Types.units_cityguards, mkr_spawn_outer_city_1b)
+		UnitEntry_DeploySquads(player6, sg_city_defender_ex_1_rng, Unit_Types.units_ranged, mkr_spawn_outer_city_1a_rng) -- Ranged
+		UnitEntry_DeploySquads(player6, sg_city_defender_ex_2_rng, Unit_Types.units_ranged, mkr_spawn_outer_city_1b_rng)
+		-- Side #2
+		UnitEntry_DeploySquads(player6, sg_city_defender_ex_3, Unit_Types.units_cityguards, mkr_spawn_outer_city_2a) -- Melee
+		UnitEntry_DeploySquads(player6, sg_city_defender_ex_4, Unit_Types.units_cityguards, mkr_spawn_outer_city_2b)
+		UnitEntry_DeploySquads(player6, sg_city_defender_ex_3_rng, Unit_Types.units_ranged, mkr_spawn_outer_city_2a_rng) -- Ranged
+		UnitEntry_DeploySquads(player6, sg_city_defender_ex_4_rng, Unit_Types.units_ranged, mkr_spawn_outer_city_2b_rng)
+		-- Side #3
+		UnitEntry_DeploySquads(player6, sg_city_defender_ex_5, Unit_Types.units_cityguards, mkr_spawn_outer_city_3a) -- Melee
+		UnitEntry_DeploySquads(player6, sg_city_defender_ex_6, Unit_Types.units_cityguards, mkr_spawn_outer_city_3b)
+		UnitEntry_DeploySquads(player6, sg_city_defender_ex_5_rng, Unit_Types.units_ranged, mkr_spawn_outer_city_3a_rng) -- Ranged
+		UnitEntry_DeploySquads(player6, sg_city_defender_ex_6_rng, Unit_Types.units_ranged, mkr_spawn_outer_city_3b_rng)
+		
+	end
+	
+	-- Set direction / Side #1
+	Cmd_FormationMove(sg_city_defender_ex_1, mkr_spawn_outer_city_1a, false, false, mkr_spawn_outer_city_2a) 
+	Cmd_FormationMove(sg_city_defender_ex_1_rng, mkr_spawn_outer_city_1a_rng, false, false, mkr_spawn_outer_city_2a) 
+	Cmd_FormationMove(sg_city_defender_ex_2, mkr_spawn_outer_city_1b, false, false, mkr_spawn_outer_city_1a) 
+	Cmd_FormationMove(sg_city_defender_ex_2_rng, mkr_spawn_outer_city_1b_rng, false, false, mkr_spawn_outer_city_1a) 
+	-- Set direction / Side #2
+	Cmd_FormationMove(sg_city_defender_ex_3, mkr_spawn_outer_city_2a, false, false, mkr_spawn_south_1) 
+	Cmd_FormationMove(sg_city_defender_ex_3_rng, mkr_spawn_outer_city_2a_rng, false, false, mkr_spawn_south_1) 
+	Cmd_FormationMove(sg_city_defender_ex_4, mkr_spawn_outer_city_2b, false, false, mkr_wave_1_path_2) 
+	Cmd_FormationMove(sg_city_defender_ex_4_rng, mkr_spawn_outer_city_2b_rng, false, false, mkr_wave_1_path_2) 
+	-- Set direction / Side #3
+	Cmd_FormationMove(sg_city_defender_ex_5, mkr_spawn_outer_city_3a, false, false, mkr_spawn_temp_reinforcements2) 
+	Cmd_FormationMove(sg_city_defender_ex_5_rng, mkr_spawn_outer_city_3a_rng, false, false, mkr_spawn_temp_reinforcements2) 
+	Cmd_FormationMove(sg_city_defender_ex_6, mkr_spawn_outer_city_3b, false, false, mkr_spawn_temp_reinforcements2) 
+	Cmd_FormationMove(sg_city_defender_ex_6_rng, mkr_spawn_outer_city_3b_rng, false, false, mkr_spawn_temp_reinforcements2) 
+	
+	-- Objective / Merge groups
+	SGroup_AddGroup(sg_city_defender_group_1, sg_city_defender_ex_1) -- Side #1
+	SGroup_AddGroup(sg_city_defender_group_1, sg_city_defender_ex_2)
+	SGroup_AddGroup(sg_city_defender_group_1, sg_city_defender_ex_1_rng)
+	SGroup_AddGroup(sg_city_defender_group_1, sg_city_defender_ex_2_rng)
+
+	SGroup_AddGroup(sg_city_defender_group_2, sg_city_defender_ex_3) -- Side #2
+	SGroup_AddGroup(sg_city_defender_group_2, sg_city_defender_ex_4)
+	SGroup_AddGroup(sg_city_defender_group_2, sg_city_defender_ex_3_rng)
+	SGroup_AddGroup(sg_city_defender_group_2, sg_city_defender_ex_4_rng)
+	
+	SGroup_AddGroup(sg_city_defender_group_3, sg_city_defender_ex_5) -- Side #3
+	SGroup_AddGroup(sg_city_defender_group_3, sg_city_defender_ex_6)
+	SGroup_AddGroup(sg_city_defender_group_3, sg_city_defender_ex_5_rng)
+	SGroup_AddGroup(sg_city_defender_group_3, sg_city_defender_ex_6_rng)
+	
+	-- Merge groups to main
+	SGroup_AddGroup(sg_city_defender_group_all, sg_city_defender_group_1)
+	SGroup_AddGroup(sg_city_defender_group_all, sg_city_defender_group_2)
+	SGroup_AddGroup(sg_city_defender_group_all, sg_city_defender_group_3)
+	
+end
+
+-- Setup enemey defenders / Inner city
+function Spawn_CityDefenders_enemey_in()
+	
+		-- Patrols
+	if AI_Difficulty >= 3 then
+		-- Spawn patrol #1 / City
+		UnitEntry_DeploySquads(player6, sg_middle_patrol_3, Unit_Types.units_cityguards_hard, mkr_spawn_wave_1)
+		Cmd_FormationAttackMove(sg_middle_patrol_3, mkr_spawn_wave_4)
+		Rule_AddInterval(Patrol_Cycle, 240, { sgroup = sg_middle_patrol_3, path = patrol_city_1 })
+		-- Spawn patrol #2 / City
+		UnitEntry_DeploySquads(player6, sg_middle_patrol_4, Unit_Types.units_cityguards_hard, mkr_spawn_wave_4)
+		Cmd_FormationAttackMove(sg_middle_patrol_4, mkr_spawn_wave_1)
+		Rule_AddInterval(Patrol_Cycle, 240, { sgroup = sg_middle_patrol_4, path = patrol_city_2 })	
+	else
+		-- Spawn patrol #1 / City
+		UnitEntry_DeploySquads(player6, sg_middle_patrol_3, Unit_Types.units_cityguards, mkr_spawn_wave_1)
+		Cmd_FormationAttackMove(sg_middle_patrol_3, mkr_spawn_wave_4)
+		Rule_AddInterval(Patrol_Cycle, 240, { sgroup = sg_middle_patrol_3, path = patrol_city_1 })
+		-- Spawn patrol #2 / City
+		UnitEntry_DeploySquads(player6, sg_middle_patrol_4, Unit_Types.units_cityguards, mkr_spawn_wave_4)
+		Cmd_FormationAttackMove(sg_middle_patrol_4, mkr_spawn_wave_1)
+		Rule_AddInterval(Patrol_Cycle, 240, { sgroup = sg_middle_patrol_4, path = patrol_city_2 })
+		
+	end
+	
+	-- Enable respawns
+	city_respawn = true
+	
+end
+
+-------------------------------------------
+-- Waves
+-------------------------------------------
+
+-- Begin building up main counter offensive
+function Main_Waves()
+	-- SIDE #1
+	
+	-- 05 min
+	Rule_AddInterval(Units_Deploy, 300, { player = player6, sgroup = sg_waves_main_1_01a, unit_type = Unit_Types.wave_city_5m, spawn_loc = mkr_spawn_wave_1, path = wave_path_1 })
+	if AI_Difficulty >= 1 then -- Remove flank wave @ 5 min (Easy)
+	Rule_AddInterval(Units_Deploy, 300, { player = player6, sgroup = sg_waves_main_1_01b, unit_type = Unit_Types.wave_city_5m, spawn_loc = mkr_spawn_wave_2, path = wave_path_1_flank })
+	end -- AI = Normal, Hard, Hardest
+	-- 10 min
+	Rule_AddInterval(Units_Deploy, 610, { player = player6, sgroup = sg_waves_main_1_01c, unit_type = Unit_Types.wave_city_10m, spawn_loc = mkr_spawn_wave_1, path = wave_path_1 })
+	Rule_AddInterval(Units_Deploy, 600, { player = player6, sgroup = sg_waves_main_1_01d, unit_type = Unit_Types.wave_city_10m_flank, spawn_loc = mkr_spawn_wave_2, path = wave_path_1_resources })
+	-- ~15 min
+	Rule_AddInterval(Units_Deploy, 930, { player = player6, sgroup = sg_waves_main_1_02, unit_type = Unit_Types.wave_city_15m, spawn_loc = mkr_spawn_wave_1, path = wave_path_1 })
+	-- ~20 min
+	Rule_AddInterval(Units_Deploy, 1100, { player = player6, sgroup = sg_waves_main_1_03, unit_type = Unit_Types.wave_city_20m, spawn_loc = mkr_spawn_wave_1, path = wave_path_1 })
+	-- 25 min
+	Rule_AddInterval(Units_Deploy, 1500, { player = player6, sgroup = sg_waves_main_1_04, unit_type = Unit_Types.wave_city_25m, spawn_loc = mkr_spawn_wave_1, path = wave_path_1 })
+	-- 30 min / Obj Timer 50%
+	Rule_AddInterval(Units_Deploy, 1800, { player = player6, sgroup = sg_waves_main_1_05, unit_type = Unit_Types.wave_city_30m, spawn_loc = mkr_spawn_wave_1, path = wave_path_1 })
+	if AI_Difficulty >= 2 then -- Add extra waves
+	-- 40 min
+	Rule_AddInterval(Units_Deploy, 2400, { player = player6, sgroup = sg_waves_main_1_06, unit_type = Unit_Types.wave_city_40m, spawn_loc = mkr_spawn_wave_1, path = wave_path_1 })
+	-- 45 min
+	Rule_AddInterval(Units_Deploy, 2700, { player = player6, sgroup = sg_waves_main_1_07, unit_type = Unit_Types.wave_city_45m, spawn_loc = mkr_spawn_wave_2, path = wave_path_1_flank })
+	end -- AI = Normal +
+	if AI_Difficulty >= 3 then -- Add extra waves
+		-- ~20 min
+		Rule_AddInterval(Units_Deploy, 1200, { player = player6, sgroup = sg_waves_main_1_08, unit_type = Unit_Types.wave_city_20m, spawn_loc = mkr_spawn_wave_2, path = wave_path_1_flank })
+		-- 35 min
+		Rule_AddInterval(Units_Deploy, 2100, { player = player6, sgroup = sg_waves_main_1_09, unit_type = Unit_Types.wave_city_45m, spawn_loc = mkr_spawn_wave_2, path = wave_path_1_flank })
+		-- ~45 min
+		Rule_AddInterval(Units_Deploy, 2900, { player = player6, sgroup = sg_waves_main_1_10, unit_type = Unit_Types.wave_city_45m, spawn_loc = mkr_spawn_wave_1, path = wave_path_1 })
+	end -- AI = Hardest
+	
+	
+	-- SIDE #2 
+	
+	-- 05 min
+	Rule_AddInterval(Units_Deploy, 300, { player = player6, sgroup = sg_waves_main_2_01a, unit_type = Unit_Types.wave_city_10m, spawn_loc = mkr_spawn_wave_3, path = wave_path_2 })
+	if AI_Difficulty >= 1 then -- Remove flank wave @ 5 min (Easy)
+	Rule_AddInterval(Units_Deploy, 310, { player = player6, sgroup = sg_waves_main_2_01b, unit_type = Unit_Types.wave_city_10m, spawn_loc = mkr_spawn_wave_3, path = wave_path_2_flank })
+	end -- AI = Normal, Hard, Hardest
+	-- 10 min
+	Rule_AddInterval(Units_Deploy, 610, { player = player6, sgroup = sg_waves_main_2_01c, unit_type = Unit_Types.wave_city_10m, spawn_loc = mkr_spawn_wave_3, path = wave_path_2 })
+	Rule_AddInterval(Units_Deploy, 600, { player = player6, sgroup = sg_waves_main_2_01d, unit_type = Unit_Types.wave_city_10m_flank, spawn_loc = mkr_spawn_wave_4, path = wave_path_2_resources })
+	-- ~15 min
+	Rule_AddInterval(Units_Deploy, 930, { player = player6, sgroup = sg_waves_main_2_02, unit_type = Unit_Types.wave_city_15m, spawn_loc = mkr_spawn_wave_3, path = wave_path_2 })
+	-- ~20 min
+	Rule_AddInterval(Units_Deploy, 1100, { player = player6, sgroup = sg_waves_main_2_03, unit_type = Unit_Types.wave_city_20m, spawn_loc = mkr_spawn_wave_3, path = wave_path_2 })
+	-- 25 min
+	Rule_AddInterval(Units_Deploy, 1500, { player = player6, sgroup = sg_waves_main_2_04, unit_type = Unit_Types.wave_city_25m, spawn_loc = mkr_spawn_wave_3, path = wave_path_2 })
+	-- 30 min / Obj Timer 50%
+	Rule_AddInterval(Units_Deploy, 1800, { player = player6, sgroup = sg_waves_main_2_05, unit_type = Unit_Types.wave_city_30m, spawn_loc = mkr_spawn_wave_3, path = wave_path_2 })
+	if AI_Difficulty >= 2 then -- Add extra waves
+	-- 40 min
+	Rule_AddInterval(Units_Deploy, 2400, { player = player6, sgroup = sg_waves_main_2_06, unit_type = Unit_Types.wave_city_40m, spawn_loc = mkr_spawn_wave_3, path = wave_path_2 })
+	-- 45 min
+	Rule_AddInterval(Units_Deploy, 2700, { player = player6, sgroup = sg_waves_main_2_07, unit_type = Unit_Types.wave_city_45m, spawn_loc = mkr_spawn_wave_3, path = wave_path_2_flank })
+	end -- AI = Normal +
+	if AI_Difficulty >= 3 then -- Add extra waves
+		-- ~20 min
+		Rule_AddInterval(Units_Deploy, 1200, { player = player6, sgroup = sg_waves_main_2_08, unit_type = Unit_Types.wave_city_20m, spawn_loc = mkr_spawn_wave_3, path = wave_path_2_flank })
+		-- 35 min
+		Rule_AddInterval(Units_Deploy, 2100, { player = player6, sgroup = sg_waves_main_2_09, unit_type = Unit_Types.wave_city_45m, spawn_loc = mkr_spawn_wave_3, path = wave_path_2_flank })
+		-- ~45 min
+		Rule_AddInterval(Units_Deploy, 2900, { player = player6, sgroup = sg_waves_main_2_10, unit_type = Unit_Types.wave_city_45m, spawn_loc = mkr_spawn_wave_3, path = wave_path_2 })
+	end -- AI = Hardest
+	
+	-- Hardest AI waves
+	Rule_AddOneShot(Hard_Waves, 1800)
+	
+	
+end
+
+-- Extra waves / Difficulty: Hard +
+function Hard_Waves()
+	
+	-- Siege waves
+	if AI_Difficulty >= 2 then
+		Rule_AddInterval(Units_Deploy, 480, { player = player6, sgroup = sg_waves_main_3_05, unit_type = Unit_Types.wave_siege, spawn_loc = mkr_spawn_wave_1, path = wave_path_1 })
+		Rule_AddInterval(Units_Deploy, 480, { player = player6, sgroup = sg_waves_main_3_06, unit_type = Unit_Types.wave_siege, spawn_loc = mkr_spawn_wave_3, path = wave_path_2 })
+	end
+	-- Extra Infantry waves
+	if AI_Difficulty >= 3 then
+		-- Side 1
+		Rule_AddInterval(Units_Deploy, 300, { player = player6, sgroup = sg_waves_main_1_11, unit_type = Unit_Types.wave_no_siege, spawn_loc = mkr_spawn_wave_1, path = wave_path_1_resources })
+		-- Side 2
+		Rule_AddInterval(Units_Deploy, 300, { player = player6, sgroup = sg_waves_main_2_11, unit_type = Unit_Types.wave_no_siege, spawn_loc = mkr_spawn_wave_3, path = wave_path_2_resources })
+	end
+end
+
+-- Allied Siege waves — DEPRECATED: now handled by AlliedSiege_Deploy() in objectives.scar
+-- Kept as stubs for backward compatibility with debug/auto-clear references.
+function Allied_Siege_1()
+	AlliedSiege_Deploy(1)
+end
+function Allied_Siege_2()
+	AlliedSiege_Deploy(2)
+end
+function Allied_Siege_3()
+	AlliedSiege_Deploy(3)
+end
+
+-- Respawning patrols / Harass starting area
+function Patrol_Respawn()
+	
+	-- Patrol #1
+	if SGroup_Count(sg_middle_patrol_1) == 0 then
+		UnitEntry_DeploySquads(player6, sg_middle_patrol_1, Unit_Types.units_patrol, mkr_spawn_wave_1)
+		Cmd_FormationAttackMove(sg_middle_patrol_1, mkr_spawn_camp_1)
+	end
+	
+	-- Patrol #2
+	if SGroup_Count(sg_middle_patrol_2) == 0 then
+		UnitEntry_DeploySquads(player6, sg_middle_patrol_2, Unit_Types.units_patrol_hard, mkr_spawn_wave_4)
+		Cmd_FormationAttackMove(sg_middle_patrol_2, mkr_wave_2_resources_1)
+	end
+	
+	-- City groups
+	if city_respawn == true then
+		
+		-- Patrol #1
+		if SGroup_Count(sg_middle_patrol_3) == 0 then
+			UnitEntry_DeploySquads(player6, sg_middle_patrol_3, Unit_Types.units_cityguards, mkr_spawn_wave_1)
+			Cmd_FormationAttackMove(sg_middle_patrol_3, mkr_spawn_wave_4)
+		end
+		
+		-- Patrol #2
+		if SGroup_Count(sg_middle_patrol_4) == 0 then
+			UnitEntry_DeploySquads(player6, sg_middle_patrol_4, Unit_Types.units_cityguards, mkr_spawn_wave_4)
+			Cmd_FormationAttackMove(sg_middle_patrol_4, mkr_spawn_wave_1)
+		end
+	end
+	
+end

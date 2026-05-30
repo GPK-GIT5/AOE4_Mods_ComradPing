@@ -1,0 +1,777 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — Building Lifecycle
+-- Investigates the full villager building lifecycle from placement to completion.
+-- Tests three distinct approaches and exposes each via separate console commands.
+--
+-- Approach A: "InstantForce" — Entity_CreateFacing → Entity_Spawn → Entity_ForceConstruct
+--             Bypasses workers entirely; building appears fully constructed instantly.
+--             Reference: missionomatic_utility.scar Entity_CreateFacing+Spawn+ForceConstruct pattern.
+--
+-- Approach B: "WorkerCommand" — LocalCommand_PlayerSquadConstructBuilding
+--             Official campaign pattern (challenge_mission_earlyeconomy_preintro.scar).
+--             Spawns villagers, issues player-level build command; workers walk to site and build.
+--
+-- Approach C: "ManualSCMD" — Entity_CreateFacing → Entity_Spawn → SCMD_BuildStructure
+--             Foundation placed manually, then villagers targeted at it via SquadEntity command.
+--             Reference: obj_rebuildmoscow.scar LocalCommand_SquadEntity+SCMD_BuildStructure.
+--
+-- NOTE: cba_ai_player.scar strategies are deliberately excluded. Those strategies required
+-- fallback ladders with 4-second timeout escalation, method exhaustion flags, and progress
+-- baseline comparisons — evidence that the engine command layer is unreliable when multiple
+-- strategies contend. Ghost-state anomalies (foundation with progress≤0.01, hp≥0.99, not
+-- under_construction) were observed. This module tests each approach in clean isolation to
+-- identify which engine paths are trustworthy and which produce silent failures.
+---------------------------------------------------------------------------------------------------
+
+local _BL_SUITE = "BuildLifecycle"
+local _BL_DELAY = 1.5
+local _BL_WORKER_WAIT = 8.0   -- seconds to wait for worker-driven construction
+local _BL_POLL_INTERVAL = 1.0 -- polling cadence for progress checks
+
+-- Module state (reset per run)
+local _bl = {}
+
+---------------------------------------------------------------------------------------------------
+-- Helpers
+---------------------------------------------------------------------------------------------------
+
+local function _BL_Assert(test_name, condition, detail)
+	_bl.total = _bl.total + 1
+	local status = condition and "PASS" or "FAIL"
+	if condition then _bl.passed = _bl.passed + 1 end
+	local detail_str = (detail ~= nil) and string.format(" (%s)", tostring(detail)) or ""
+	print(string.format("    [%s] %s%s", status, test_name, detail_str))
+	table.insert(_cba_debug.test_results, { name = test_name, pass = condition })
+	return condition
+end
+
+local function _BL_ResolvePlayer()
+	for i, p in ipairs(PLAYERS) do
+		if p ~= nil then
+			local ok, is_human = pcall(Player_IsHuman, p.id)
+			if ok and is_human then return p, i end
+		end
+	end
+	return PLAYERS[1], 1
+end
+
+--- Resolve a house EBP for the player's civilization.
+local function _BL_GetHouseEBP(player)
+	local civ = _Debug_GetPlayerCiv(player)
+	local ok_fn, ebp = pcall(AGS_GetCivilizationEntity, civ, "house")
+	if ok_fn and ebp ~= nil then return ebp, civ end
+	-- Fallback: try direct BP_GetEntityBlueprint with known names
+	local fallback_names = {
+		"building_house_control_eng",
+		"building_house_control_fre",
+		"building_house_control_hre",
+	}
+	for _, name in ipairs(fallback_names) do
+		local ok, bp = pcall(BP_GetEntityBlueprint, name)
+		if ok and bp ~= nil then return bp, civ end
+	end
+	return nil, civ
+end
+
+--- Resolve a barracks EBP for the player's civilization (used as alternate test target).
+local function _BL_GetBarracksEBP(player)
+	local civ = _Debug_GetPlayerCiv(player)
+	local ok_fn, ebp = pcall(AGS_GetCivilizationEntity, civ, "barracks")
+	if ok_fn and ebp ~= nil then return ebp end
+	return nil
+end
+
+--- Spawn worker villagers into a fresh SGroup near the given position.
+-- Returns sgroup, count.
+local function _BL_SpawnWorkers(player, pos, count, label)
+	count = count or 2
+	label = label or "bl_workers"
+	local sg_name = "sg_bl_" .. label .. "_" .. tostring(player.id)
+	local sg = SGroup_CreateIfNotFound(sg_name)
+	SGroup_Clear(sg)
+
+	local civ = _Debug_GetPlayerCiv(player)
+	-- Resolve villager SBP: check overrides first, then default
+	local sbp_name = "unit_villager_1_" .. string.sub(civ, 1, 3)
+	local ok_sbp, sbp = pcall(BP_GetSquadBlueprint, "scar_villager")
+	if not ok_sbp or sbp == nil then
+		-- Try civ-specific
+		ok_sbp, sbp = pcall(BP_GetSquadBlueprint, sbp_name)
+	end
+	if not ok_sbp or sbp == nil then
+		print(string.format("    [WARN] Cannot resolve villager SBP for %s", civ))
+		return sg, 0
+	end
+
+	local spawned = 0
+	for n = 1, count do
+		local ok_sp, sp_err = pcall(Util_CreateSquads, player.id, sg, sbp, pos, nil, 1)
+		if ok_sp then
+			spawned = spawned + 1
+		else
+			print(string.format("    [WARN] Util_CreateSquads failed (%d/%d): %s", n, count, tostring(sp_err)))
+		end
+	end
+	return sg, spawned
+end
+
+--- Build a facing position (toward map center from build_pos).
+local function _BL_GetFacingPos(build_pos)
+	local center = World_Pos(0, 0, 0)
+	pcall(function()
+		local ok_w, w = pcall(World_GetWidth)
+		local ok_l, l = pcall(World_GetLength)
+		if ok_w and ok_l then center = World_Pos(0, 0, 0) end
+	end)
+	-- Face toward map center
+	return center
+end
+
+--- Probe entity state and return a summary table.
+local function _BL_ProbeEntity(entity, label)
+	local probe = { label = label or "?" }
+	local ok, v
+
+	ok, v = pcall(Entity_IsAlive, entity)
+	probe.alive = ok and v or false
+
+	ok, v = pcall(Entity_GetBuildingProgress, entity)
+	probe.progress = ok and v or -1
+
+	ok, v = pcall(Entity_GetHealth, entity)
+	probe.health = ok and v or -1
+
+	ok, v = pcall(Entity_GetHealthMax, entity)
+	probe.health_max = ok and v or -1
+
+	ok, v = pcall(Entity_IsUnderConstruction, entity)
+	probe.under_construction = ok and v or false
+
+	ok, v = pcall(Entity_GetID, entity)
+	probe.id = ok and v or -1
+
+	return probe
+end
+
+--- Print a probe result.
+local function _BL_PrintProbe(probe)
+	print(string.format("      [PROBE] %s: id=%s alive=%s progress=%.3f hp=%.0f/%.0f under_construction=%s",
+		probe.label,
+		tostring(probe.id),
+		tostring(probe.alive),
+		probe.progress,
+		probe.health, probe.health_max,
+		tostring(probe.under_construction)))
+end
+
+--- Detect ghost-state anomaly: foundation with near-zero progress + near-full HP + not under construction.
+--- This was a known failure mode observed in cba_ai_player strategy testing.
+local function _BL_IsGhostState(probe)
+	return probe.alive
+		and probe.progress <= 0.01
+		and probe.health_max > 0
+		and (probe.health / math.max(probe.health_max, 1)) >= 0.99
+		and not probe.under_construction
+end
+
+--- Clean up an entity safely.
+local function _BL_Cleanup(entity, label)
+	if entity ~= nil then
+		local ok_alive, alive = pcall(Entity_IsAlive, entity)
+		if ok_alive and alive then
+			pcall(Entity_Destroy, entity)
+			print(string.format("      [CLEANUP] Destroyed %s", label or "entity"))
+		end
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- APPROACH A: Instant Force
+-- Entity_CreateFacing → Entity_Spawn → Entity_ForceConstruct
+-- Reference: missionomatic_utility.scar, gamescarutil.scar
+-- No workers involved. Building appears instantly at full health.
+---------------------------------------------------------------------------------------------------
+
+function Debug_BuildLifecycle_InstantForce()
+	_cba_debug.enabled = true
+
+	local player, pidx = _BL_ResolvePlayer()
+	local civ = _Debug_GetPlayerCiv(player)
+	local ebp, _ = _BL_GetHouseEBP(player)
+
+	_bl = { passed = 0, total = 0, start_time = 0 }
+	local ok_gt, gt = pcall(World_GetGameTime)
+	_bl.start_time = ok_gt and gt or 0
+
+	print("")
+	print("============================================================")
+	print("  BUILD LIFECYCLE — APPROACH A: INSTANT FORCE")
+	print(string.format("  Player: P%d (%s)", pidx, civ))
+	print("  Pattern: Entity_CreateFacing → Entity_Spawn → Entity_ForceConstruct")
+	print("  Source: missionomatic_utility.scar, gamescarutil.scar")
+	print("============================================================")
+
+	_Debug_PhaseHeader(0, "PREREQUISITES")
+	_BL_Assert("Player resolved", player ~= nil, pidx)
+	_BL_Assert("House EBP resolved", ebp ~= nil, civ)
+
+	if ebp == nil then
+		_Debug_EndMarker(_BL_SUITE .. "_A", _bl.passed, _bl.total, 0)
+		return
+	end
+
+	local anchor = _Debug_GetPlayerSpawnAnchor(player)
+	_BL_Assert("Spawn anchor found", anchor ~= nil)
+	if anchor == nil then
+		_Debug_EndMarker(_BL_SUITE .. "_A", _bl.passed, _bl.total, 0)
+		return
+	end
+
+	local pos = _Debug_ClampToPlayableBounds(anchor, 15, 15, 30)
+	local facing = _BL_GetFacingPos(pos)
+
+	-----------------------------------------------------------------
+	-- Phase 1: Create + Spawn (pre-construction state)
+	-----------------------------------------------------------------
+	_Debug_PhaseHeader(1, "CREATE + SPAWN (PRE-CONSTRUCTION)")
+
+	local ok_create, entity = pcall(Entity_CreateFacing, ebp, player.id, pos, facing, true)
+	_BL_Assert("Entity_CreateFacing succeeded", ok_create and entity ~= nil, tostring(entity))
+
+	if not ok_create or entity == nil then
+		_Debug_EndMarker(_BL_SUITE .. "_A", _bl.passed, _bl.total, 0)
+		return
+	end
+
+	-- Probe BEFORE spawn
+	local pre_spawn = _BL_ProbeEntity(entity, "pre-spawn")
+	_BL_PrintProbe(pre_spawn)
+	_BL_Assert("Pre-spawn: progress == 0", pre_spawn.progress <= 0.01, pre_spawn.progress)
+
+	-- Spawn
+	local ok_spawn = pcall(Entity_Spawn, entity)
+	_BL_Assert("Entity_Spawn succeeded", ok_spawn)
+
+	-- Probe AFTER spawn, BEFORE force-construct
+	local post_spawn = _BL_ProbeEntity(entity, "post-spawn/pre-force")
+	_BL_PrintProbe(post_spawn)
+	_BL_Assert("Post-spawn: alive", post_spawn.alive)
+	_BL_Assert("Post-spawn: progress < 1.0 (not yet built)", post_spawn.progress < 1.0, post_spawn.progress)
+
+	-- Ghost-state check (the failure mode seen in cba_ai_player)
+	local ghost = _BL_IsGhostState(post_spawn)
+	_BL_Assert("Post-spawn: NOT ghost-state anomaly", not ghost,
+		ghost and "GHOST: prog≤0.01, hp≥99%, not under_construction" or "clean")
+
+	-----------------------------------------------------------------
+	-- Phase 2: Force Construct
+	-----------------------------------------------------------------
+	_Debug_PhaseHeader(2, "FORCE CONSTRUCT")
+
+	local ok_force = pcall(Entity_ForceConstruct, entity)
+	_BL_Assert("Entity_ForceConstruct succeeded", ok_force)
+
+	local post_force = _BL_ProbeEntity(entity, "post-force")
+	_BL_PrintProbe(post_force)
+	_BL_Assert("Post-force: progress == 1.0", post_force.progress >= 1.0, post_force.progress)
+	_BL_Assert("Post-force: alive", post_force.alive)
+	_BL_Assert("Post-force: not under construction", not post_force.under_construction)
+	_BL_Assert("Post-force: health > 0", post_force.health > 0, post_force.health)
+
+	-----------------------------------------------------------------
+	-- Phase 3: Cleanup + Summary
+	-----------------------------------------------------------------
+	_Debug_PhaseHeader(3, "CLEANUP")
+	_BL_Cleanup(entity, "Approach A house")
+
+	local ok_gt2, gt2 = pcall(World_GetGameTime)
+	local elapsed = (ok_gt2 and gt2 or 0) - _bl.start_time
+	_Debug_EndMarker(_BL_SUITE .. "_A", _bl.passed, _bl.total, elapsed)
+end
+
+---------------------------------------------------------------------------------------------------
+-- APPROACH B: Worker Command (Official Campaign Pattern)
+-- LocalCommand_PlayerSquadConstructBuilding issues a full build command.
+-- Workers walk to the site, lay the foundation, and construct naturally.
+-- Reference: challenge_mission_earlyeconomy_preintro.scar
+---------------------------------------------------------------------------------------------------
+
+function Debug_BuildLifecycle_WorkerCommand()
+	_cba_debug.enabled = true
+
+	local player, pidx = _BL_ResolvePlayer()
+	local civ = _Debug_GetPlayerCiv(player)
+	local ebp, _ = _BL_GetHouseEBP(player)
+
+	_bl = { passed = 0, total = 0, start_time = 0, entity = nil, sg = nil, pos = nil }
+	local ok_gt, gt = pcall(World_GetGameTime)
+	_bl.start_time = ok_gt and gt or 0
+
+	print("")
+	print("============================================================")
+	print("  BUILD LIFECYCLE — APPROACH B: WORKER COMMAND")
+	print(string.format("  Player: P%d (%s)", pidx, civ))
+	print("  Pattern: LocalCommand_PlayerSquadConstructBuilding")
+	print("  Source: challenge_mission_earlyeconomy_preintro.scar")
+	print("============================================================")
+
+	_Debug_PhaseHeader(0, "PREREQUISITES")
+	_BL_Assert("Player resolved", player ~= nil, pidx)
+	_BL_Assert("House EBP resolved", ebp ~= nil, civ)
+
+	if ebp == nil then
+		_Debug_EndMarker(_BL_SUITE .. "_B", _bl.passed, _bl.total, 0)
+		return
+	end
+
+	local anchor = _Debug_GetPlayerSpawnAnchor(player)
+	_BL_Assert("Spawn anchor found", anchor ~= nil)
+	if anchor == nil then
+		_Debug_EndMarker(_BL_SUITE .. "_B", _bl.passed, _bl.total, 0)
+		return
+	end
+
+	-- Offset so we don't collide with Approach A's site
+	local pos = _Debug_ClampToPlayableBounds(anchor, -20, 15, 30)
+	local facing = _BL_GetFacingPos(pos)
+	_bl.pos = pos
+
+	-----------------------------------------------------------------
+	-- Phase 1: Spawn Workers
+	-----------------------------------------------------------------
+	_Debug_PhaseHeader(1, "SPAWN WORKERS")
+
+	local sg, count = _BL_SpawnWorkers(player, pos, 2, "approach_b")
+	_bl.sg = sg
+	_BL_Assert("Workers spawned", count >= 1, count)
+
+	if count < 1 then
+		_Debug_EndMarker(_BL_SUITE .. "_B", _bl.passed, _bl.total, 0)
+		return
+	end
+
+	-----------------------------------------------------------------
+	-- Phase 2: Issue Build Command
+	-----------------------------------------------------------------
+	_Debug_PhaseHeader(2, "ISSUE BUILD COMMAND")
+
+	local ok_cmd, cmd_err = pcall(
+		LocalCommand_PlayerSquadConstructBuilding,
+		player.id, sg, ebp, pos, facing, false
+	)
+	_BL_Assert("LocalCommand_PlayerSquadConstructBuilding succeeded", ok_cmd, tostring(cmd_err))
+
+	if not ok_cmd then
+		print(string.format("    [ERROR] Command failed: %s", tostring(cmd_err)))
+		_Debug_EndMarker(_BL_SUITE .. "_B", _bl.passed, _bl.total, 0)
+		return
+	end
+
+	-- Store state for polling
+	_bl.player = player
+	_bl.pidx = pidx
+	_bl.ebp = ebp
+	_bl.facing = facing
+	_bl.poll_count = 0
+	_bl.max_polls = math.ceil(_BL_WORKER_WAIT / _BL_POLL_INTERVAL)
+
+	print(string.format("    Waiting up to %.0fs for construction (polling every %.1fs)...",
+		_BL_WORKER_WAIT, _BL_POLL_INTERVAL))
+
+	-- Schedule polling phase
+	_Debug_ScheduleNextPhase(_BL_ApproachB_PollProgress, _BL_POLL_INTERVAL, "Phase 3: Poll", _BL_SUITE .. "_B")
+end
+
+--- Poll for construction progress (Approach B). Called repeatedly via scheduled phase.
+function _BL_ApproachB_PollProgress()
+	_bl.poll_count = _bl.poll_count + 1
+	local player = _bl.player
+
+	-- Try to find the building entity near our target position.
+	-- LocalCommand_PlayerSquadConstructBuilding creates the foundation internally,
+	-- so we need to discover it via Player_GetEntities search.
+	if _bl.entity == nil then
+		local eg_search = EGroup_CreateIfNotFound("eg_bl_search_b")
+		EGroup_Clear(eg_search)
+		pcall(Player_GetEntities, player.id, eg_search)
+
+		local best_entity = nil
+		local best_dist = 999999
+		local eg_count = EGroup_CountSpawned(eg_search)
+		for i = 1, eg_count do
+			local ok_e, ent = pcall(EGroup_GetEntityAt, eg_search, i)
+			if ok_e and ent ~= nil then
+				local ok_uc, uc = pcall(Entity_IsUnderConstruction, ent)
+				if ok_uc and uc then
+					local ok_pos, epos = pcall(Entity_GetPosition, ent)
+					if ok_pos and epos ~= nil then
+						local dx = (epos.x or 0) - (_bl.pos.x or 0)
+						local dz = (epos.z or 0) - (_bl.pos.z or 0)
+						local dist = math.sqrt(dx * dx + dz * dz)
+						if dist < best_dist then
+							best_dist = dist
+							best_entity = ent
+						end
+					end
+				end
+			end
+		end
+
+		-- Also check for completed buildings (might have finished already)
+		if best_entity == nil then
+			for i = 1, eg_count do
+				local ok_e, ent = pcall(EGroup_GetEntityAt, eg_search, i)
+				if ok_e and ent ~= nil then
+					local ok_prog, prog = pcall(Entity_GetBuildingProgress, ent)
+					if ok_prog and prog ~= nil and prog >= 0.99 then
+						local ok_pos, epos = pcall(Entity_GetPosition, ent)
+						if ok_pos and epos ~= nil then
+							local dx = (epos.x or 0) - (_bl.pos.x or 0)
+							local dz = (epos.z or 0) - (_bl.pos.z or 0)
+							local dist = math.sqrt(dx * dx + dz * dz)
+							if dist < 25 and dist < best_dist then
+								best_dist = dist
+								best_entity = ent
+							end
+						end
+					end
+				end
+			end
+		end
+
+		if best_entity ~= nil then
+			_bl.entity = best_entity
+			print(string.format("    [FOUND] Building entity discovered (dist=%.1f)", best_dist))
+		end
+	end
+
+	-- Probe current state
+	if _bl.entity ~= nil then
+		local probe = _BL_ProbeEntity(_bl.entity, string.format("poll_%d", _bl.poll_count))
+		_BL_PrintProbe(probe)
+
+		-- Check if construction is complete
+		if probe.progress >= 1.0 then
+			_Debug_ScheduleNextPhase(_BL_ApproachB_Verify, _BL_DELAY, "Phase 4: Verify", _BL_SUITE .. "_B")
+			return
+		end
+
+		-- Ghost-state detection mid-construction
+		if _BL_IsGhostState(probe) then
+			print("    [WARN] Ghost-state anomaly detected mid-construction!")
+		end
+	else
+		print(string.format("    [POLL %d/%d] No building entity found yet...", _bl.poll_count, _bl.max_polls))
+	end
+
+	-- Continue polling or timeout
+	if _bl.poll_count < _bl.max_polls then
+		_Debug_ScheduleNextPhase(_BL_ApproachB_PollProgress, _BL_POLL_INTERVAL, "Poll", _BL_SUITE .. "_B")
+	else
+		print(string.format("    [TIMEOUT] Polling expired after %d polls", _bl.max_polls))
+		-- Force-complete if timed out so we can still verify the entity
+		if _bl.entity ~= nil then
+			print("    [FALLBACK] Applying Entity_ForceConstruct to complete timed-out building")
+			pcall(Entity_ForceConstruct, _bl.entity)
+		end
+		_Debug_ScheduleNextPhase(_BL_ApproachB_Verify, _BL_DELAY, "Phase 4: Verify", _BL_SUITE .. "_B")
+	end
+end
+
+--- Verification phase for Approach B.
+function _BL_ApproachB_Verify()
+	_Debug_PhaseHeader(3, "VERIFICATION")
+
+	if _bl.entity ~= nil then
+		local final = _BL_ProbeEntity(_bl.entity, "final")
+		_BL_PrintProbe(final)
+		_BL_Assert("Final: alive", final.alive)
+		_BL_Assert("Final: progress >= 1.0", final.progress >= 1.0, final.progress)
+		_BL_Assert("Final: not under construction", not final.under_construction)
+		_BL_Assert("Final: health > 0", final.health > 0, final.health)
+		_BL_Assert("Final: NOT ghost-state", not _BL_IsGhostState(final))
+
+		-- Check if workers were actually used (progress should have been observed < 1.0 at some point)
+		local organic = _bl.poll_count > 1
+		_BL_Assert("Workers engaged (multi-poll observed)", organic,
+			string.format("polls=%d", _bl.poll_count))
+	else
+		_BL_Assert("Building entity discovered", false, "entity was never found")
+	end
+
+	-----------------------------------------------------------------
+	-- Cleanup
+	-----------------------------------------------------------------
+	_Debug_PhaseHeader(4, "CLEANUP")
+	_BL_Cleanup(_bl.entity, "Approach B house")
+	-- Kill test workers
+	if _bl.sg ~= nil then
+		pcall(SGroup_DestroyAllSquads, _bl.sg)
+		print("      [CLEANUP] Destroyed Approach B workers")
+	end
+
+	local ok_gt2, gt2 = pcall(World_GetGameTime)
+	local elapsed = (ok_gt2 and gt2 or 0) - _bl.start_time
+	_Debug_EndMarker(_BL_SUITE .. "_B", _bl.passed, _bl.total, elapsed)
+end
+
+---------------------------------------------------------------------------------------------------
+-- APPROACH C: Manual SCMD
+-- Entity_CreateFacing → Entity_Spawn → LocalCommand_SquadEntity(SCMD_BuildStructure)
+-- Foundation is placed explicitly, then workers are targeted at it via squad-entity command.
+-- Reference: obj_rebuildmoscow.scar (SCMD_BuildStructure pattern)
+---------------------------------------------------------------------------------------------------
+
+function Debug_BuildLifecycle_ManualSCMD()
+	_cba_debug.enabled = true
+
+	local player, pidx = _BL_ResolvePlayer()
+	local civ = _Debug_GetPlayerCiv(player)
+	local ebp, _ = _BL_GetHouseEBP(player)
+
+	_bl = { passed = 0, total = 0, start_time = 0, entity = nil, sg = nil }
+	local ok_gt, gt = pcall(World_GetGameTime)
+	_bl.start_time = ok_gt and gt or 0
+
+	print("")
+	print("============================================================")
+	print("  BUILD LIFECYCLE — APPROACH C: MANUAL SCMD")
+	print(string.format("  Player: P%d (%s)", pidx, civ))
+	print("  Pattern: Entity_CreateFacing → Spawn → SCMD_BuildStructure")
+	print("  Source: obj_rebuildmoscow.scar")
+	print("============================================================")
+
+	_Debug_PhaseHeader(0, "PREREQUISITES")
+	_BL_Assert("Player resolved", player ~= nil, pidx)
+	_BL_Assert("House EBP resolved", ebp ~= nil, civ)
+
+	if ebp == nil then
+		_Debug_EndMarker(_BL_SUITE .. "_C", _bl.passed, _bl.total, 0)
+		return
+	end
+
+	local anchor = _Debug_GetPlayerSpawnAnchor(player)
+	_BL_Assert("Spawn anchor found", anchor ~= nil)
+	if anchor == nil then
+		_Debug_EndMarker(_BL_SUITE .. "_C", _bl.passed, _bl.total, 0)
+		return
+	end
+
+	-- Offset so we don't collide with A or B sites
+	local pos = _Debug_ClampToPlayableBounds(anchor, 15, -20, 30)
+	local facing = _BL_GetFacingPos(pos)
+
+	-----------------------------------------------------------------
+	-- Phase 1: Create Foundation Manually
+	-----------------------------------------------------------------
+	_Debug_PhaseHeader(1, "CREATE FOUNDATION")
+
+	local ok_create, entity = pcall(Entity_CreateFacing, ebp, player.id, pos, facing, true)
+	_BL_Assert("Entity_CreateFacing succeeded", ok_create and entity ~= nil, tostring(entity))
+
+	if not ok_create or entity == nil then
+		_Debug_EndMarker(_BL_SUITE .. "_C", _bl.passed, _bl.total, 0)
+		return
+	end
+
+	pcall(Entity_SnapToGridAndGround, entity, false)
+	local ok_spawn = pcall(Entity_Spawn, entity)
+	_BL_Assert("Entity_Spawn succeeded", ok_spawn)
+
+	-- Create EGroup for SCMD targeting
+	local eg_name = "eg_bl_scmd_target_" .. tostring(player.id)
+	local eg = EGroup_CreateIfNotFound(eg_name)
+	EGroup_Clear(eg)
+	EGroup_Add(eg, entity)
+	_BL_Assert("EGroup created with foundation", EGroup_CountSpawned(eg) == 1, EGroup_CountSpawned(eg))
+	_bl.entity = entity
+	_bl.eg = eg
+
+	-- Probe foundation state
+	local pre_scmd = _BL_ProbeEntity(entity, "foundation-spawned")
+	_BL_PrintProbe(pre_scmd)
+	_BL_Assert("Foundation: alive", pre_scmd.alive)
+	_BL_Assert("Foundation: progress < 1.0", pre_scmd.progress < 1.0, pre_scmd.progress)
+
+	local ghost = _BL_IsGhostState(pre_scmd)
+	_BL_Assert("Foundation: NOT ghost-state anomaly", not ghost,
+		ghost and "GHOST DETECTED — this is the cba_ai_player failure mode" or "clean")
+	if ghost then
+		print("    [WARN] Ghost-state detected at foundation creation.")
+		print("    [WARN] This was a known problem in cba_ai_player: Entity_CreateFacing + Spawn")
+		print("    [WARN] produces a visually complete building that ignores construction commands.")
+	end
+
+	-----------------------------------------------------------------
+	-- Phase 2: Spawn Workers + Issue SCMD_BuildStructure
+	-----------------------------------------------------------------
+	_Debug_PhaseHeader(2, "SPAWN WORKERS + SCMD_BUILDSTRUCTURE")
+
+	local sg, count = _BL_SpawnWorkers(player, pos, 2, "approach_c")
+	_bl.sg = sg
+	_BL_Assert("Workers spawned", count >= 1, count)
+
+	if count < 1 then
+		_BL_Cleanup(entity, "Approach C foundation")
+		_Debug_EndMarker(_BL_SUITE .. "_C", _bl.passed, _bl.total, 0)
+		return
+	end
+
+	-- Issue SCMD_BuildStructure: villagers target the EGroup containing our foundation
+	local ok_scmd, scmd_err = pcall(
+		LocalCommand_SquadEntity,
+		player.id, sg, SCMD_BuildStructure, eg, false
+	)
+	_BL_Assert("SCMD_BuildStructure command issued", ok_scmd, tostring(scmd_err))
+
+	if not ok_scmd then
+		print(string.format("    [ERROR] SCMD failed: %s", tostring(scmd_err)))
+		print("    [NOTE] This may indicate SCMD_BuildStructure requires an existing foundation")
+		print("    [NOTE] in 'under_construction' state — ghost-state entities cannot receive this command.")
+	end
+
+	-- Store state for polling
+	_bl.player = player
+	_bl.pidx = pidx
+	_bl.poll_count = 0
+	_bl.max_polls = math.ceil(_BL_WORKER_WAIT / _BL_POLL_INTERVAL)
+
+	print(string.format("    Waiting up to %.0fs for construction...", _BL_WORKER_WAIT))
+	_Debug_ScheduleNextPhase(_BL_ApproachC_PollProgress, _BL_POLL_INTERVAL, "Phase 3: Poll", _BL_SUITE .. "_C")
+end
+
+--- Poll for construction progress (Approach C).
+function _BL_ApproachC_PollProgress()
+	_bl.poll_count = _bl.poll_count + 1
+
+	if _bl.entity ~= nil then
+		local probe = _BL_ProbeEntity(_bl.entity, string.format("poll_%d", _bl.poll_count))
+		_BL_PrintProbe(probe)
+
+		if probe.progress >= 1.0 then
+			_Debug_ScheduleNextPhase(_BL_ApproachC_Verify, _BL_DELAY, "Phase 4: Verify", _BL_SUITE .. "_C")
+			return
+		end
+
+		-- Track whether progress is advancing (evidence workers are building)
+		if _bl.last_progress ~= nil and probe.progress > _bl.last_progress then
+			_bl.progress_advanced = true
+		end
+		_bl.last_progress = probe.progress
+	end
+
+	if _bl.poll_count < _bl.max_polls then
+		_Debug_ScheduleNextPhase(_BL_ApproachC_PollProgress, _BL_POLL_INTERVAL, "Poll", _BL_SUITE .. "_C")
+	else
+		print(string.format("    [TIMEOUT] Polling expired after %d polls", _bl.max_polls))
+		if _bl.entity ~= nil then
+			local final_probe = _BL_ProbeEntity(_bl.entity, "timeout-state")
+			_BL_PrintProbe(final_probe)
+			if final_probe.progress < 1.0 then
+				print("    [FALLBACK] Applying Entity_ForceConstruct")
+				pcall(Entity_ForceConstruct, _bl.entity)
+			end
+		end
+		_Debug_ScheduleNextPhase(_BL_ApproachC_Verify, _BL_DELAY, "Phase 4: Verify", _BL_SUITE .. "_C")
+	end
+end
+
+--- Verification phase for Approach C.
+function _BL_ApproachC_Verify()
+	_Debug_PhaseHeader(3, "VERIFICATION")
+
+	if _bl.entity ~= nil then
+		local final = _BL_ProbeEntity(_bl.entity, "final")
+		_BL_PrintProbe(final)
+		_BL_Assert("Final: alive", final.alive)
+		_BL_Assert("Final: progress >= 1.0", final.progress >= 1.0, final.progress)
+		_BL_Assert("Final: not under construction", not final.under_construction)
+		_BL_Assert("Final: health > 0", final.health > 0, final.health)
+		_BL_Assert("Final: NOT ghost-state", not _BL_IsGhostState(final))
+
+		local organic = _bl.progress_advanced == true
+		_BL_Assert("SCMD workers engaged (progress advanced organically)", organic,
+			organic and "workers built successfully" or "progress did not advance — workers may have been ignored")
+	else
+		_BL_Assert("Building entity exists", false, "entity nil")
+	end
+
+	-----------------------------------------------------------------
+	-- Cleanup
+	-----------------------------------------------------------------
+	_Debug_PhaseHeader(4, "CLEANUP")
+	_BL_Cleanup(_bl.entity, "Approach C house")
+	if _bl.sg ~= nil then
+		pcall(SGroup_DestroyAllSquads, _bl.sg)
+		print("      [CLEANUP] Destroyed Approach C workers")
+	end
+
+	local ok_gt2, gt2 = pcall(World_GetGameTime)
+	local elapsed = (ok_gt2 and gt2 or 0) - _bl.start_time
+	_Debug_EndMarker(_BL_SUITE .. "_C", _bl.passed, _bl.total, elapsed)
+end
+
+---------------------------------------------------------------------------------------------------
+-- COMPARISON HARNESS: Runs all three approaches sequentially.
+-- Provides a unified summary comparing reliability across approaches.
+---------------------------------------------------------------------------------------------------
+
+function Debug_BuildLifecycle_All()
+	_cba_debug.enabled = true
+	_bl = { passed = 0, total = 0, start_time = 0 }
+	local ok_gt, gt = pcall(World_GetGameTime)
+	_bl.start_time = ok_gt and gt or 0
+
+	print("")
+	print("============================================================")
+	print("  BUILD LIFECYCLE — FULL COMPARISON HARNESS")
+	print("  Running Approach A → B → C sequentially.")
+	print("============================================================")
+
+	-- Run Approach A first (synchronous — finishes immediately)
+	Debug_BuildLifecycle_InstantForce()
+
+	-- Schedule Approach B after a delay (it has async polling)
+	_Debug_ScheduleNextPhase(Debug_BuildLifecycle_WorkerCommand, 2.0, "Approach B", _BL_SUITE)
+
+	-- Approach C is chained by B's completion → we schedule it from a wrapper
+	-- that monitors B's EndMarker, but for simplicity we use a fixed delay.
+	-- B runs for up to _BL_WORKER_WAIT + overhead ≈ 12s
+	Rule_AddOneShot(_BL_ChainApproachC, _BL_WORKER_WAIT + 5.0)
+end
+
+function _BL_ChainApproachC()
+	Debug_BuildLifecycle_ManualSCMD()
+end
+
+---------------------------------------------------------------------------------------------------
+-- REGISTRATION
+---------------------------------------------------------------------------------------------------
+
+debug._register(
+	"build_a",
+	Debug_BuildLifecycle_InstantForce,
+	"Build lifecycle Approach A: Entity_CreateFacing → Spawn → ForceConstruct (instant, no workers)",
+	1
+)
+
+debug._register(
+	"build_b",
+	Debug_BuildLifecycle_WorkerCommand,
+	"Build lifecycle Approach B: LocalCommand_PlayerSquadConstructBuilding (official campaign pattern)",
+	2
+)
+
+debug._register(
+	"build_c",
+	Debug_BuildLifecycle_ManualSCMD,
+	"Build lifecycle Approach C: Manual foundation → SCMD_BuildStructure (explicit worker targeting)",
+	2
+)
+
+debug._register(
+	"build_all",
+	Debug_BuildLifecycle_All,
+	"Build lifecycle comparison: runs A → B → C sequentially with unified output",
+	3
+)

@@ -1,0 +1,844 @@
+--[[ COOP 4 Players - Taiga / RUS vs MON
+By Comrad Ping
+
+Credits:
+AGameAnx - GetAIDifficulty
+Foxplot  - Patrol_Cycle, Units_Deploy 
+Woprock  - Advanced Game Settings functions (AGS_GetCivilizationEntity, AGS_ENTITY_TABLE)
+]]
+
+import("MissionOMatic/MissionOMatic.scar")   -- this imports the Cardinal scripts as well	
+import("winconditions/annihilation.scar")    -- eliminates players without units left
+--import("winconditions/surrender.scar")	        -- Support for player surrender (through pause menu)
+--import("winconditions/elimination.scar")		-- Support for player quitting or dropping (through pause menu or disconnection)  
+
+-- Scenario related
+import("scar/Coop_4_Taiga_data.scar")
+import("scar/Coop_4_Taiga_spawns.scar")
+import("scar/Coop_4_Taiga_objectives.scar")
+import("scar/Coop_4_Taiga_training.scar")
+import("scar/Coop_4_Taiga_difficulty.scar")
+import("scar/Coop_4_Taiga_disconnect.scar")
+import("scar/Coop_4_Taiga_debug.scar")
+import("scar/roving_army.scar")
+import("scar/diplomacy/Coop_4_Taiga_tribute.scar")
+-------------------------------------------
+
+function Mission_SetupPlayers()
+	
+	-- Get player IDs for each player
+	player1 = World_GetPlayerAt(1) -- Players
+	player2 = World_GetPlayerAt(2) 
+	player3 = World_GetPlayerAt(3) 
+	player4 = World_GetPlayerAt(4) 
+	
+	player5 = World_GetPlayerAt(5) -- Allied AI
+	player6 = World_GetPlayerAt(6) -- Enemey AI
+
+	
+	
+end
+
+
+function Mission_SetupVariables()	-- create any extra sgroups, egroups, and mission variables in here
+	
+	-- Moved into Coop_4_Taiga_data.scar
+	SetupVariables_data()
+	
+end
+
+
+function Mission_SetRestrictions()	-- set up any restrictions (i.e. locking out units, etc) in here
+
+	-- Upgrades/Abilities setup
+	for _, player in pairs(PLAYERS) do
+		local player_civ = Player_GetRaceName(player.id)
+		
+		-- Disable Stone/Palisade walls (Issues with AI paths)
+		if not IsCivFamily(player.id, "mongol") then
+			local ebp_stone = TryGetCivilizationEntity(player.raceName, AGS_BP_STONEWALL)
+			if ebp_stone then
+				Player_SetEntityProductionAvailability(player.id, ebp_stone, ITEM_REMOVED)
+			end
+			local ebp_palisade = TryGetCivilizationEntity(player.raceName, AGS_BP_PALISADE)
+			if ebp_palisade then
+				Player_SetEntityProductionAvailability(player.id, ebp_palisade, ITEM_REMOVED)
+			end
+		end
+
+		-- Disable Dock (Default)
+		local ebp_dock = TryGetCivilizationEntity(player.raceName, AGS_BP_DOCK)
+		if ebp_dock then
+			Player_SetEntityProductionAvailability(player.id, ebp_dock, ITEM_REMOVED)
+		end
+		
+		-- Starting upgrades (Default)
+		Player_CompleteUpgrade(player.id, UPG.COMMON.UPGRADE_SCOUT_FORESTER) -- Ability: Scout / Pickup
+		
+		-- Starting upgrades / Difficulty: Intermediate -
+		if AI_Difficulty <= 1 then 
+			-- Faction shared
+			Player_CompleteUpgrade(player.id, UPG.COMMON.UPGRADE_MELEE_DAMAGE_I)
+			Player_CompleteUpgrade(player.id, UPG.COMMON.UPGRADE_RANGED_ARMOR_I)
+			-- Faction unique
+			if IsCivExact(player.id, "english") then
+				Player_CompleteUpgrade(player.id, UPG.ENGLISH.UPGRADE_UNIT_MANATARMS_2_ENG)
+				Player_CompleteUpgrade(player.id, UPG.ENGLISH.UPGRADE_ARMOR_CLAD_ENG)
+			end
+			if IsCivExact(player.id, "hre") then
+				Player_CompleteUpgrade(player.id, UPG.HRE.UPGRADE_MAN_AT_ARMS_TWO_HANDED_HRE)
+				Player_CompleteUpgrade(player.id, UPG.HRE.UPGRADE_INSPIRED_INFANTRY_HRE)
+			end
+		end
+
+		-- Disable Ability: Conversion / Difficulty: Hard +
+		if AI_Difficulty >= 2 then
+			Player_SetAbilityAvailability(player.id, BP_GetAbilityBlueprint("monk_conversion"), ITEM_REMOVED)
+			-- Abbasid unique 
+			if IsCivFamily(player.id, "abbasid") then
+				Player_SetAbilityAvailability(player.id, BP_GetAbilityBlueprint ("monk_conversion_faith_abb"), ITEM_REMOVED)
+			end
+		end
+		
+	end
+	
+	-- Keep Restriction  / Difficulty: Intermediate +
+	if AI_Difficulty >= 1 then 
+		for _, player in pairs(PLAYERS) do
+			local player_civ = Player_GetRaceName(player.id)
+			
+			-- All factions
+			local ebp_keep = TryGetCivilizationEntity(player.raceName, AGS_BP_KEEP)
+			if ebp_keep then
+				Player_SetEntityProductionAvailability(player.id, ebp_keep, ITEM_REMOVED)
+			end
+			-- Faction specific
+			if player_civ == "english" then
+				Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint ("building_landmark_age2_white_tower_eng"), ITEM_REMOVED)
+			end
+			if player_civ == "lancaster" then
+				Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_age2_white_tower_lan"), ITEM_REMOVED)
+			end
+			-- Landmarks / (Difficulty check for 'Age 4 Restriction / Difficulty: Hard +')
+			if AI_Difficulty <= 1 then 
+				if player_civ == "english" then
+					Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint ("building_landmark_age3_windsor_castle_eng"), ITEM_REMOVED)
+				end
+				if player_civ == "french" then
+					Player_SetEntityProductionAvailability(player.id, EBP.FRENCH.BUILDING_LANDMARK_AGE2_LA_CHATEAU_ROUGE_FRE, ITEM_REMOVED)
+				end
+				if player_civ == "french_ha_01" then
+					Player_SetEntityProductionAvailability(player.id, EBP.FRENCH_HA_01.BUILDING_LANDMARK_AGE2_LA_CHATEAU_ROUGE_FRE_HA_01, ITEM_REMOVED)
+				end
+				if player_civ == "hre" then
+					Player_SetEntityProductionAvailability(player.id, EBP.HRE.BUILDING_LANDMARK_AGE3_ELTZ_CASTLE_HRE, ITEM_REMOVED)
+				end
+				if player_civ == "hre_ha_01" then
+					Player_SetEntityProductionAvailability(player.id, EBP.HRE_HA_01.BUILDING_LANDMARK_AGE3_ELTZ_CASTLE_HRE_HA_01, ITEM_REMOVED)
+				end
+				if player_civ == "japanese" then
+					Player_SetEntityProductionAvailability(player.id, EBP.JAPANESE.BUILDING_LANDMARK_AGE3_TREASURE_JPN, ITEM_REMOVED)
+				end
+				if player_civ == "malian" then
+					Player_SetEntityProductionAvailability(player.id, EBP.MALIAN.BUILDING_LANDMARK_AGE3_LANDMARKF_MAL, ITEM_REMOVED)
+				end
+				if player_civ == "ottoman" then
+					Player_SetEntityProductionAvailability(player.id, EBP.OTTOMAN.BUILDING_LANDMARK_AGE3_KILITBAHIR_CASTLE_OTT, ITEM_REMOVED)
+				end
+				if player_civ == "rus" then
+					Player_SetEntityProductionAvailability(player.id, EBP.RUS.BUILDING_LANDMARK_AGE3_SPASSAKAYA_TOWER_CONTROL_RUS, ITEM_REMOVED)
+				end
+				-- KoCR DLC factions
+				if player_civ == "lancaster" then
+					Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_age3_berkshire_lan"), ITEM_REMOVED)
+				end
+				if player_civ == "japanese_ha_sen" then
+					Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_age3_crow_jpn_ha_sen"), ITEM_REMOVED)
+				end
+				if player_civ == "byzantine_ha_mac" then
+					Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_age3_eastern_merc_house_byz_ha_mac"), ITEM_REMOVED)
+				end
+				if player_civ == "sultanate_ha_tug" then
+					Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_age3_madrasa_e_firoz_sul_ha_tug"), ITEM_REMOVED)
+				end
+			end
+		end
+		
+	end
+	
+	-- Siege Restriction  / Difficulty: Intermediate +
+	if AI_Difficulty >= 1 then
+		for _, player in pairs(PLAYERS) do
+			_ApplySiegeRestrictions(player, ITEM_LOCKED)
+		end
+	end
+
+	-- Bombard objective gate: lock bombard/culverin families for all civs until Phase3_SiegeCapture completes.
+	for _, player in pairs(PLAYERS) do
+		_ApplyBombardObjectiveRestrictions(player, ITEM_LOCKED)
+	end
+
+	-- Siege Engineers Restriction / Difficulty: Hard +
+	if AI_Difficulty >= 2 then
+		for _, player in pairs(PLAYERS) do
+			_ApplySiegeEngineersRestrictions(player, ITEM_LOCKED)
+		end
+	end
+	-- Workshop Restriction / Difficulty: Hardest +
+	if AI_Difficulty >= 5 then
+		for _, player in pairs(PLAYERS) do
+			local ebp = TryGetCivilizationEntity(player.raceName, AGS_BP_WORKSHOP)
+			if ebp then
+				Player_SetEntityProductionAvailability(player.id, ebp, ITEM_LOCKED)
+			end
+		end
+	end
+	
+	-- Age 4 Restriction / Difficulty: Hard +
+	if AI_Difficulty >= 2 then 
+		-- Restrict players max age to Castle Age
+		for _, player in pairs(PLAYERS) do
+			Player_SetMaximumAge(player.id, AGE_CASTLE)
+		end
+		
+		-- Faction specific
+		for _, player in pairs(PLAYERS) do
+			local player_civ = Player_GetRaceName(player.id)	
+			
+			-- House of Wisdom / Age 4 upgrades
+			if player_civ == "abbasid" then
+				Player_SetUpgradeAvailability(player.id, UPG.ABBASID.UPGRADE_ADD_CULTURE_WING_CASTLE, ITEM_REMOVED)
+				Player_SetUpgradeAvailability(player.id, UPG.ABBASID.UPGRADE_ADD_TRADE_WING_CASTLE, ITEM_REMOVED)
+				Player_SetUpgradeAvailability(player.id, UPG.ABBASID.UPGRADE_ADD_MILITARY_WING_CASTLE, ITEM_REMOVED)
+				Player_SetUpgradeAvailability(player.id, UPG.ABBASID.UPGRADE_ADD_ECONOMY_WING_CASTLE, ITEM_REMOVED)
+			end
+			
+			-- Landmarks / Age 4
+			if player_civ == "hre" then
+				Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint ("building_landmark_age3_hohenzollern_castle_hre"), ITEM_REMOVED)
+				Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint ("building_landmark_age3_eltz_castle_hre"), ITEM_REMOVED)
+			end
+			-- Landmarks / Age 4
+			if player_civ == "malian" then
+				Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_Age3_landmarke_mal"), ITEM_REMOVED)
+				Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_Age3_landmarkf_mal"), ITEM_REMOVED)
+			end
+			-- Landmarks / Age 4
+			if player_civ == "ottoman" then
+				Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_age3_istanbul_observatory_ott"), ITEM_REMOVED)
+				Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_age3_kilitbahir_castle_ott"), ITEM_REMOVED)
+			end
+			
+			-- Landmarks / Age 4 / Sultan DLC
+			if player_civ == "japanese" then
+				Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_age3_ozutsu_jpn"), ITEM_REMOVED)
+				Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_age3_treasure_jpn"), ITEM_REMOVED)
+			end
+			if player_civ == "byzantine" then
+				Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_age3_eastern_merc_house_byz"), ITEM_REMOVED)
+				Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_age3_western_merc_house_byz"), ITEM_REMOVED)
+			end
+			if player_civ == "chinese_ha_01" then
+				Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_age3_temple_of_the_sun_control_chi_ha_01"), ITEM_REMOVED)
+				Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_age3_library_chi_ha_01"), ITEM_REMOVED)
+			end
+			if player_civ == "french_ha_01" then
+				Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_age3_ecole_de_poudre_a_canon_fre_ha_01"), ITEM_REMOVED)
+				Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_age2_la_chateau_rouge_fre_ha_01"), ITEM_REMOVED)
+			end
+			if player_civ == "hre_ha_01" then
+				Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_age3_eltz_castle_hre_ha_01"), ITEM_REMOVED)
+				Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_age3_hohenzollern_castle_hre_ha_01"), ITEM_REMOVED)
+			end
+			-- Landmarks / Age 4 / KoCR DLC
+			if player_civ == "lancaster" then
+				Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_age3_berkshire_lan"), ITEM_REMOVED)
+				Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_age3_wynguard_lan"), ITEM_REMOVED)
+			end
+			if player_civ == "byzantine_ha_mac" then
+				Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_age3_eastern_merc_house_byz_ha_mac"), ITEM_REMOVED)
+				Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_age3_western_merc_house_byz_ha_mac"), ITEM_REMOVED)
+			end
+			if player_civ == "japanese_ha_sen" then
+				Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_age3_crow_jpn_ha_sen"), ITEM_REMOVED)
+				Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_age3_statue_jpn_ha_sen"), ITEM_REMOVED)
+			end
+			if player_civ == "sultanate_ha_tug" then
+				Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_age3_madrasa_e_firoz_sul_ha_tug"), ITEM_REMOVED)
+				Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_age3_bijay_mandal_palace_control_sul_ha_tug"), ITEM_REMOVED)
+			end
+			-- House of Wisdom / Age 4 upgrades
+			if player_civ == "abbasid_ha_01" then
+				Player_SetUpgradeAvailability(player.id, UPG.ABBASID_HA_01.UPGRADE_ADD_CULTURE_WING_CASTLE_A_ABB_HA_01, ITEM_REMOVED)
+				Player_SetUpgradeAvailability(player.id, UPG.ABBASID_HA_01.UPGRADE_ADD_CULTURE_WING_CASTLE_B_ABB_HA_01, ITEM_REMOVED)
+				Player_SetUpgradeAvailability(player.id, UPG.ABBASID_HA_01.UPGRADE_ADD_TRADE_WING_CASTLE_A_ABB_HA_01, ITEM_REMOVED)
+				Player_SetUpgradeAvailability(player.id, UPG.ABBASID_HA_01.UPGRADE_ADD_TRADE_WING_CASTLE_B_ABB_HA_01, ITEM_REMOVED)
+				Player_SetUpgradeAvailability(player.id, UPG.ABBASID_HA_01.UPGRADE_ADD_ECONOMY_WING_CASTLE_A_ABB_HA_01, ITEM_REMOVED)
+				Player_SetUpgradeAvailability(player.id, UPG.ABBASID_HA_01.UPGRADE_ADD_ECONOMY_WING_CASTLE_B_ABB_HA_01, ITEM_REMOVED)
+				Player_SetUpgradeAvailability(player.id, UPG.ABBASID_HA_01.UPGRADE_ADD_MILITARY_WING_CASTLE_A_ABB_HA_01, ITEM_REMOVED)
+				Player_SetUpgradeAvailability(player.id, UPG.ABBASID_HA_01.UPGRADE_ADD_MILITARY_WING_CASTLE_B_ABB_HA_01, ITEM_REMOVED)
+			end
+			
+		end
+	end
+
+end
+
+-- This function will be called before the intro cinematic
+function Mission_Preset()	-- any other setup to do before the mission starts (i.e. set up rules, spawn units, etc)
+	
+	AI_SetPersonality(player5, "default_campaign")
+	AI_SetPersonality(player6, "default_campaign")
+	
+	-- Add starting population +50
+	local pop_mod = Modifier_Create(MAT_Player, "personnel_cap_player_modifier", MUT_Addition, false, 50, "")
+	for _, player in pairs(PLAYERS) do
+		Modifier_ApplyToPlayer(pop_mod, player.id, 0)
+		Player_CompleteUpgrade(player.id, UPG.COMMON.UPGRADE_SCOUT_FORESTER)
+		Player_SetStateModelBool(player.id, "player_can_interact_with_resource_pickups", true)
+	end	
+
+	-- Initialize path data
+	Unit_Path_Data() 
+	
+	-- Initialize objectives
+	Phase1_Checkpoint_InitObjectives() -- Phase #1
+	Phase1_Outposts_InitObjectives()
+	Phase1_VillageNorth_InitObjectives()
+	Phase1_VillageDefence_InitObjectives()
+	
+	Phase2_VillageCapture_InitObjectives() -- Phase #2
+	PrepareDefences_InitObjectives() -- Notification: Wave warning
+	
+	Phase3_SiegeCapture_InitObjectives()
+	Phase3_CityAssault_InitObjectives()
+	Phase3_FinalKeep_InitObjectives()
+	
+end
+
+function Mission_SetPlayer6BuildingTargetingManual()
+	local buildings = Player_GetEntities(player6)
+	local eg_manual_targeting = EGroup_CreateIfNotFound("eg_player6_manual_targeting")
+	EGroup_Clear(eg_manual_targeting)
+
+	local _CollectEligibleBuilding = function(group_id, entity_index, entity)
+		if Entity_IsAlive(entity) ~= true then
+			return false
+		end
+
+		local bp_name = BP_GetName(Entity_GetBlueprint(entity))
+		if string.sub(bp_name, 1, 9) ~= "building_"
+    and bp_name ~= "military_tent_a_rus"
+    and bp_name ~= "military_tent_b_eng"
+    and bp_name ~= "york_dane_tent_eng" then
+    return false
+	end
+		if Entity_IsOfType(entity, "outpost") then
+			return false
+		end
+		if bp_name == "building_defense_tower_rus" or bp_name == "building_defense_keep_control_rus" then
+			return false
+		end
+
+		EGroup_Add(eg_manual_targeting, entity)
+		return false
+	end
+
+	EGroup_ForEach(buildings, _CollectEligibleBuilding)
+	if EGroup_CountSpawned(eg_manual_targeting) > 0 then
+		EGroup_SetTargetingType(eg_manual_targeting, Targeting_Manual)
+	end
+end
+
+-- This function will be called after the intro cinematic, before the player takes control
+function Mission_Start()	-- this is triggered after the intro, just as control is passed to the player
+	
+	-- Per-player Mission_Start setup (TC menu, UI overrides)
+	for _, player in ipairs(PLAYERS) do
+		Player_SetStateModelFloat(player.id, "has_capital", 0)
+		UI_SetPlayerDataContext(player.id, { PopulationCapOn = false, hide_condensed_objectives_override = true })
+	end
+	
+	-- Setup AI starting age 
+	Player_SetCurrentAge(player5, AGE_CASTLE)
+	Player_SetCurrentAge(player6, AGE_CASTLE)
+	-- Set player age
+--	Player_SetCurrentAge(player1, AGE_FEUDAL) 
+--	Player_SetCurrentAge(player2, AGE_FEUDAL)
+--	Player_SetCurrentAge(player3, AGE_FEUDAL) 
+--	Player_SetCurrentAge(player4, AGE_FEUDAL)
+	-- Hide population UI / Condensed objectives fix
+	for _, player in pairs(PLAYERS) do
+		UI_SetPlayerDataContext(player.id, { PopulationCapOn = false, hide_condensed_objectives_override = true })
+	end
+	
+	-- Spawn Player units
+	Rule_AddOneShot(Start_Setup_Players, 0) -- Delay to load models from age up
+	
+	-- Spawn Enemey units
+	Start_Setup_Enemies()
+	
+	-- Starting objectives
+	Objective_Start(OBJ_Phase1_Checkpoint_main,true, false)
+	Objective_Start(OBJ_Phase1_Checkpoint_clear,false, false)
+	Objective_Start(OBJ_Phase1_Checkpoint_regroup,true, false)
+	
+	Objective_Start(OBJ_Phase1_Outposts_Main,true, false)
+	Objective_Start(OBJ_Phase1_Outposts_side1, false, false)
+	Objective_Start(OBJ_Phase1_Outposts_side2, false, false)
+	
+	-- SGroup Tracker: Group all Player units for Proximity Marker
+	for _, player in pairs(PLAYERS) do
+		Rule_AddInterval(SGroup_Tracker, 60, { player = player.id })
+	end
+	
+	-- Disable damage for objective related entities
+	local TC_North = EGroup_GetClosestEntity(eg_village_north, mkr_tc_north)
+	local TC_South = EGroup_GetClosestEntity(eg_village_south, mkr_tc_south)
+	
+	Entity_SetInvulnerable(TC_North, true, -1)
+	Entity_SetInvulnerable(TC_South, true, -1)
+	SGroup_SetInvulnerable(sg_siege_capture, true, -1) -- Bombards
+	EGroup_SetInvulnerable(eg_wood_bridge, true, -1) -- Bridge
+	
+	-- Disable targeting of RUS Buildings
+	EGroup_SetTargetingType(eg_village_north, Targeting_None)
+	EGroup_SetTargetingType(eg_village_south, Targeting_None)
+	Mission_SetPlayer6BuildingTargetingManual()
+	
+	-- Enable Training
+	Training_Init()
+	Training_ForceGoalsActive()  
+	-- Enable Hints
+	Wallingford_AddHintToRepair()
+	
+	-- Enable interactive zone 
+	World_SetInteractionStage(1)
+	
+	-- Disconnect system: slots 1-4 are co-op human seats by design
+	-- (Player_IsHuman() only works for local player in multiplayer)
+	for i = 1, 4 do
+		g_original_player_types[i] = true
+	end
+	
+	-- AI personality enforcement + disconnect detection
+	Rule_AddGlobalEvent(Reset_AI_OnMigrated, GE_AIPlayer_Migrated)
+	Rule_AddGlobalEvent(Reset_AI_OnTakeOver, GE_AITakeOver)
+	Rule_AddInterval(Reset_AI, 1)
+	
+	-- Tribute system
+	Tribute_Init()
+	
+	-- Disable 'Annihilation' defeat condition
+	Rule_RemoveGlobalEvent(Annihilation_OnEntityKilled)
+	Rule_RemoveGlobalEvent(Annihilation_OnLandmarkDestroyed)
+	Rule_RemoveGlobalEvent(Annihilation_OnConstructionComplete)
+	
+end
+
+-- I dont use this
+function GetRecipe() 
+
+	local recipe = {
+
+		
+		-- Defining Locations for reference in script
+		--locations = {
+			--{ descriptor = "descriptorToUse", marker = mkr_mkrNameInEditor, player = player1 },
+		--},
+		
+		
+		-- Modules
+		modules = {
+
+			-- Player starting units spawner when the mission starts. 
+			-- Define the spawn location, unit type, number of units and can mention where to spawn them.
+			--{
+				--type = "UnitSpawner",
+				--player = player1,
+				--spawnLocation = mkr_mkrNameInEditor,
+				--units = {
+					--{type = "scar_spearman", numSquads = 3, spawn = mkr_mkrNameInEditor},
+				--},
+			--},
+			
+		},
+
+		
+		-- Presentation aspects for the start or end of a mission
+		onStart = {
+			intelEvent = "",
+			expositionCamera = {},
+			titleCard = {
+				icon = "icons/campaign/campaign_angevin_the_conquest", --icon to use for title card on mission start
+				location = LOC("Location, year"),
+			},
+			actions = {
+			},
+		},
+	}
+
+		
+		
+	return recipe
+
+end
+
+-------------------------------------------
+-- Functions 
+-------------------------------------------
+
+-- Reset_AI and disconnect handling: see coop_4_taiga_disconnect.scar
+
+-- Unlocks Chinese Dynasty UI
+function DynastyUI_unlocked()
+	
+	for i, player in pairs(PLAYERS) do 
+
+		if IsCivFamily(player.id, "chinese") then 
+			-- Dynasties unlocked
+			Player_CompleteUpgrade(player.id, BP_GetUpgradeBlueprint "player_dynasty1_chi")
+			Player_SetStateModelBool(player.id, "dynasty_1_was_completed_chi",true) 
+			Player_CompleteUpgrade(player.id, BP_GetUpgradeBlueprint "player_dynasty2_chi")
+			Player_SetStateModelBool(player.id, "dynasty_2_was_completed_chi",true) 
+
+			-- Update UI
+			Player_SetStateModelFloat(player.id, "current_dynasty_chi",1)
+			if Game_GetLocalPlayer() == player.id then 
+				DynastyUI_Update()
+			end
+
+			Player_SetStateModelFloat(player.id, "current_dynasty_chi",2)
+			if Game_GetLocalPlayer() == player.id then 
+				DynastyUI_Update()
+			end
+		end
+	end
+	
+end
+
+-- Group all Player units for Proximity Marker
+function SGroup_Tracker(context, data)
+	
+	local player = data.player 
+	
+	Player_GetAll(player)
+	SGroup_Filter(sg_allsquads, "military", FILTER_REMOVED, sg_player_team)
+	--SGroup_AddGroup(sg_player_team, sg_allsquads)
+	
+	
+end 
+
+-- Patrol_Cycle & Units_Deploy / Thanks to Foxplot
+function Patrol_Cycle(context, data) -- Used to cycle units between waypoints
+	
+	local sgroup = data.sgroup 
+	local path = data.path 
+	
+	Cmd_FormationAttackMove(sgroup, path[1])
+	for index, mkr in pairs(path) do
+		if index > 1 then
+			Cmd_FormationAttackMove(sgroup, mkr, true)
+		end
+	end	
+	
+end
+
+-- 'Deploy_Unit' & 'Gaurdian_Raid' combined
+function Units_Deploy(context, data) -- Used to spawn units / attack groups
+
+	local player = data.player
+	local sgroup = data.sgroup
+	local unit_type = data.unit_type
+	local spawn_loc = data.spawn_loc
+	local path = data.path 
+
+
+	UnitEntry_DeploySquads(player, sgroup, unit_type, spawn_loc)
+	Cmd_FormationAttackMove(sgroup, path[1])
+	for index, mkr in pairs(path) do
+		if index > 1 then
+			Cmd_FormationAttackMove(sgroup, mkr, true)
+		end
+	end
+
+end
+
+-- Puts archers in selected building
+function Garrison_Building(context, data)
+
+	local egroup = data.egroup
+	local amount = data.amount
+	local player = data.player
+
+	if egroup == nil or amount == nil or player == nil then
+		print("[GARRISON] skipped: missing egroup/amount/player")
+		return
+	end
+
+	local _GarrisonOne = function(gid, idx, eid)
+		if eid == nil or Entity_IsAlive(eid) ~= true then
+			return
+		end
+
+		local free_slots = Entity_GetHoldSlotsAvailable(eid)
+		if free_slots == nil or free_slots <= 0 then
+			return
+		end
+
+		local spawn_count = math.min(amount, free_slots)
+		if spawn_count <= 0 then
+			return
+		end
+
+		EGroup_Single(eg_single, eid)
+		SGroup_Clear(sg_garrison)
+		local units = {
+			{type = "scar_archer", numSquads = spawn_count},
+		}
+		local options = {
+			ignorePathfindingPos = true,
+			ignoreFormation = true,
+		}
+
+		UnitEntry_DeploySquads(player, sg_garrison, units, eg_single, nil, nil, options)
+		Cmd_Garrison(sg_garrison, eg_single, nil, false, true)
+	end
+
+	EGroup_ForEach(egroup, _GarrisonOne)
+
+end
+
+-------------------------------------------
+-- Nil-safe Siege Restriction Helpers
+-------------------------------------------
+
+---_ApplySiegeRestrictions: Lock/unlock siege units using nil-safe lookups.
+-- DLC civs intentionally lack some keys — nil-safe helpers skip missing entries.
+function _ApplySiegeRestrictions(player, state)
+	local civ = string.lower(player.raceName)
+	local siege = CBA_SIEGE_TABLE[civ]
+	if siege == nil then
+		local resolved = ResolveCivKey(civ)
+		if resolved then siege = CBA_SIEGE_TABLE[resolved] end
+	end
+	if siege == nil then return end
+	
+	-- Nil-safe helpers: skip restriction if civ lacks the blueprint
+	local function _squad(key)
+		if siege[key] then Player_SetSquadProductionAvailability(player.id, BP_GetSquadBlueprint(siege[key]), state) end
+	end
+	local function _entity(key)
+		if siege[key] then Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint(siege[key]), state) end
+	end
+	
+	-- Mangonel (all civs)
+	_squad(BP_SIEGE_MANGONEL)
+	
+	-- Abbasid/Mongol family: field construct mangonel
+	if IsCivFamilyAny(player.id, {"abbasid", "mongol"}) then
+		_entity(BP_SIEGE_MANGONEL_BUILDABLE)
+	end
+	
+	-- Chinese/Mongol/Byzantine family: nest of bees
+	if IsCivFamilyAny(player.id, {"chinese", "mongol", "byzantine"}) then
+		_squad(BP_SIEGE_NESTOFBEES)
+		if IsCivExact(player.id, "chinese") then
+			Player_SetSquadProductionAvailability(player.id, SBP.CHINESE.UNIT_NEST_OF_BEES_4_CLOCKTOWER_CHI, state)
+		end
+	end
+	
+	-- Non-Chinese: ribauldequin
+	if not IsCivFamily(player.id, "chinese") then
+		_squad(BP_SIEGE_RIBAULDEQUIN)
+		if IsCivFamily(player.id, "french") then
+			_squad(BP_SIEGE_ROYAL_RIBAULDEQUIN)
+		end
+	end
+	
+	-- Ayyubids: ram tower (exact match only)
+	if IsCivExact(player.id, "abbasid_ha_01") then
+		Player_SetEntityProductionAvailability(player.id, EBP.ABBASID_HA_01.UNIT_RAM_TOWER_3_ABB_HA_01, state)
+	end
+	
+	-- Mongol family: double siege
+	if IsCivFamily(player.id, "mongol") then
+		_squad(BP_SIEGE_MANGONEL_DOUBLE)
+		_squad(BP_SIEGE_RIBAULDEQUIN_DOUBLE)
+	end
+	
+	-- Byzantine base only: outpost mangonel upgrade
+	if IsCivExact(player.id, "byzantine") then
+		Player_SetUpgradeAvailability(player.id, UPG.BYZANTINE.UPGRADE_OUTPOST_MANGONEL_BYZ, state)
+	end
+end
+
+---_ApplyBombardObjectiveRestrictions: Gate bombard/culverin production until Bombard objective completion.
+-- Applies to all civs and DLC by scanning CBA_SIEGE_TABLE keys.
+function _ApplyBombardObjectiveRestrictions(player, state)
+	local civ = string.lower(player.raceName)
+	local siege = CBA_SIEGE_TABLE[civ]
+	if siege == nil then
+		local resolved = ResolveCivKey(civ)
+		if resolved then siege = CBA_SIEGE_TABLE[resolved] end
+	end
+	if siege == nil then return end
+
+	for key, attrib in pairs(siege) do
+		if attrib ~= nil and (string.find(key, "bombard") ~= nil or string.find(key, "culverin") ~= nil) then
+			Player_SetSquadProductionAvailability(player.id, BP_GetSquadBlueprint(attrib), state)
+		end
+	end
+end
+
+---_ApplySiegeEngineersRestrictions: Lock/unlock siege engineer upgrades + field constructs.
+function _ApplySiegeEngineersRestrictions(player, state)
+	local player_civ = string.lower(Player_GetRaceName(player.id))
+	
+	-- Siege Engineers (Upgrade)
+	if not IsCivFamily(player.id, "sultanate") then
+		Player_SetUpgradeAvailability(player.id, BP_GetUpgradeBlueprint("upgrade_siege_engineers"), state)
+	else
+		Player_SetUpgradeAvailability(player.id, BP_GetUpgradeBlueprint("upgrade_siege_engineers_sul"), state)
+	end
+	
+	-- Mongol: improved siege engineers
+	if IsCivFamily(player.id, "mongol") then
+		Player_SetUpgradeAvailability(player.id, BP_GetUpgradeBlueprint("upgrade_improved_siege_engineers_mon"), ITEM_REMOVED)
+	end
+	
+	-- Abbasid family: field construct
+	if IsCivExact(player.id, "abbasid") then
+		Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("unit_mangonel_3_buildable_abb"), state)
+		Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("unit_springald_3_buildable_abb"), state)
+	end
+	if IsCivExact(player.id, "abbasid_ha_01") then
+		Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("unit_mangonel_3_buildable_abb_ha_01"), state)
+		Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("unit_springald_3_buildable_abb_ha_01"), state)
+		Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("unit_ram_tower_3_abb_ha_01"), state)
+	end
+end
+
+-- From Advanced Game Settings by Woprock 
+function AGS_GetCivilizationEntity(player_civ, bp_type)
+	local bp = AGS_ENTITY_TABLE[player_civ][bp_type]
+	if bp == nil or bp == false then return nil end
+	return BP_GetEntityBlueprint(bp)
+end 
+
+---TryGetCivilizationEntity: Safe DLC-aware blueprint lookup.
+-- Returns nil instead of erroring when civ lacks the requested bp_type.
+function TryGetCivilizationEntity(player_civ, bp_type)
+	local raw = string.lower(player_civ)
+	if DLC_CIV_OVERRIDES[raw] and DLC_CIV_OVERRIDES[raw][bp_type] ~= nil then
+		if DLC_CIV_OVERRIDES[raw][bp_type] == false then return nil end
+		return BP_GetEntityBlueprint(DLC_CIV_OVERRIDES[raw][bp_type])
+	end
+	local resolved = ResolveCivKey(raw)
+	if resolved == nil then return nil end
+	local entry = AGS_ENTITY_TABLE[resolved]
+	if entry == nil then return nil end
+	local bp = entry[bp_type]
+	if bp == nil or bp == false then return nil end
+	return BP_GetEntityBlueprint(bp)
+end
+
+-- From Onslaught / Copy of AGS method above
+function AGS_GetSiegeEntity(player_civ, bp_type)
+	return BP_GetEntityBlueprint(CBA_SIEGE_TABLE[player_civ][bp_type])
+end
+
+function AGS_GetSiegeSquad(player_civ, bp_type)
+	return BP_GetSquadBlueprint(CBA_SIEGE_TABLE[player_civ][bp_type])
+end
+
+-------------------------------------------
+-- DLC Civ Helpers
+-------------------------------------------
+
+---ResolveCivKey: Given a raceName, return a valid key in AGS_ENTITY_TABLE.
+-- Checks AGS directly first, then walks DLC_CIV_PARENT_MAP recursively.
+function ResolveCivKey(raceName, _depth)
+	if raceName == nil then return nil end
+	raceName = string.lower(raceName)
+	_depth = _depth or 0
+	if _depth > DLC_RESOLVE_MAX_DEPTH then
+		error("[DLC] ResolveCivKey: parent chain exceeded depth "
+			.. DLC_RESOLVE_MAX_DEPTH .. " for '" .. raceName
+			.. "'. Possible circular mapping.")
+	end
+	if AGS_ENTITY_TABLE[raceName] then
+		return raceName
+	end
+	local parent = DLC_CIV_PARENT_MAP[raceName]
+	if parent then
+		return ResolveCivKey(parent, _depth + 1)
+	end
+	return nil
+end
+
+---GetPlayerCiv: Resolve and cache a player's civ key.
+-- Returns a valid AGS_ENTITY_TABLE key, or errors.
+function GetPlayerCiv(player_id)
+	if DLC_PLAYER_CIV_CACHE[player_id] then
+		return DLC_PLAYER_CIV_CACHE[player_id]
+	end
+	local raceName = string.lower(Player_GetRaceName(player_id))
+	local resolved = ResolveCivKey(raceName)
+	if resolved == nil then
+		error("[DLC] GetPlayerCiv: Unknown civilization '" .. raceName
+			.. "' for player " .. tostring(player_id)
+			.. ". Not in AGS_ENTITY_TABLE or DLC_CIV_PARENT_MAP.")
+	end
+	DLC_PLAYER_CIV_CACHE[player_id] = resolved
+	return resolved
+end
+
+---IsCivFamily: Returns true if the player's resolved civ matches family.
+function IsCivFamily(player_id, family)
+	return GetPlayerCiv(player_id) == family
+end
+
+---IsCivExact: Returns true if the player's raw raceName matches exactly.
+function IsCivExact(player_id, civ_name)
+	return string.lower(Player_GetRaceName(player_id)) == civ_name
+end
+
+---IsCivFamilyAny: Returns true if resolved civ matches any of the listed families.
+function IsCivFamilyAny(player_id, families)
+	local resolved = GetPlayerCiv(player_id)
+	for _, fam in ipairs(families) do
+		if resolved == fam then return true end
+	end
+	return false
+end
+
+-------------------------------------------
+-- Defeat / Victory
+-------------------------------------------
+
+g_gameOver = false
+
+function Defeat_Function()
+	if g_gameOver then return end
+	g_gameOver = true
+	
+	Rule_RemoveGlobalEvent(Reset_AI_OnMigrated)
+	Rule_RemoveGlobalEvent(Reset_AI_OnTakeOver)
+	if Rule_Exists(Reset_AI) then Rule_Remove(Reset_AI) end
+	Tribute_Cleanup()
+	
+	Core_SetTeamDefeated(TEAMS[1], Annihilation_LoserPresentation, WR_ANNIHILATION)
+end
+
+function Victory_Function()
+	if g_gameOver then return end
+	g_gameOver = true
+	
+	Rule_RemoveGlobalEvent(Reset_AI_OnMigrated)
+	Rule_RemoveGlobalEvent(Reset_AI_OnTakeOver)
+	if Rule_Exists(Reset_AI) then Rule_Remove(Reset_AI) end
+	Tribute_Cleanup()
+	
+	Core_SetTeamDefeated(TEAMS[2], Annihilation_LoserPresentation, WR_ANNIHILATION)
+end

@@ -1,0 +1,1709 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — Battle Lag Harness
+-- Manual performance harness:
+--   * Tracks high-coverage combat/system events with bounded aggregation
+--   * 10-second structured summary: global events, systems, and performance metrics
+--   * 1s heartbeat with wall-clock + sim-clock deltas for lag/stutter diagnosis
+--   * Falls back to PerfStats dump when SCAR exposes no FPS getter
+--   * Spawns 125 men-at-arms + 30 crossbowmen per active player (human + AI)
+--   * All spawn paths route through CBA_Rewards_SpawnAndMove (pop-cap + precache + queue)
+--   * Harness overrides reward FormationMove with AttackMove toward sacred site target
+--   * SGroup_AddGroup transfers reward-spawned squads into harness tracking groups
+--   * Production loop: MAA + Crossbow ONLY, 25% of full group per tick, 15s interval
+--   * Crossbows are ALWAYS precached via Squad_Precache before any spawn (initial + production)
+--   * Forces all spawned groups toward sacred site center for large deterministic battle
+--   * At <=50% group strength, spawns missing squads and attack-moves to the same waypoint
+--   * Units are AI-locked via AI_LockSquads so AI tactics cannot override harness commands
+--   * Optional AI activity toggle: can leave AI scripted loops enabled for realistic load
+--   * Per-sim-frame counter via Rule_Add for true in-game tick-rate measurement
+--   * Stutter detection: warns when heartbeat wall_dt exceeds 2x expected interval
+--
+-- ╔══════════════════════════════════════════════════════════════════════════╗
+-- ║  PERMANENT DESIGN GOALS — DO NOT MODIFY WITHOUT FULL REVIEW            ║
+-- ║  1. Debug logger must NOT introduce lag (no per-event pcall overhead)   ║
+-- ║  2. Production spawner: MAA + Crossbowman ONLY (no other unit types)   ║
+-- ║  3. Crossbowman MUST be precached before EVERY spawn (initial + prod)  ║
+-- ║  4. Production: 25% of full group per tick, 15s interval               ║
+-- ║  5. Logger must detect and report ALL stutter/performance issues        ║
+-- ║  6. FPS measurement via Rule_Add per-sim-frame counter (not Timer*)    ║
+-- ║  7. All spawns route through CBA_Rewards_SpawnAndMove (pop-cap aware)  ║
+-- ╚══════════════════════════════════════════════════════════════════════════╝
+--
+-- Console:
+--   Debug_BattleLagTest()          -- starts test and keeps it running until manual stop
+--   Debug_BattleLagStop()          -- REQUIRED to end test and perform cleanup
+--   Debug_BattleLagStatus()        -- current counters/state snapshot
+--   Debug_BattleLagConfig()        -- prints current harness configuration
+--
+-- AI NOTE: Always provide Debug_BattleLagStop() alongside Debug_BattleLagTest() in console
+-- command tables. Always list both commands together.
+--
+-- Depends: cba_debug_core.scar, gameplay/cba_ai_player.scar
+---------------------------------------------------------------------------------------------------
+
+local _BL_SUITE = "BattleLagTest"
+local _BL_BATCH_SIZE = 125
+local _BL_CROSSBOW_BATCH_SIZE = 30
+local _BL_SUMMARY_INTERVAL = 10.0
+local _BL_FPS_LOG_INTERVAL = 1.0
+local _BL_REASSERT_INTERVAL = 3.0
+local _BL_REASSERT_DIST = 35.0
+local _BL_REWARD_REASSERT_INTERVAL = 1.0
+local _BL_IDLE_MIL_ORDER_INTERVAL = 60.0
+local _BL_HEALTH_CHECK_INTERVAL = 10.0
+local _BL_HEALTH_THRESHOLD = 0.50
+local _BL_ENABLE_HEALTH_RESPAWN = false  -- PERF: disabled by default; respawn spike (+307 squads) caused ~50% perf drop
+local _BL_MAX_EVENTS_PER_BUCKET = 100000
+local _BL_STUTTER_WALL_DT_THRESHOLD = 2.0  -- warn when heartbeat wall_dt exceeds this (seconds)
+
+-- ── Stress configuration ──────────────────────────────────────────────────
+-- PERMANENT: Production spawner is MAA + Crossbowman ONLY.
+--   DO NOT add other unit types here. This is a core design constraint.
+-- PERMANENT: Batch sizes are 25% of full group. Interval is 60s.
+--   DO NOT change these ratios without full performance review.
+local _BL_ENABLE_PRODUCTION_LOOP = true
+local _BL_PRODUCTION_INTERVAL = 60.0                                    -- DO NOT CHANGE — 60s is the validated interval
+local _BL_PRODUCTION_MAA_BATCH = math.floor(_BL_BATCH_SIZE * 0.25)      -- 25% of full MAA group per tick
+local _BL_PRODUCTION_XBOW_BATCH = math.floor(_BL_CROSSBOW_BATCH_SIZE * 0.25) -- 25% of full Crossbow group per tick
+local _BL_PRODUCTION_XBOW_RATIO = 0.25
+local _BL_MAX_TOTAL_UNITS = 2000
+local _BL_ENABLE_AI_ACTIVITY = false
+-- PERMANENT: MAA + Crossbow only. DO NOT add spearman, archer, horseman, knight, or any other type.
+local _BL_PRODUCTION_UNIT_TYPES = {
+	"scar_manatarms",
+	"scar_crossbowman",
+}
+
+local _bl = {
+	running = false,
+	start_time = 0,
+	phase = "idle",
+	target = nil,
+	players = {},
+	human_players = {},
+	groups = {},
+	xbow_groups = {},
+	events = {},
+	bucket = {},
+	sample = {},
+	failures = {},
+	observer_started = 0,
+	ai_paused = {},
+	ai_locked = false,
+	respawn_count = {},
+	fps_last_game_time = 0,
+	wall_last_time = 0,
+	wall_start_time = 0,
+	fps_sum = 0,
+	fps_min = 999,
+	fps_max = 0,
+	fps_count = 0,
+	fps_true_count = 0,
+	fps_proxy_count = 0,
+	frame_time_sum = 0,
+	prev_entity_total = 0,
+	prev_bucket_events = 0,
+	prev_ge_totals = {},
+	prod_total_spawned = 0,
+	prod_tick_count = 0,
+	frame_counter_total = 0,
+	frame_counter_window = 0,
+	heartbeat_last_frame_count = 0,
+	fps_probe_name = nil,
+	fps_probe_available = false,
+	wall_clock_source = "none",
+	perfstats_enabled = false,
+	perfstats_enabled_by_harness = false,
+	cached_game_time = 0,           -- updated per sim-frame; avoids per-event pcall overhead
+	stutter_count = 0,              -- number of heartbeats where wall_dt > threshold
+	max_wall_dt = 0,                -- worst heartbeat gap observed (seconds)
+	min_frame_delta = 999999,       -- lowest frame count in any heartbeat window
+}
+
+local function _BL_IsAIPlayer(player)
+	if player == nil or player.id == nil then return false end
+	local ok, is_ai = pcall(AI_IsAIPlayer, player.id)
+	return ok and is_ai
+end
+
+local function _BL_AddFailure(msg)
+	table.insert(_bl.failures, tostring(msg))
+	print(string.format("[BATTLE_LAG][FAIL] %s", tostring(msg)))
+end
+
+local function _BL_Bump(tbl, key, amount)
+	amount = amount or 1
+	tbl[key] = (tbl[key] or 0) + amount
+end
+
+-- PERMANENT: BucketKey uses cached game time (updated per sim-frame in _BL_FrameCounterTick).
+-- DO NOT replace with pcall(World_GetGameTime) — that adds per-event overhead and introduces lag.
+local function _BL_BucketKey()
+	local t = _bl.cached_game_time or 0
+	return math.floor(t / _BL_SUMMARY_INTERVAL)
+end
+
+local function _BL_RecordEvent(event_name, player_key)
+	local name = tostring(event_name or "unknown")
+	_BL_Bump(_bl.events, name, 1)
+
+	local bkey = _BL_BucketKey()
+	if _bl.bucket[bkey] == nil then
+		_bl.bucket[bkey] = {}
+	end
+	if _bl.bucket[bkey].total == nil then
+		_bl.bucket[bkey].total = 0
+	end
+
+	if _bl.bucket[bkey].total < _BL_MAX_EVENTS_PER_BUCKET then
+		_BL_Bump(_bl.bucket[bkey], name, 1)
+		if player_key ~= nil then
+			_BL_Bump(_bl.bucket[bkey], string.format("%s:%s", name, tostring(player_key)), 1)
+		end
+		_bl.bucket[bkey].total = _bl.bucket[bkey].total + 1
+	else
+		_BL_Bump(_bl.events, "bucket_overflow", 1)
+	end
+end
+
+local function _BL_PlayerKeyById(player_id)
+	-- Key is always "P<player.id>" — no playerIndex dependency
+	if player_id ~= nil then
+		return "P" .. tostring(player_id)
+	end
+	return "P?"
+end
+
+local function _BL_Reset()
+	_bl.running = false
+	_bl.start_time = 0
+	_bl.phase = "idle"
+	_bl.target = nil
+	_bl.players = {}
+	_bl.human_players = {}
+	_bl.groups = {}
+	_bl.xbow_groups = {}
+	_bl.events = {}
+	_bl.bucket = {}
+	_bl.sample = {}
+	_bl.failures = {}
+	_bl.observer_started = 0
+	_bl.ai_paused = {}
+	_bl.ai_locked = false
+	_bl.respawn_count = {}
+	_bl.fps_last_game_time = 0
+	_bl.wall_last_time = 0
+	_bl.wall_start_time = 0
+	_bl.fps_sum = 0
+	_bl.fps_min = 999
+	_bl.fps_max = 0
+	_bl.fps_count = 0
+	_bl.fps_true_count = 0
+	_bl.fps_proxy_count = 0
+	_bl.frame_time_sum = 0
+	_bl.prev_entity_total = 0
+	_bl.prev_bucket_events = 0
+	_bl.prev_ge_totals = {}
+	_bl.prod_total_spawned = 0
+	_bl.prod_tick_count = 0
+	_bl.frame_counter_total = 0
+	_bl.frame_counter_window = 0
+	_bl.heartbeat_last_frame_count = 0
+	_bl.fps_probe_name = nil
+	_bl.fps_probe_available = false
+	_bl.wall_clock_source = "none"
+	_bl.perfstats_enabled = false
+	_bl.perfstats_enabled_by_harness = false
+	_bl.cached_game_time = 0
+	_bl.stutter_count = 0
+	_bl.max_wall_dt = 0
+	_bl.min_frame_delta = 999999
+end
+
+local function _BL_GetSacredTarget()
+	if _CBA ~= nil and _CBA.center ~= nil then
+		return _CBA.center, "_CBA.center"
+	end
+
+	local ok, eg = pcall(function()
+		local egroup = EGroup_Create("eg_bl_sites")
+		World_GetAllNeutralEntities(egroup)
+		EGroup_Filter(egroup, "special_beacon", FILTER_KEEP)
+		return egroup
+	end)
+	if ok and eg ~= nil and EGroup_Count(eg) > 0 then
+		local ent = EGroup_GetEntityAt(eg, 1)
+		if ent ~= nil then
+			local pos = Entity_GetPosition(ent)
+			if pos ~= nil then
+				return pos, "special_beacon"
+			end
+		end
+	end
+
+	return World_Pos(0, 0, 0), "fallback_origin"
+end
+
+local function _BL_ResolveMenAtArmsSbp(player)
+	local candidates = {
+		"scar_manatarms",
+		"scar_men_at_arms",
+		"scar_spearman",
+	}
+	for _, type_key in ipairs(candidates) do
+		local ok, sbp = pcall(Cardinal_ConvertTypeToSquadBlueprint, type_key, player.id)
+		if ok and sbp ~= nil then
+			return sbp, type_key
+		end
+	end
+	return nil, "unresolved"
+end
+
+local function _BL_ResolveCrossbowSbp(player)
+	local candidates = {
+		"scar_crossbowman",
+		"scar_crossbow",
+		"scar_archer",
+	}
+	for _, type_key in ipairs(candidates) do
+		local ok, sbp = pcall(Cardinal_ConvertTypeToSquadBlueprint, type_key, player.id)
+		if ok and sbp ~= nil then
+			return sbp, type_key
+		end
+	end
+	return nil, "unresolved"
+end
+
+-- ╔═══════════════════════════════════════════════════════════════════════════╗
+-- ║  PERMANENT: _BL_RewardSpawn is the SOLE spawn entry point.              ║
+-- ║  All initial, production, and respawn paths route through this.         ║
+-- ║  It enforces per-player hard caps (125 MAA / 30 XBOW), routes          ║
+-- ║  through CBA_Rewards_SpawnAndMove for pop-awareness + precache,         ║
+-- ║  transfers squads into harness tracking SGroups via SGroup_AddGroup,    ║
+-- ║  and overrides the reward system's FormationMove with AttackMove.       ║
+-- ║  DO NOT bypass this function. DO NOT remove the hard cap checks.        ║
+-- ║  Falls back to native UnitEntry_DeploySquads if reward system absent.   ║
+-- ╚═══════════════════════════════════════════════════════════════════════════╝
+local function _BL_RewardSpawn(player, sbp, count, tracking_sg, target, is_xbow)
+	local pkey = "P" .. tostring(player.id)
+	local cap = is_xbow and _BL_CROSSBOW_BATCH_SIZE or _BL_BATCH_SIZE
+	local tag = is_xbow and "_xbow" or "_maa"
+
+	-- PERMANENT: Per-player hard cap — 125 MAA / 30 XBOW. DO NOT raise these limits.
+	local ok_alive, alive_count = pcall(SGroup_CountSpawned, tracking_sg)
+	local alive = (ok_alive and alive_count) or 0
+	local allowed = math.min(count, math.max(0, cap - alive))
+	if allowed <= 0 then
+		_BL_RecordEvent("cap_block" .. tag, pkey)
+		return 0
+	end
+
+	-- Clamp to current population headroom before reward call so the reward queue path
+	-- is not used by this harness. Queued spawns happen later outside this code path,
+	-- which can miss deterministic attack-move dispatch during lag tests.
+	if player ~= nil and player.id ~= nil then
+		local ok_pop, current_pop = pcall(Player_GetCurrentPopulation, player.id, CT_Personnel)
+		local ok_cap, max_pop = pcall(Player_GetCurrentPopulationCap, player.id, CT_Personnel)
+		if ok_pop and ok_cap then
+			local pop_allowed = math.max(0, max_pop - current_pop)
+			if pop_allowed < allowed then
+				allowed = pop_allowed
+				_BL_RecordEvent("pop_clamp" .. tag, pkey)
+			end
+		end
+	end
+	if allowed <= 0 then
+		_BL_RecordEvent("pop_block" .. tag, pkey)
+		return 0
+	end
+
+	-- PERMANENT: Crossbow MUST be precached before EVERY spawn. DO NOT remove.
+	if is_xbow then
+		pcall(Squad_Precache, sbp, 0, player.id, "", "battle_lag", "crossbow")
+	end
+
+	-- Route through CBA Rewards system when available (pop-cap aware, precache-integrated, queue overflow)
+	if type(CBA_Rewards_SpawnAndMove) == "function" then
+		local reward_sg = SGroup_CreateIfNotFound("sg_reward_" .. tostring(player.id))
+
+		-- If the reward group already has squads alive, command them immediately before
+		-- reward spawn runs. This guarantees start-of-match reward units are pushed to
+		-- center when Debug_BattleLagTest is active.
+		local pre_existing = SGroup_CountSpawned(reward_sg) or 0
+		if pre_existing > 0 and target ~= nil then
+			pcall(AI_LockSquads, player.id, reward_sg)
+			local ok_pre_cmd = pcall(Cmd_AttackMove, reward_sg, target, false)
+			if not ok_pre_cmd then
+				pcall(Cmd_Move, reward_sg, target, false)
+			end
+			_BL_RecordEvent("reward_preexisting_dispatch" .. tag, pkey)
+		end
+
+		CBA_Rewards_SpawnAndMove(player, sbp, allowed)
+
+		-- Reward spawner clears sg_reward_<player> before deploy, so the spawned count
+		-- after this call represents the current wave only.
+		local spawned = SGroup_CountSpawned(reward_sg) or 0
+		if spawned > 0 and tracking_sg ~= nil then
+			pcall(SGroup_AddGroup, tracking_sg, reward_sg)
+		end
+
+		-- Override: reward system issues FormationMove toward _CBA.center;
+		-- harness needs AttackMove toward the sacred site target for deterministic battle.
+		if target ~= nil and spawned > 0 then
+			-- Command the newly spawned reward group directly so starter/prod spawns
+			-- always receive an immediate combat order in this same tick.
+			pcall(AI_LockSquads, player.id, reward_sg)
+			local ok_reward_cmd = pcall(Cmd_AttackMove, reward_sg, target, false)
+			if not ok_reward_cmd then
+				pcall(Cmd_Move, reward_sg, target, false)
+			end
+		end
+		if target ~= nil and tracking_sg ~= nil and (SGroup_CountSpawned(tracking_sg) or 0) > 0 then
+			pcall(AI_LockSquads, player.id, tracking_sg)
+			local ok_track_cmd = pcall(Cmd_AttackMove, tracking_sg, target, false)
+			if not ok_track_cmd then
+				pcall(Cmd_Move, tracking_sg, target, false)
+			end
+		end
+
+		_BL_RecordEvent("reward_spawn" .. tag, pkey)
+		return spawned
+	end
+
+	-- Fallback: native deploy when reward system is not available
+	local spawn_pos = _BL_ResolveSpawnAnchor(player, target)
+	local ok_deploy = pcall(UnitEntry_DeploySquads, player.id, tracking_sg,
+		{{ sbp = sbp, numSquads = allowed }}, spawn_pos)
+	if not ok_deploy then
+		_BL_AddFailure(string.format("%s%s fallback deploy failed", pkey, tag))
+		return 0
+	end
+
+	pcall(AI_LockSquads, player.id, tracking_sg)
+	local ok_cmd = pcall(Cmd_AttackMove, tracking_sg, target, false)
+	if not ok_cmd then
+		pcall(Cmd_Move, tracking_sg, target, false)
+	end
+
+	_BL_RecordEvent("native_spawn" .. tag, pkey)
+	return SGroup_CountSpawned(tracking_sg) or 0
+end
+
+-- While the harness is active, continuously commandeer reward spawner groups to center.
+-- This covers reward groups that already existed at test start and any late reward spawns.
+function _BL_RewardGroupWatchdog()
+	if not _bl.running or _bl.phase ~= "observe" then return end
+	if _bl.target == nil then return end
+	_BL_DispatchExistingRewardGroups(false)
+end
+
+-- Fire on activation, then every 60s:
+-- select player's idle military and issue attack-move to sacred site target.
+function _BL_OrderIdleMilitaryToTarget()
+	if not _bl.running or _bl.phase ~= "observe" then return end
+	if _bl.target == nil then return end
+
+	for _, p in ipairs(_bl.players) do
+		if p ~= nil and p.id ~= nil then
+			local pkey = "P" .. tostring(p.id)
+			local sg_all = Player_GetSquads(p.id)
+			local sg_idle = SGroup_CreateIfNotFound("sg_bl_idle_mil_" .. tostring(p.id))
+			SGroup_Clear(sg_idle)
+
+			local total = SGroup_Count(sg_all) or 0
+			for idx = 1, total do
+				local squad = SGroup_GetSquadAt(sg_all, idx)
+				if squad ~= nil then
+					local is_idle = Squad_IsIdle(squad)
+					local is_worker = Squad_IsOfType(squad, "worker")
+					if is_idle and not is_worker then
+						SGroup_Add(sg_idle, squad)
+					end
+				end
+			end
+
+			local idle_count = SGroup_CountSpawned(sg_idle) or 0
+			if idle_count > 0 then
+				pcall(AI_LockSquads, p.id, sg_idle)
+				local ok_cmd = pcall(Cmd_AttackMove, sg_idle, _bl.target, false)
+				if not ok_cmd then
+					pcall(Cmd_Move, sg_idle, _bl.target, false)
+				end
+				_BL_RecordEvent("idle_mil_dispatch", pkey)
+			end
+		end
+	end
+end
+
+-- Force-dispatch existing reward groups (and mirror them into harness tracking groups).
+-- Used at test startup to ensure any already-alive reward units immediately attack center.
+function _BL_DispatchExistingRewardGroups(force_dispatch)
+	if not _bl.running then return end
+	if _bl.target == nil then return end
+
+	for _, p in ipairs(_bl.players) do
+		if p ~= nil and p.id ~= nil then
+			local pkey = "P" .. tostring(p.id)
+			local reward_sg = SGroup_CreateIfNotFound("sg_reward_" .. tostring(p.id))
+			local alive = SGroup_CountSpawned(reward_sg) or 0
+			if alive > 0 then
+				local should_dispatch = force_dispatch == true
+				if not should_dispatch then
+					should_dispatch = true
+					local ok_pos, pos = pcall(SGroup_GetPosition, reward_sg)
+					if ok_pos and pos ~= nil then
+						local ok_d, dist = pcall(World_DistancePointToPoint, pos, _bl.target)
+						if ok_d and dist <= _BL_REASSERT_DIST then
+							should_dispatch = false
+						end
+					end
+				end
+
+				if should_dispatch then
+					pcall(AI_LockSquads, p.id, reward_sg)
+					local ok_cmd = pcall(Cmd_AttackMove, reward_sg, _bl.target, false)
+					if not ok_cmd then
+						pcall(Cmd_Move, reward_sg, _bl.target, false)
+					end
+					_BL_RecordEvent(force_dispatch and "reward_start_dispatch" or "reward_watchdog_dispatch", pkey)
+				end
+			end
+		end
+	end
+end
+
+local function _BL_RegisterEvents()
+	CBA_EntityKillBatch_SetHandler("battle_lag", true)
+	CBA_SquadKillBatch_SetHandler("battle_lag", true)
+	CBA_BuildItemBatch_SetHandler("battle_lag", true)
+	pcall(Rule_AddGlobalEvent, _BL_OnDamageReceived, GE_DamageReceived)
+	pcall(Rule_AddGlobalEvent, _BL_OnConstructionStart, GE_ConstructionStart)
+	pcall(Rule_AddGlobalEvent, _BL_OnConstructionComplete, GE_ConstructionComplete)
+	pcall(Rule_AddGlobalEvent, _BL_OnUpgradeComplete, GE_UpgradeComplete)
+	pcall(Rule_AddGlobalEvent, _BL_OnStrategicPointChanged, GE_StrategicPointChanged)
+	pcall(Rule_AddGlobalEvent, _BL_OnProjectileLanded, GE_ProjectileLanded)
+	pcall(Rule_AddGlobalEvent, _BL_OnEntityLandmarkDestroyed, GE_EntityLandmarkDestroyed)
+	pcall(Rule_AddGlobalEvent, _BL_OnLocalPlayerChanged, GE_LocalPlayerChanged)
+	pcall(Rule_AddGlobalEvent, _BL_OnConstructionCancelled, GE_ConstructionCancelled)
+	pcall(Rule_AddGlobalEvent, _BL_OnAbilityExecuted, GE_AbilityExecuted)
+	pcall(Rule_AddGlobalEvent, _BL_OnEntitySpawn, GE_EntitySpawn)
+	pcall(Rule_AddGlobalEvent, _BL_OnEntityDespawn, GE_EntityDespawn)
+	pcall(Rule_AddGlobalEvent, _BL_OnSquadSpawn, GE_SquadSpawn)
+	pcall(Rule_AddGlobalEvent, _BL_OnProjectileFired, GE_ProjectileFired)
+	pcall(Rule_AddGlobalEvent, _BL_OnBuildItemStart, GE_BuildItemStart)
+	pcall(Rule_AddGlobalEvent, _BL_OnPathfindingBlockersUpdated, GE_PathfindingBlockersUpdated)
+	pcall(Rule_AddGlobalEvent, _BL_OnMoveFailed, GE_MoveFailed)
+	pcall(Rule_AddGlobalEvent, _BL_OnDamageArea, GE_DamageArea)
+	_BL_RecordEvent("events_registered")
+end
+
+local function _BL_UnregisterEvents()
+	CBA_EntityKillBatch_SetHandler("battle_lag", false)
+	CBA_SquadKillBatch_SetHandler("battle_lag", false)
+	CBA_BuildItemBatch_SetHandler("battle_lag", false)
+	pcall(Rule_RemoveGlobalEvent, _BL_OnDamageReceived)
+	pcall(Rule_RemoveGlobalEvent, _BL_OnConstructionStart)
+	pcall(Rule_RemoveGlobalEvent, _BL_OnConstructionComplete)
+	pcall(Rule_RemoveGlobalEvent, _BL_OnUpgradeComplete)
+	pcall(Rule_RemoveGlobalEvent, _BL_OnStrategicPointChanged)
+	pcall(Rule_RemoveGlobalEvent, _BL_OnProjectileLanded)
+	pcall(Rule_RemoveGlobalEvent, _BL_OnEntityLandmarkDestroyed)
+	pcall(Rule_RemoveGlobalEvent, _BL_OnLocalPlayerChanged)
+	pcall(Rule_RemoveGlobalEvent, _BL_OnConstructionCancelled)
+	pcall(Rule_RemoveGlobalEvent, _BL_OnAbilityExecuted)
+	pcall(Rule_RemoveGlobalEvent, _BL_OnEntitySpawn)
+	pcall(Rule_RemoveGlobalEvent, _BL_OnEntityDespawn)
+	pcall(Rule_RemoveGlobalEvent, _BL_OnSquadSpawn)
+	pcall(Rule_RemoveGlobalEvent, _BL_OnProjectileFired)
+	pcall(Rule_RemoveGlobalEvent, _BL_OnBuildItemStart)
+	pcall(Rule_RemoveGlobalEvent, _BL_OnPathfindingBlockersUpdated)
+	pcall(Rule_RemoveGlobalEvent, _BL_OnMoveFailed)
+	pcall(Rule_RemoveGlobalEvent, _BL_OnDamageArea)
+end
+
+function _BL_OnEntityKilled(context)
+	if not _bl.running then return end
+	local owner = context and context.victimOwner
+	_BL_RecordEvent("GE_EntityKilled", owner and _BL_PlayerKeyById(owner) or nil)
+end
+
+function _BL_OnSquadKilled(context)
+	if not _bl.running then return end
+	local owner = context and context.squadOwner
+	_BL_RecordEvent("GE_SquadKilled", owner and _BL_PlayerKeyById(owner) or nil)
+end
+
+-- Global wrapper for batch processor (local _BL_RecordEvent/_BL_PlayerKeyById are not visible cross-file).
+function _BL_BatchSquadKilled(owner_id)
+	if not _bl or not _bl.running then return end
+	_BL_RecordEvent("GE_SquadKilled", owner_id and _BL_PlayerKeyById(owner_id) or nil)
+end
+
+-- Global wrapper for entity-kill batch processor.
+function _BL_BatchEntityKilled(owner_id)
+	if not _bl or not _bl.running then return end
+	_BL_RecordEvent("GE_EntityKilled", owner_id and _BL_PlayerKeyById(owner_id) or nil)
+end
+
+-- Global wrapper for build-item-complete batch processor.
+function _BL_BatchBuildItemComplete(player_handle)
+	if not _bl or not _bl.running then return end
+	_BL_RecordEvent("GE_BuildItemComplete", player_handle and _BL_PlayerKeyById(player_handle) or nil)
+end
+
+local function _BL_IsWonderVictim(entity)
+	if entity == nil then return false end
+
+	if type(AGS_IsAWonder) == "function" then
+		local ok, is_wonder = pcall(AGS_IsAWonder, entity)
+		if ok and is_wonder then
+			return true
+		end
+	end
+
+	if type(_wonder) == "table" and _wonder.types ~= nil and _wonder.types.age4 ~= nil then
+		local ok, is_wonder = pcall(Entity_IsOfType, entity, _wonder.types.age4)
+		if ok and is_wonder then
+			return true
+		end
+	end
+
+	return false
+end
+
+function _BL_OnDamageReceived(context)
+	if not _bl.running then return end
+	local owner = context and context.victimOwner
+	_BL_RecordEvent("GE_DamageReceived", owner and _BL_PlayerKeyById(owner) or nil)
+end
+
+function _BL_OnAbilityExecuted(context)
+	if not _bl.running then return end
+	local owner = context and context.player
+	_BL_RecordEvent("GE_AbilityExecuted", owner and _BL_PlayerKeyById(owner) or nil)
+end
+
+function _BL_OnEntitySpawn(context)
+	if not _bl.running then return end
+	local owner = context and context.player
+	_BL_RecordEvent("GE_EntitySpawn", owner and _BL_PlayerKeyById(owner) or nil)
+end
+
+function _BL_OnEntityDespawn(context)
+	if not _bl.running then return end
+	local owner = context and context.player
+	_BL_RecordEvent("GE_EntityDespawn", owner and _BL_PlayerKeyById(owner) or nil)
+end
+
+function _BL_OnSquadSpawn(context)
+	if not _bl.running then return end
+	local owner = context and context.player
+	_BL_RecordEvent("GE_SquadSpawn", owner and _BL_PlayerKeyById(owner) or nil)
+end
+
+function _BL_OnProjectileFired(context)
+	if not _bl.running then return end
+	_BL_RecordEvent("GE_ProjectileFired")
+end
+
+function _BL_OnBuildItemStart(context)
+	if not _bl.running then return end
+	local owner = context and context.player
+	_BL_RecordEvent("GE_BuildItemStart", owner and _BL_PlayerKeyById(owner) or nil)
+end
+
+function _BL_OnPathfindingBlockersUpdated(context)
+	if not _bl.running then return end
+	_BL_RecordEvent("GE_PathfindingBlockersUpdated")
+end
+
+function _BL_OnMoveFailed(context)
+	if not _bl.running then return end
+	_BL_RecordEvent("GE_MoveFailed")
+end
+
+function _BL_OnDamageArea(context)
+	if not _bl.running then return end
+	_BL_RecordEvent("GE_DamageArea")
+end
+
+function _BL_OnConstructionStart(context)
+	if not _bl.running then return end
+	local owner = context and context.player
+	_BL_RecordEvent("GE_ConstructionStart", owner and _BL_PlayerKeyById(owner) or nil)
+end
+
+function _BL_OnConstructionComplete(context)
+	if not _bl.running then return end
+	local owner = context and context.player
+	_BL_RecordEvent("GE_ConstructionComplete", owner and _BL_PlayerKeyById(owner) or nil)
+end
+
+function _BL_OnUpgradeComplete(context)
+	if not _bl.running then return end
+	local owner = context and context.player
+	_BL_RecordEvent("GE_UpgradeComplete", owner and _BL_PlayerKeyById(owner) or nil)
+end
+
+function _BL_OnBuildItemComplete(context)
+	if not _bl.running then return end
+	local owner = context and context.player
+	_BL_RecordEvent("GE_BuildItemComplete", owner and _BL_PlayerKeyById(owner) or nil)
+end
+
+function _BL_OnStrategicPointChanged(context)
+	if not _bl.running then return end
+	_BL_RecordEvent("GE_StrategicPointChanged")
+end
+
+function _BL_OnProjectileLanded(context)
+	if not _bl.running then return end
+	_BL_RecordEvent("GE_ProjectileLanded")
+end
+
+function _BL_OnEntityLandmarkDestroyed(context)
+	if not _bl.running then return end
+	local owner = context and context.victimOwner
+	_BL_RecordEvent("GE_EntityLandmarkDestroyed", owner and _BL_PlayerKeyById(owner) or nil)
+end
+
+function _BL_OnLocalPlayerChanged(context)
+	if not _bl.running then return end
+	_BL_RecordEvent("GE_LocalPlayerChanged")
+end
+
+function _BL_OnConstructionCancelled(context)
+	if not _bl.running then return end
+	local owner = context and context.player
+	_BL_RecordEvent("GE_ConstructionCancelled", owner and _BL_PlayerKeyById(owner) or nil)
+end
+
+local function _BL_AcquirePlayers()
+	_bl.players = {}
+	_bl.human_players = {}
+	for _, p in ipairs(PLAYERS) do
+		if p ~= nil and p.id ~= nil and not (p.isEliminated == true) then
+			table.insert(_bl.players, p)
+			local ok_human, is_human = pcall(Player_IsHuman, p.id)
+			if ok_human and is_human then
+				table.insert(_bl.human_players, p)
+			end
+		end
+	end
+	if #_bl.players == 0 then
+		_BL_AddFailure("No active players found")
+		return false
+	end
+	if #_bl.human_players == 0 then
+		_BL_AddFailure("No human lobby players found for FPS logging")
+	end
+	return true
+end
+
+local function _BL_TryEnablePerfStats()
+	local already_enabled = false
+	if type(PerfStats_IsEnabled) == "function" then
+		local ok_enabled, enabled = pcall(PerfStats_IsEnabled)
+		already_enabled = ok_enabled and enabled == true
+	end
+	if already_enabled then
+		_bl.perfstats_enabled = true
+		_bl.perfstats_enabled_by_harness = false
+		return true, "already_enabled"
+	end
+	if type(PerfStats_Enable) == "function" then
+		local ok_enable = pcall(PerfStats_Enable)
+		if ok_enable then
+			_bl.perfstats_enabled = true
+			_bl.perfstats_enabled_by_harness = true
+			return true, "enabled"
+		end
+	end
+	_bl.perfstats_enabled = false
+	_bl.perfstats_enabled_by_harness = false
+	return false, "unavailable"
+end
+
+local function _BL_TryDumpPerfStats()
+	if type(PerfStats_Dump) ~= "function" then
+		return false, "unavailable"
+	end
+	local ok_dump = pcall(PerfStats_Dump)
+	if ok_dump then
+		return true, "dumped"
+	end
+	return false, "failed"
+end
+
+local function _BL_ResolveFPSProbe()
+	-- No documented SCAR FPS getter exists; probe all known/suspected runtime names safely.
+	-- PERMANENT: If a working FPS probe is found, it takes priority over frame_counter.
+	local probes = {
+		"PerfStats_GetFPS",
+		"App_GetFPS",
+		"App_GetFrameRate",
+		"UI_GetFPS",
+		"Game_GetFrameRate",
+		"World_GetFPS",
+		"Misc_GetFPS",
+		"Game_GetFPS",
+		"Render_GetFPS",
+	}
+	for _, fn_name in ipairs(probes) do
+		local fn = _G[fn_name]
+		if type(fn) == "function" then
+			_bl.fps_probe_name = fn_name
+			_bl.fps_probe_available = true
+			return true, fn_name
+		end
+	end
+	_bl.fps_probe_name = nil
+	_bl.fps_probe_available = false
+	return false, "unavailable"
+end
+
+local function _BL_TryReadFPS()
+	if not _bl.fps_probe_available or _bl.fps_probe_name == nil then
+		return nil, "unsupported"
+	end
+	local fn = _G[_bl.fps_probe_name]
+	if type(fn) ~= "function" then
+		_bl.fps_probe_available = false
+		_bl.fps_probe_name = nil
+		return nil, "unsupported"
+	end
+	local ok, value = pcall(fn)
+	if ok and value ~= nil then
+		return value, _bl.fps_probe_name
+	end
+	return nil, tostring(_bl.fps_probe_name)
+end
+
+local function _BL_GetWallTime()
+	if type(app_currenttime) == "function" then
+		local ok, t = pcall(app_currenttime)
+		if ok and t ~= nil then
+			_bl.wall_clock_source = "app_currenttime"
+			return t
+		end
+	end
+
+	if type(os) == "table" and type(os.clock) == "function" then
+		local ok, t = pcall(os.clock)
+		if ok and t ~= nil then
+			_bl.wall_clock_source = "os.clock"
+			return t
+		end
+	end
+
+	local ok, t = pcall(World_GetGameTime)
+	_bl.wall_clock_source = "game_time_fallback"
+	return ok and t or 0
+end
+
+-- PERMANENT: This function fires via Rule_Add (every sim frame). DO NOT replace with TimerAddFrame.
+-- It caches World_GetGameTime so _BL_RecordEvent/_BL_BucketKey never need per-event pcall overhead.
+function _BL_FrameCounterTick()
+	if not _bl or not _bl.running or _bl.phase ~= "observe" then return end
+	_bl.frame_counter_total = (_bl.frame_counter_total or 0) + 1
+	_bl.frame_counter_window = (_bl.frame_counter_window or 0) + 1
+	-- Cache game time once per sim frame — eliminates per-event pcall(World_GetGameTime) cost
+	local ok, gt = pcall(World_GetGameTime)
+	if ok and gt ~= nil then _bl.cached_game_time = gt end
+end
+
+-- Sim heartbeat: logs game-time delta, alive units, and cumulative event count every 1s.
+-- Scarlog real-time timestamps allow deriving actual sim rate from game-time delta.
+function _BL_LogHumanFPS()
+	if not _bl.running or _bl.phase ~= "observe" then return end
+
+	local wall_t = _BL_GetWallTime()
+	local wall_dt = wall_t - _bl.wall_last_time
+	_bl.wall_last_time = wall_t
+
+	local ok_t, gt = pcall(World_GetGameTime)
+	local now = ok_t and gt or 0
+	local sim_dt = now - _bl.fps_last_game_time
+	_bl.fps_last_game_time = now
+
+	local sim_ratio = 0
+	local frame_fps = 0
+	local fps_source = "frame_counter"
+	local fps_is_proxy = false
+	local frame_delta = (_bl.frame_counter_total or 0) - (_bl.heartbeat_last_frame_count or 0)
+	_bl.heartbeat_last_frame_count = _bl.frame_counter_total or 0
+	local frame_time_ms = 0
+	if wall_dt > 0.001 then
+		sim_ratio = sim_dt / wall_dt
+		local direct_fps, direct_source = _BL_TryReadFPS()
+		if direct_fps ~= nil and direct_fps > 0 then
+			frame_fps = direct_fps
+			fps_source = tostring(direct_source)
+			fps_is_proxy = false
+		elseif frame_delta > 0 then
+			-- Derive true render FPS from frame timer callbacks over wall-clock delta.
+			frame_fps = frame_delta / wall_dt
+			fps_source = "frame_counter"
+			fps_is_proxy = false
+		else
+			-- Fallback only when no direct FPS and no per-frame callbacks are available.
+			-- Use sim_ratio as performance proxy: 1.0=normal, <1.0=degraded, >1.0=catching up.
+			frame_fps = sim_ratio * 100.0  -- scale to percentage for readability
+			fps_source = "sim_ratio_pct"
+			fps_is_proxy = true
+		end
+		if frame_fps > 0 and not fps_is_proxy then
+			frame_time_ms = 1000.0 / frame_fps
+		else
+			frame_time_ms = wall_dt * 1000.0
+		end
+		_bl.fps_count = _bl.fps_count + 1
+		_bl.fps_sum = _bl.fps_sum + frame_fps
+		_bl.frame_time_sum = _bl.frame_time_sum + wall_dt
+		if fps_is_proxy then
+			_bl.fps_proxy_count = (_bl.fps_proxy_count or 0) + 1
+		else
+			_bl.fps_true_count = (_bl.fps_true_count or 0) + 1
+		end
+		if frame_fps < _bl.fps_min then _bl.fps_min = frame_fps end
+		if frame_fps > _bl.fps_max then _bl.fps_max = frame_fps end
+
+		-- ── Stutter / performance issue detection ──
+		if wall_dt > _BL_STUTTER_WALL_DT_THRESHOLD then
+			_bl.stutter_count = (_bl.stutter_count or 0) + 1
+			print(string.format("[BATTLE_LAG][STUTTER] wall_dt=%.3fs exceeded %.1fs threshold (sim_dt=%.3f frames=%d stutter#%d)",
+				wall_dt, _BL_STUTTER_WALL_DT_THRESHOLD, sim_dt, frame_delta, _bl.stutter_count))
+		end
+		if wall_dt > (_bl.max_wall_dt or 0) then
+			_bl.max_wall_dt = wall_dt
+		end
+		if frame_delta < (_bl.min_frame_delta or 999999) and frame_delta >= 0 then
+			_bl.min_frame_delta = frame_delta
+		end
+		if sim_ratio < 0.5 and sim_ratio > 0 then
+			print(string.format("[BATTLE_LAG][DEGRADED] sim_ratio=%.3f (game running at <50%% speed)", sim_ratio))
+		end
+		if frame_delta == 0 and wall_dt > 0.1 then
+			print(string.format("[BATTLE_LAG][FREEZE] zero sim frames in %.3fs wall time", wall_dt))
+		end
+	end
+
+	local alive_maa = 0
+	for _, sg in pairs(_bl.groups) do
+		alive_maa = alive_maa + (SGroup_CountSpawned(sg) or 0)
+	end
+	local alive_xbow = 0
+	for _, sg in pairs(_bl.xbow_groups) do
+		alive_xbow = alive_xbow + (SGroup_CountSpawned(sg) or 0)
+	end
+
+	local events_total = 0
+	for _, v in pairs(_bl.events) do
+		events_total = events_total + v
+	end
+
+	print(string.format("[BATTLE_LAG][PERF] t=%.2f fps=%.1f fps_source=%s frames=%d wall_dt=%.3f sim_dt=%.3f sim_ratio=%.2f ft=%.1fms clock=%s maa=%d xbow=%d events=%d",
+		now, frame_fps, tostring(fps_source), frame_delta, wall_dt, sim_dt, sim_ratio, frame_time_ms, tostring(_bl.wall_clock_source), alive_maa, alive_xbow, events_total))
+end
+
+local function _BL_ApplyAILock()
+	if _BL_ENABLE_AI_ACTIVITY then
+		print("[BATTLE_LAG] AI activity ENABLED - AI scripted loops remain active")
+		return
+	end
+
+	if type(CBA_AIPlayer_SetDebugExternalLock) == "function" then
+		pcall(CBA_AIPlayer_SetDebugExternalLock, true, "battle_lag_harness")
+		_bl.ai_locked = true
+	end
+
+	for _, p in ipairs(_bl.players) do
+		if _BL_IsAIPlayer(p) then
+			pcall(AI_PauseCurrentTasks, p.id, true)
+			_bl.ai_paused[p.id] = true
+			_BL_RecordEvent("ai_paused", "P" .. tostring(p.id))
+		end
+	end
+end
+
+local function _BL_RestoreAILock()
+	for player_id, _ in pairs(_bl.ai_paused) do
+		pcall(AI_PauseCurrentTasks, player_id, false)
+	end
+	_bl.ai_paused = {}
+
+	if _bl.ai_locked and type(CBA_AIPlayer_SetDebugExternalLock) == "function" then
+		pcall(CBA_AIPlayer_SetDebugExternalLock, false, "battle_lag_harness")
+	end
+	_bl.ai_locked = false
+end
+local function _BL_ResolveSpawnAnchor(player, target)
+	if player ~= nil and player.keep ~= nil and player.keep.entity ~= nil then
+		local ok_alive, alive = pcall(Entity_IsAlive, player.keep.entity)
+		if ok_alive and alive then
+			local ok_pos, pos = pcall(Entity_GetPosition, player.keep.entity)
+			if ok_pos and pos ~= nil then
+				return pos, "keep_entity"
+			end
+		end
+	end
+
+	if player ~= nil and player.keep ~= nil and player.keep.position ~= nil then
+		return player.keep.position, "keep_cache"
+	end
+
+	if player ~= nil and player.startingPos ~= nil then
+		return player.startingPos, "player_startingPos"
+	end
+
+	if player ~= nil and player.id ~= nil then
+		local ok_spawn_pos, spawn_pos = pcall(Player_GetStartingPosition, player.id)
+		if ok_spawn_pos and spawn_pos ~= nil then
+			return spawn_pos, "engine_start"
+		end
+	end
+
+	return target, "target_fallback"
+end
+
+local function _BL_SpawnAndDispatchPlayer(player, target)
+	local pkey = "P" .. tostring(player.id)
+	local sg_name = "sg_bl_mass_" .. tostring(player.id)
+	local sg = SGroup_CreateIfNotFound(sg_name)
+	SGroup_Clear(sg)
+
+	local sbp, source = _BL_ResolveMenAtArmsSbp(player)
+	if sbp == nil then
+		_BL_AddFailure(string.format("%s could not resolve men-at-arms blueprint", pkey))
+		return false
+	end
+
+	-- PERMANENT: Route through _BL_RewardSpawn for hard cap + reward system integration.
+	local spawned = _BL_RewardSpawn(player, sbp, _BL_BATCH_SIZE, sg, target, false)
+	if spawned <= 0 then
+		_BL_AddFailure(string.format("%s MAA spawn returned 0 (source=%s)", pkey, source))
+		return false
+	end
+
+	_bl.sample[pkey .. ":spawned"] = spawned
+	_bl.sample[pkey .. ":spawn_source"] = type(CBA_Rewards_SpawnAndMove) == "function" and "reward" or "native"
+	if spawned < _BL_BATCH_SIZE then
+		_BL_AddFailure(string.format("%s spawned %d/%d MAA squads", pkey, spawned, _BL_BATCH_SIZE))
+	end
+
+	_bl.groups[pkey] = sg
+	return true
+end
+
+local function _BL_SpawnCrossbowPlayer(player, target)
+	local pkey = "P" .. tostring(player.id)
+	local sg_name = "sg_bl_xbow_" .. tostring(player.id)
+	local sg = SGroup_CreateIfNotFound(sg_name)
+	SGroup_Clear(sg)
+
+	local sbp, source = _BL_ResolveCrossbowSbp(player)
+	if sbp == nil then
+		_BL_AddFailure(string.format("%s could not resolve crossbow blueprint", pkey))
+		return false
+	end
+
+	-- PERMANENT: Route through _BL_RewardSpawn for hard cap + reward system + precache.
+	local spawned = _BL_RewardSpawn(player, sbp, _BL_CROSSBOW_BATCH_SIZE, sg, target, true)
+	if spawned <= 0 then
+		_BL_AddFailure(string.format("%s XBOW spawn returned 0 (source=%s)", pkey, source))
+		return false
+	end
+
+	_bl.sample[pkey .. ":xbow_spawned"] = spawned
+	_bl.sample[pkey .. ":xbow_spawn_source"] = type(CBA_Rewards_SpawnAndMove) == "function" and "reward" or "native"
+	if spawned < _BL_CROSSBOW_BATCH_SIZE then
+		_BL_AddFailure(string.format("%s spawned %d/%d XBOW squads", pkey, spawned, _BL_CROSSBOW_BATCH_SIZE))
+	end
+
+	_bl.xbow_groups[pkey] = sg
+	return true
+end
+
+function _BL_PrintBucketSummary()
+	if not _bl.running then return end
+
+	local alive_maa = 0
+	for _, sg in pairs(_bl.groups) do
+		alive_maa = alive_maa + (SGroup_CountSpawned(sg) or 0)
+	end
+	local alive_xbow = 0
+	for _, sg in pairs(_bl.xbow_groups) do
+		alive_xbow = alive_xbow + (SGroup_CountSpawned(sg) or 0)
+	end
+	_bl.sample["alive_maa"] = alive_maa
+	_bl.sample["alive_xbow"] = alive_xbow
+
+	local total_entities = 0
+	local total_squads = 0
+	local total_pop = 0
+	local player_lines = {}
+	for _, p in ipairs(_bl.players) do
+		local pkey = "P" .. tostring(p.id)
+		local ok_ec, ec = pcall(Player_GetEntityCount, p.id)
+		local ok_sc, sc = pcall(Player_GetSquadCount, p.id)
+		local ok_pop, pop = pcall(Player_GetCurrentPopulation, p.id, CT_Personnel)
+		local ent = (ok_ec and ec) or 0
+		local sq = (ok_sc and sc) or 0
+		local pp = (ok_pop and pop) or 0
+		total_entities = total_entities + ent
+		total_squads = total_squads + sq
+		total_pop = total_pop + pp
+		table.insert(player_lines, string.format("  %s: entities=%d squads=%d pop=%d", pkey, ent, sq, pp))
+	end
+
+	local ok_sr, sim_rate = pcall(Game_GetSimRate)
+	local sr = (ok_sr and sim_rate) or 0
+
+	local total_events = 0
+	local total_ge_events = 0
+	for _, count in pairs(_bl.events) do
+		total_events = total_events + count
+	end
+	for k, count in pairs(_bl.events) do
+		if type(k) == "string" and string.sub(k, 1, 3) == "GE_" then
+			total_ge_events = total_ge_events + (count or 0)
+		end
+	end
+
+	local fps_avg = (_bl.fps_count > 0) and (_bl.fps_sum / _bl.fps_count) or 0
+	local fps_min = (_bl.fps_count > 0) and _bl.fps_min or 0
+	local fps_max = (_bl.fps_count > 0) and _bl.fps_max or 0
+	local frame_time_avg_ms = (_bl.fps_count > 0) and ((_bl.frame_time_sum / _bl.fps_count) * 1000.0) or 0
+
+	local ok_gt, gt_now = pcall(World_GetGameTime)
+	local sim_elapsed = ((ok_gt and gt_now) or 0) - (_bl.start_time or 0)
+	local wt_now = _BL_GetWallTime()
+	local wall_elapsed = wt_now - (_bl.wall_start_time or 0)
+	local sim_ratio = (wall_elapsed > 0.1) and (sim_elapsed / wall_elapsed) or 0
+
+	local event_delta = total_events - (_bl.prev_bucket_events or 0)
+	local event_rate = event_delta / _BL_SUMMARY_INTERVAL
+	local entity_delta = total_entities - (_bl.prev_entity_total or 0)
+	local entity_pct = ((_bl.prev_entity_total or 0) > 0) and ((entity_delta / _bl.prev_entity_total) * 100.0) or 0
+
+	print("")
+	print(string.format("----- Performance Summary (~%ds) -----", math.floor(_BL_SUMMARY_INTERVAL + 0.5)))
+	print("")
+	print(string.format("--- Global Events (%.0fs Window) ---", _BL_SUMMARY_INTERVAL))
+	local ge_keys = {}
+	for k in pairs(_bl.events) do
+		if type(k) == "string" and string.sub(k, 1, 3) == "GE_" then
+			table.insert(ge_keys, k)
+		end
+	end
+	table.sort(ge_keys)
+	local any_window_ge = false
+	for _, k in ipairs(ge_keys) do
+		local prev = (_bl.prev_ge_totals and _bl.prev_ge_totals[k]) or 0
+		local curr = _bl.events[k] or 0
+		local win = curr - prev
+		if win > 0 then
+			any_window_ge = true
+			print(string.format("%s: %d", k, win))
+		end
+		_bl.prev_ge_totals[k] = curr
+	end
+	if not any_window_ge then
+		print("(none)")
+	end
+
+	print("")
+	print("--- Systems ---")
+	print(string.format("Units Active: %d", alive_maa + alive_xbow))
+	print(string.format("Melee Squads Active: %d", alive_maa))
+	print(string.format("Ranged Squads Active: %d", alive_xbow))
+	print(string.format("Entities Active: %d", total_entities))
+	print(string.format("Squads Active: %d", total_squads))
+	print(string.format("Population Active: %d", total_pop))
+	for _, line in ipairs(player_lines) do
+		print(line)
+	end
+	print(string.format("Sim Rate: %.2f", sr))
+	print(string.format("Events (%.0fs): %d (%.1f/sec)", _BL_SUMMARY_INTERVAL, event_delta, event_rate))
+	if _bl.prod_tick_count > 0 then
+		print(string.format("Production Loop: ticks=%d spawned=%d", _bl.prod_tick_count, _bl.prod_total_spawned))
+	end
+	if type(_CBA_PERF) == "table" then
+		print(string.format("Batch SQ Processed: %d (%d ticks, max_depth=%d, dropped=%d)",
+			_CBA_PERF.batch_sq_processed or 0, _CBA_PERF.batch_sq_ticks or 0,
+			_CBA_PERF.batch_sq_max_depth or 0, _CBA_PERF.batch_sq_dropped or 0))
+		print(string.format("Batch EK Processed: %d (%d ticks, max_depth=%d, dropped=%d)",
+			_CBA_PERF.batch_ek_processed or 0, _CBA_PERF.batch_ek_ticks or 0,
+			_CBA_PERF.batch_ek_max_depth or 0, _CBA_PERF.batch_ek_dropped or 0))
+		print(string.format("Siege Cache Hits/Misses: %d/%d", _CBA_PERF.siege_cache_hits or 0, _CBA_PERF.siege_cache_misses or 0))
+	end
+	if type(_LEAVER_PERF_ANNIHILATION_CHECKS) == "number" or type(_LEAVER_PERF_ANNIHILATION_SCANS) == "number" then
+		print(string.format("Annihilation: checks=%d scans=%d",
+			_LEAVER_PERF_ANNIHILATION_CHECKS or 0, _LEAVER_PERF_ANNIHILATION_SCANS or 0))
+	end
+
+	print("")
+	print("--- Performance ---")
+	if (_bl.fps_true_count or 0) > 0 and (_bl.fps_proxy_count or 0) == 0 then
+		print(string.format("FPS Avg: %.2f", fps_avg))
+		print(string.format("FPS Min: %.2f", fps_min))
+		print(string.format("FPS Max: %.2f", fps_max))
+	elseif (_bl.fps_true_count or 0) > 0 and (_bl.fps_proxy_count or 0) > 0 then
+		print(string.format("FPS/Perf Avg: %.2f (mixed samples)", fps_avg))
+		print(string.format("FPS/Perf Min: %.2f", fps_min))
+		print(string.format("FPS/Perf Max: %.2f", fps_max))
+		print(string.format("Sample Mix: fps=%d proxy=%d", _bl.fps_true_count or 0, _bl.fps_proxy_count or 0))
+	else
+		print(string.format("Sim Perf Avg: %.1f%% (no FPS API; derived from sim_ratio)", fps_avg))
+		print(string.format("Sim Perf Min: %.1f%%", fps_min))
+		print(string.format("Sim Perf Max: %.1f%%", fps_max))
+	end
+	print(string.format("Frame Time Avg: %.2fms", frame_time_avg_ms))
+	print(string.format("Sim Ratio: %.3f", sim_ratio))
+	print(string.format("Wall Elapsed: %.1fs", wall_elapsed))
+	print(string.format("Sim Elapsed: %.1fs", sim_elapsed))
+	print(string.format("Frame Counter (window): %d", _bl.frame_counter_window or 0))
+	print(string.format("Total GE Events: %d", total_ge_events))
+	print(string.format("Total Events: %d", total_events))
+	if (_bl.stutter_count or 0) > 0 then
+		print(string.format("Stutter Events: %d (worst gap: %.3fs, min frames: %d)",
+			_bl.stutter_count, _bl.max_wall_dt or 0, _bl.min_frame_delta or 0))
+	end
+	if _bl.events["bucket_overflow"] ~= nil then
+		print(string.format("Bucket Overflow: %d", _bl.events["bucket_overflow"] or 0))
+	end
+	if (_bl.prev_entity_total or 0) > 0 and math.abs(entity_delta) > 10 then
+		print(string.format("[SCALING] entities %+d (%+.1f%%)", entity_delta, entity_pct))
+	end
+	if event_rate > 1000 then
+		print(string.format("[HIGH_LOAD] event_rate=%.1f/sec", event_rate))
+	end
+	if event_rate > 500 and event_rate <= 1000 then
+		print(string.format("[BUSY] event_rate=%.1f/sec", event_rate))
+	end
+	print("-----------------------------------")
+
+	_bl.prev_entity_total = total_entities
+	_bl.prev_bucket_events = total_events
+	_bl.fps_sum = 0
+	_bl.fps_min = 999
+	_bl.fps_max = 0
+	_bl.fps_count = 0
+	_bl.fps_true_count = 0
+	_bl.fps_proxy_count = 0
+	_bl.frame_time_sum = 0
+	_bl.frame_counter_window = 0
+end
+
+-- PERMANENT: Production loop spawns MAA + Crossbow ONLY, 25% of full group per tick.
+-- PERMANENT: Routes through _BL_RewardSpawn for reward system integration + per-player caps.
+-- DO NOT add other unit types. DO NOT change batch ratios. See header design goals.
+function _BL_ProductionLoop()
+	if not _bl.running or _bl.phase ~= "observe" then return end
+	if not _BL_ENABLE_PRODUCTION_LOOP then return end
+
+	_bl.prod_tick_count = _bl.prod_tick_count + 1
+
+	local current_total = 0
+	for _, p in ipairs(_bl.players) do
+		local ok_sc, sc = pcall(Player_GetSquadCount, p.id)
+		current_total = current_total + ((ok_sc and sc) or 0)
+	end
+
+	if current_total >= _BL_MAX_TOTAL_UNITS then
+		print(string.format("[BATTLE_LAG][PROD] cap reached %d/%d (skipping)", current_total, _BL_MAX_TOTAL_UNITS))
+		return
+	end
+
+	local tick_spawned = 0
+	local planned_maa_total = 0
+	local planned_xbow_total = 0
+	local spawned_maa_total = 0
+	local spawned_xbow_total = 0
+	local per_player_total_batch = _BL_PRODUCTION_MAA_BATCH + _BL_PRODUCTION_XBOW_BATCH
+
+	for _, p in ipairs(_bl.players) do
+		local pkey = "P" .. tostring(p.id)
+		if current_total >= _BL_MAX_TOTAL_UNITS then break end
+		local global_remaining = math.max(0, _BL_MAX_TOTAL_UNITS - current_total)
+		local target_total = math.min(per_player_total_batch, global_remaining)
+		if target_total <= 0 then break end
+
+		-- Desired composition per tick: 25% Crossbow / 75% MAA.
+		local target_xbow = math.floor((target_total * _BL_PRODUCTION_XBOW_RATIO) + 0.5)
+		if target_xbow < 0 then target_xbow = 0 end
+		if target_xbow > target_total then target_xbow = target_total end
+		local target_maa = target_total - target_xbow
+
+		-- ── MAA batch (25% of full group, hard cap 125) ──
+		local sg_maa = _bl.groups[pkey]
+		if sg_maa == nil then
+			sg_maa = SGroup_CreateIfNotFound("sg_bl_mass_" .. tostring(p.id))
+			_bl.groups[pkey] = sg_maa
+		end
+		local alive_maa = SGroup_CountSpawned(sg_maa) or 0
+		local maa_cap_remaining = math.max(0, _BL_BATCH_SIZE - alive_maa)
+		local maa_batch = math.min(target_maa, maa_cap_remaining)
+
+		local maa_sbp = _BL_ResolveMenAtArmsSbp(p)
+
+		-- ── Crossbow batch (25% of full group, hard cap 30) ──
+		local sg_xbow = _bl.xbow_groups[pkey]
+		if sg_xbow == nil then
+			sg_xbow = SGroup_CreateIfNotFound("sg_bl_xbow_" .. tostring(p.id))
+			_bl.xbow_groups[pkey] = sg_xbow
+		end
+		local alive_xbow = SGroup_CountSpawned(sg_xbow) or 0
+		local xbow_cap_remaining = math.max(0, _BL_CROSSBOW_BATCH_SIZE - alive_xbow)
+		local xbow_batch = math.min(target_xbow, xbow_cap_remaining)
+
+		-- Cap-aware reallocation: if one type is capped, shift remainder to the other.
+		local unallocated = target_total - (maa_batch + xbow_batch)
+		if unallocated > 0 then
+			local maa_extra_room = math.max(0, maa_cap_remaining - maa_batch)
+			if maa_extra_room > 0 then
+				local take = math.min(unallocated, maa_extra_room)
+				maa_batch = maa_batch + take
+				unallocated = unallocated - take
+				_BL_RecordEvent("comp_realloc_to_maa", pkey)
+			end
+		end
+		if unallocated > 0 then
+			local xbow_extra_room = math.max(0, xbow_cap_remaining - xbow_batch)
+			if xbow_extra_room > 0 then
+				local take = math.min(unallocated, xbow_extra_room)
+				xbow_batch = xbow_batch + take
+				unallocated = unallocated - take
+				_BL_RecordEvent("comp_realloc_to_xbow", pkey)
+			end
+		end
+
+		planned_maa_total = planned_maa_total + maa_batch
+		planned_xbow_total = planned_xbow_total + xbow_batch
+
+		if maa_sbp ~= nil and maa_batch > 0 then
+			local maa_spawned = _BL_RewardSpawn(p, maa_sbp, maa_batch, sg_maa, _bl.target, false)
+			spawned_maa_total = spawned_maa_total + maa_spawned
+			tick_spawned = tick_spawned + maa_spawned
+			current_total = current_total + maa_spawned
+		end
+
+		local xbow_sbp = _BL_ResolveCrossbowSbp(p)
+		if xbow_sbp ~= nil and xbow_batch > 0 then
+			local xbow_spawned = _BL_RewardSpawn(p, xbow_sbp, xbow_batch, sg_xbow, _bl.target, true)
+			spawned_xbow_total = spawned_xbow_total + xbow_spawned
+			tick_spawned = tick_spawned + xbow_spawned
+			current_total = current_total + xbow_spawned
+		end
+	end
+
+	_bl.prod_total_spawned = _bl.prod_total_spawned + tick_spawned
+	print(string.format("[BATTLE_LAG][PROD] tick=%d ratio=75/25 plan(maa=%d,xbow=%d) spawn(maa=%d,xbow=%d) total=%d cap=%d route=%s",
+		_bl.prod_tick_count, planned_maa_total, planned_xbow_total, spawned_maa_total, spawned_xbow_total, _bl.prod_total_spawned, _BL_MAX_TOTAL_UNITS,
+		type(CBA_Rewards_SpawnAndMove) == "function" and "reward" or "native"))
+end
+
+function _BL_ReassertCommands()
+	if not _bl.running or _bl.phase ~= "observe" then return end
+	local function _reassert_group(groups_tbl, tag)
+		for pkey, sg in pairs(groups_tbl) do
+			if sg ~= nil and SGroup_CountSpawned(sg) > 0 and _bl.target ~= nil then
+				local ok_pos, pos = pcall(SGroup_GetPosition, sg)
+				local should_reassert = true
+				if ok_pos and pos ~= nil then
+					local ok_d, dist = pcall(World_DistancePointToPoint, pos, _bl.target)
+					if ok_d and dist <= _BL_REASSERT_DIST then
+						should_reassert = false
+					end
+				end
+				if should_reassert then
+					pcall(Cmd_AttackMove, sg, _bl.target, false)
+					_BL_RecordEvent("command_reassert" .. tag, pkey)
+				end
+			end
+		end
+	end
+	_reassert_group(_bl.groups, "")
+	_reassert_group(_bl.xbow_groups, "_xbow")
+end
+
+function _BL_HealthCheckAndRespawn()
+	if not _bl.running or _bl.phase ~= "observe" then return end
+	if not _BL_ENABLE_HEALTH_RESPAWN then return end
+
+	local function _health_check(groups_tbl, batch_size, resolve_fn, is_xbow)
+		local threshold = math.floor(batch_size * _BL_HEALTH_THRESHOLD)
+		local tag = is_xbow and "_xbow" or ""
+		for pkey, sg in pairs(groups_tbl) do
+			if sg ~= nil then
+				local alive = SGroup_CountSpawned(sg) or 0
+				if alive > 0 and alive <= threshold then
+					local player = nil
+					for _, p in ipairs(_bl.players) do
+						if ("P" .. tostring(p.id)) == pkey then
+							player = p
+							break
+						end
+					end
+
+					if player ~= nil and _bl.target ~= nil then
+						local sbp = resolve_fn(player)
+						if sbp ~= nil then
+							-- Route through _BL_RewardSpawn (cap-aware, reward-integrated)
+							local missing = batch_size - alive
+							local reinforced = _BL_RewardSpawn(player, sbp, missing, sg, _bl.target, is_xbow)
+							if reinforced > 0 then
+								local rk = pkey .. tag
+								_bl.respawn_count[rk] = (_bl.respawn_count[rk] or 0) + reinforced
+								print(string.format("[BATTLE_LAG] Reinforced %s%s (+%d, was %d/%d alive)",
+									pkey, tag, reinforced, alive, batch_size))
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+
+	_health_check(_bl.groups, _BL_BATCH_SIZE, _BL_ResolveMenAtArmsSbp, false)
+	_health_check(_bl.xbow_groups, _BL_CROSSBOW_BATCH_SIZE, _BL_ResolveCrossbowSbp, true)
+end
+
+function _BL_Finalize()
+	if not _bl.running then return end
+	_bl.phase = "cleanup"
+
+	-- Force-flush batch queues while _bl.running is still true so pending events are counted
+	if type(CBA_SquadKillBatch_Process) == "function" then
+		pcall(CBA_SquadKillBatch_Process)
+	end
+	if type(CBA_EntityKillBatch_Process) == "function" then
+		pcall(CBA_EntityKillBatch_Process)
+	end
+
+	_bl.running = false
+
+	if Rule_Exists(_BL_PrintBucketSummary) then Rule_Remove(_BL_PrintBucketSummary) end
+	if Rule_Exists(_BL_LogHumanFPS) then Rule_Remove(_BL_LogHumanFPS) end
+	if Rule_Exists(_BL_ReassertCommands) then Rule_Remove(_BL_ReassertCommands) end
+	if Rule_Exists(_BL_RewardGroupWatchdog) then Rule_Remove(_BL_RewardGroupWatchdog) end
+	if Rule_Exists(_BL_OrderIdleMilitaryToTarget) then Rule_Remove(_BL_OrderIdleMilitaryToTarget) end
+	if Rule_Exists(_BL_HealthCheckAndRespawn) then Rule_Remove(_BL_HealthCheckAndRespawn) end
+	if Rule_Exists(_BL_ProductionLoop) then Rule_Remove(_BL_ProductionLoop) end
+	if Rule_Exists(_BL_Finalize) then Rule_Remove(_BL_Finalize) end
+	-- PERMANENT: Frame counter uses Rule_Add, NOT TimerAddFrame. Remove via Rule_Remove.
+	if Rule_Exists(_BL_FrameCounterTick) then Rule_Remove(_BL_FrameCounterTick) end
+
+	_BL_UnregisterEvents()
+	_BL_RestoreAILock()
+	local dumped_perf, dump_state = _BL_TryDumpPerfStats()
+	if dumped_perf then
+		print("[BATTLE_LAG][PERF] PerfStats_Dump requested")
+	elseif dump_state ~= "unavailable" then
+		print(string.format("[BATTLE_LAG][PERF] PerfStats_Dump %s", tostring(dump_state)))
+	end
+	if _bl.perfstats_enabled_by_harness and type(PerfStats_Disable) == "function" then
+		pcall(PerfStats_Disable)
+		print("[BATTLE_LAG][PERF] PerfStats disabled (harness cleanup)")
+	end
+
+	-- Unlock and destroy all harness groups for clean manual test end state
+	local function _cleanup_groups(groups_tbl)
+		for pkey, sg in pairs(groups_tbl) do
+			local player_id = nil
+			for _, p in ipairs(_bl.players) do
+				if "P" .. tostring(p.id) == pkey then
+					player_id = p.id
+					break
+				end
+			end
+			if player_id ~= nil then
+				pcall(AI_UnlockSquads, player_id, sg)
+			end
+			pcall(SGroup_DestroyAllSquads, sg)
+			pcall(SGroup_Clear, sg)
+		end
+	end
+	_cleanup_groups(_bl.groups)
+	_cleanup_groups(_bl.xbow_groups)
+
+	local ok_now, now = pcall(World_GetGameTime)
+	local elapsed = (ok_now and _bl.start_time) and (now - _bl.start_time) or 0
+
+	local pass = 0
+	local total = 3
+	if #_bl.players > 0 then pass = pass + 1 end
+	if #_bl.failures == 0 then pass = pass + 1 end
+	if (_bl.events["GE_SquadKilled"] or 0) > 0 then pass = pass + 1 end
+
+	print("[BATTLE_LAG] Final counters:")
+	local keys = {}
+	for k in pairs(_bl.events) do table.insert(keys, k) end
+	table.sort(keys)
+	for _, k in ipairs(keys) do
+		print(string.format("  %s = %d", k, _bl.events[k]))
+	end
+
+	if next(_bl.respawn_count) ~= nil then
+		print("[BATTLE_LAG] Reinforcement totals:")
+		local rkeys = {}
+		for rk in pairs(_bl.respawn_count) do table.insert(rkeys, rk) end
+		table.sort(rkeys)
+		for _, rk in ipairs(rkeys) do
+			print(string.format("  %s = +%d squads", rk, _bl.respawn_count[rk]))
+		end
+	end
+
+	if #_bl.failures > 0 then
+		print("[BATTLE_LAG] Failures:")
+		for _, f in ipairs(_bl.failures) do
+			print("  - " .. tostring(f))
+		end
+	end
+
+	print("")
+	print("################################################################")
+	print("# [BATTLE_LAG][SCARLOG] TEST COMPLETE - CLEANUP FINISHED       #")
+	print("# Use Debug_BattleLagTest() + Debug_BattleLagStop() as a pair. #")
+	print("################################################################")
+
+	_Debug_EndMarker(_BL_SUITE, pass, total, elapsed)
+	_BL_Reset()
+end
+
+function Debug_BattleLagStatus()
+	print(string.format("[BATTLE_LAG] running=%s phase=%s players=%d humans=%d maa_groups=%d xbow_groups=%d failures=%d",
+		tostring(_bl.running), tostring(_bl.phase), #_bl.players, #_bl.human_players, _Debug_CountKeys(_bl.groups or {}), _Debug_CountKeys(_bl.xbow_groups or {}), #_bl.failures))
+	if _bl.target ~= nil then
+		print(string.format("[BATTLE_LAG] target=(%.1f, %.1f)", _bl.target.x or 0, _bl.target.z or 0))
+	end
+	print(string.format("[BATTLE_LAG] prod_loop=%s prod_interval=%.1f maa_batch=%d xbow_batch=%d max_units=%d ai_activity=%s reward_route=%s",
+		tostring(_BL_ENABLE_PRODUCTION_LOOP), _BL_PRODUCTION_INTERVAL, _BL_PRODUCTION_MAA_BATCH, _BL_PRODUCTION_XBOW_BATCH, _BL_MAX_TOTAL_UNITS, tostring(_BL_ENABLE_AI_ACTIVITY),
+		type(CBA_Rewards_SpawnAndMove) == "function" and "active" or "unavailable"))
+end
+
+function Debug_BattleLagConfig()
+	print("[BATTLE_LAG] Configuration:")
+	print(string.format("  BATCH_SIZE = %d", _BL_BATCH_SIZE))
+	print(string.format("  CROSSBOW_BATCH_SIZE = %d", _BL_CROSSBOW_BATCH_SIZE))
+	print(string.format("  SUMMARY_INTERVAL = %.1f", _BL_SUMMARY_INTERVAL))
+	print(string.format("  FPS_LOG_INTERVAL = %.1f", _BL_FPS_LOG_INTERVAL))
+	print(string.format("  REASSERT_INTERVAL = %.1f", _BL_REASSERT_INTERVAL))
+	print(string.format("  REASSERT_DIST = %.1f", _BL_REASSERT_DIST))
+	print(string.format("  IDLE_MIL_ORDER_INTERVAL = %.1f", _BL_IDLE_MIL_ORDER_INTERVAL))
+	print(string.format("  HEALTH_CHECK_INTERVAL = %.1f", _BL_HEALTH_CHECK_INTERVAL))
+	print(string.format("  HEALTH_THRESHOLD = %.2f", _BL_HEALTH_THRESHOLD))
+	print(string.format("  MAX_EVENTS_PER_BUCKET = %d", _BL_MAX_EVENTS_PER_BUCKET))
+	print(string.format("  STUTTER_THRESHOLD = %.1f", _BL_STUTTER_WALL_DT_THRESHOLD))
+	print(string.format("  ENABLE_PRODUCTION_LOOP = %s", tostring(_BL_ENABLE_PRODUCTION_LOOP)))
+	print(string.format("  PRODUCTION_INTERVAL = %.1f", _BL_PRODUCTION_INTERVAL))
+	print(string.format("  PRODUCTION_MAA_BATCH = %d (25%% of %d)", _BL_PRODUCTION_MAA_BATCH, _BL_BATCH_SIZE))
+	print(string.format("  PRODUCTION_XBOW_BATCH = %d (25%% of %d)", _BL_PRODUCTION_XBOW_BATCH, _BL_CROSSBOW_BATCH_SIZE))
+	print(string.format("  UNIT_TYPES = MAA + Crossbow ONLY"))
+	print(string.format("  MAX_TOTAL_UNITS = %d", _BL_MAX_TOTAL_UNITS))
+	print(string.format("  ENABLE_AI_ACTIVITY = %s", tostring(_BL_ENABLE_AI_ACTIVITY)))
+	print(string.format("  FPS_METHOD = Rule_Add per-sim-frame counter"))
+	print(string.format("  SPAWN_ROUTE = %s", type(CBA_Rewards_SpawnAndMove) == "function" and "CBA_Rewards_SpawnAndMove (pop-cap aware)" or "native UnitEntry_DeploySquads (fallback)"))
+	print(string.format("  HARD_CAP_SCOPE = per-player (MAA=%d, XBOW=%d)", _BL_BATCH_SIZE, _BL_CROSSBOW_BATCH_SIZE))
+end
+
+-- Execution body called from the lockstep network callback (MP) or directly (SP).
+-- Guards against duplicate invocation so the callback is idempotent.
+local function _BL_ExecuteStart()
+	if _bl.running then
+		print("[BATTLE_LAG] Already running (network callback — idempotent)")
+		return
+	end
+
+	_cba_debug.enabled = true
+	_BL_Reset()
+	_bl.running = true
+	_bl.phase = "setup"
+	_bl.start_time = World_GetGameTime()
+
+	print("")
+	print("================================================================")
+	print("  CBA DEBUG — BATTLE LAG HARNESS")
+	print("================================================================")
+
+	if not _BL_AcquirePlayers() then
+		_BL_Finalize()
+		return
+	end
+
+	local target, target_source = _BL_GetSacredTarget()
+	-- Warn if target fell back to origin — units will not fight and health check will never trigger
+	if target_source == "fallback_origin" then
+		print("[BATTLE_LAG][WARN] target=fallback_origin (0,0) — _CBA.center nil and no special_beacon found")
+		print("[BATTLE_LAG][WARN] Using a player starting position as target instead")
+		if _bl.players[1] ~= nil then
+			local t, fallback_source = _BL_ResolveSpawnAnchor(_bl.players[1], target)
+			if t ~= nil then
+				target = t
+				target_source = "player1_anchor_fallback:" .. tostring(fallback_source)
+			end
+		end
+	end
+	_bl.target = target
+	print(string.format("[BATTLE_LAG] target_source=%s target=(%.1f, %.1f)",
+		tostring(target_source), target.x or 0, target.z or 0))
+	-- Catch any pre-existing reward squads at test start and force initial dispatch.
+	_BL_DispatchExistingRewardGroups(true)
+
+	_BL_RegisterEvents()
+	_BL_ApplyAILock()
+
+	_bl.phase = "spawn"
+	for _, p in ipairs(_bl.players) do
+		local ok_maa = _BL_SpawnAndDispatchPlayer(p, target)
+		local ok_xbow = _BL_SpawnCrossbowPlayer(p, target)
+		if ok_maa or ok_xbow then
+			_BL_RecordEvent("player_ready", "P" .. tostring(p.id))
+		end
+	end
+	-- Force one more immediate dispatch after startup spawn cycle.
+	_BL_DispatchExistingRewardGroups(true)
+
+	_bl.phase = "observe"
+	_bl.observer_started = World_GetGameTime()
+	_bl.fps_last_game_time = _bl.observer_started
+	_bl.wall_last_time = _BL_GetWallTime()
+	_bl.wall_start_time = _bl.wall_last_time
+	_bl.frame_counter_total = 0
+	_bl.frame_counter_window = 0
+	_bl.heartbeat_last_frame_count = 0
+	local has_fps_probe, fps_probe_name = _BL_ResolveFPSProbe()
+	print(string.format("[BATTLE_LAG][PERF] FPS probe=%s source=%s", tostring(has_fps_probe), tostring(fps_probe_name)))
+	-- PERMANENT: Use Rule_Add for per-sim-frame counting. DO NOT replace with TimerAddFrame.
+	Rule_Add(_BL_FrameCounterTick)
+	local perf_enabled, perf_state = _BL_TryEnablePerfStats()
+	print(string.format("[BATTLE_LAG][PERF] Sim heartbeat active (1s interval). PerfStats=%s (%s)",
+		tostring(perf_enabled), tostring(perf_state)))
+	Rule_AddInterval(_BL_PrintBucketSummary, _BL_SUMMARY_INTERVAL)
+	Rule_AddInterval(_BL_LogHumanFPS, _BL_FPS_LOG_INTERVAL)
+	Rule_AddInterval(_BL_RewardGroupWatchdog, _BL_REWARD_REASSERT_INTERVAL)
+	-- Fire immediately on activation, then every 60s.
+	_BL_OrderIdleMilitaryToTarget()
+	Rule_AddInterval(_BL_OrderIdleMilitaryToTarget, _BL_IDLE_MIL_ORDER_INTERVAL)
+	-- Disabled by request: do not repeatedly issue attack-move; issue only on spawn/reinforcement.
+	-- Rule_AddInterval(_BL_ReassertCommands, _BL_REASSERT_INTERVAL)
+	Rule_AddInterval(_BL_HealthCheckAndRespawn, _BL_HEALTH_CHECK_INTERVAL)
+	if _BL_ENABLE_PRODUCTION_LOOP then
+		Rule_AddInterval(_BL_ProductionLoop, _BL_PRODUCTION_INTERVAL)
+		print(string.format("[BATTLE_LAG][PROD] Production loop active (interval=%.1fs maa_batch=%d xbow_batch=%d cap=%d)",
+			_BL_PRODUCTION_INTERVAL, _BL_PRODUCTION_MAA_BATCH, _BL_PRODUCTION_XBOW_BATCH, _BL_MAX_TOTAL_UNITS))
+	end
+
+	print("[BATTLE_LAG] Observe window started (manual stop required).")
+	print("[BATTLE_LAG] Run Debug_BattleLagStop() to terminate and cleanup.")
+end
+
+-- Execution body for stop — called from network callback (MP) or directly (SP).
+local function _BL_ExecuteStop()
+	if not _bl.running then
+		print("[BATTLE_LAG] Not running (network callback — idempotent)")
+		return
+	end
+	print("[BATTLE_LAG] Stop (lockstep callback)")
+	_BL_Finalize()
+end
+
+-- Public entry point: routes through lockstep network bus in MP so all peers
+-- execute _BL_ExecuteStart at the same sim tick. Direct call in SP.
+-- AI NOTE: Always provide Debug_BattleLagStop() alongside Debug_BattleLagTest().
+function Debug_BattleLagTest()
+	if _bl.running then
+		print("[BATTLE_LAG] Already running")
+		return
+	end
+	if type(_devmenu_is_multiplayer) == "function" and _devmenu_is_multiplayer() then
+		if type(_devmenu_mp_net_action) ~= "function" then
+			print("[BATTLE_LAG][BLOCKED] MP net routing unavailable — cannot start in multiplayer")
+			return
+		end
+		local ok, player = pcall(Game_GetLocalPlayer)
+		if not ok or player == nil then
+			print("[BATTLE_LAG][BLOCKED] local player unavailable — cannot start in multiplayer")
+			return
+		end
+		_devmenu_mp_net_action(player, "BATTLE_LAG_START")
+		print("[BATTLE_LAG] Start dispatched via lockstep network bus — all peers will spawn simultaneously")
+		return
+	end
+	_BL_ExecuteStart()
+end
+
+-- Public entry point: routes stop through lockstep bus in MP.
+-- AI NOTE: Always provide Debug_BattleLagStop() alongside Debug_BattleLagTest().
+function Debug_BattleLagStop()
+	if not _bl.running then
+		print("[BATTLE_LAG] Not running")
+		return
+	end
+	if type(_devmenu_is_multiplayer) == "function" and _devmenu_is_multiplayer() then
+		if type(_devmenu_mp_net_action) == "function" then
+			local ok, player = pcall(Game_GetLocalPlayer)
+			if ok and player ~= nil then
+				_devmenu_mp_net_action(player, "BATTLE_LAG_STOP")
+				print("[BATTLE_LAG] Stop dispatched via lockstep network bus")
+				return
+			end
+		end
+		print("[BATTLE_LAG][WARN] MP net routing unavailable — stopping locally (peers will desync)")
+	end
+	_BL_ExecuteStop()
+end
+
+-- Register BattleLag on the DevMenu lockstep network dispatch table and risk map.
+-- Both entries are defined here (after _BL_ExecuteStart/_BL_ExecuteStop) so the
+-- closures can reference the local functions.  _DEVMENU_NET_ACTIONS is a global
+-- table populated by devmenu_mp_gate.scar, which loads AFTER this file (line 233
+-- vs line 117 in devmenu_categories.scar).  Use Scar_AddInit to defer so the
+-- table exists when we append.
+local function _BL_RegisterNetActions()
+  if type(_DEVMENU_NET_ACTIONS) == "table" then
+          -- Fires on ALL peers at the same lockstep tick via GE_BroadcastMessage.
+          _DEVMENU_NET_ACTIONS.BATTLE_LAG_START = function(pid)
+                  _BL_ExecuteStart()
+          end
+          _DEVMENU_NET_ACTIONS.BATTLE_LAG_STOP = function(pid)
+                  _BL_ExecuteStop()
+          end
+  end
+  if type(_DEVMENU_MP_RISK) == "table" then
+          _DEVMENU_MP_RISK["battle_lag_start"] = {
+                  level  = "MED",
+                  reason = "Routed via BATTLE_LAG_START -> _BL_ExecuteStart on all peers via lockstep GE_BroadcastMessage",
+          }
+          _DEVMENU_MP_RISK["battle_lag_stop"] = {
+                  level  = "MED",
+                  reason = "Routed via BATTLE_LAG_STOP -> _BL_ExecuteStop on all peers via lockstep GE_BroadcastMessage",
+          }
+  end
+end
+Scar_AddInit(_BL_RegisterNetActions)
+
+if Debug_RegisterModule ~= nil then
+  Debug_RegisterModule({
+		name = "battle_lag",
+		tags = { "battle", "performance", "lag", "profiler", "fps", "stress" },
+		tier = 2,
+		depends = { "core", "ai_player_test" },
+		state_tables = { "_cba_debug", "_CBA", "PLAYERS", "_ai_players", "_CBA_PERF" },
+		required_game = { "PLAYERS", "_CBA" },
+		namespace = "ai",
+		description = "Long-match profiler: wall-clock FPS telemetry, broad GE event capture, structured 5s summaries, stress production loop, and optional AI activity",
+	}, {
+		battle_lag_test = Debug_BattleLagTest,
+		battle_lag_stop = Debug_BattleLagStop,
+		battle_lag_status = Debug_BattleLagStatus,
+		battle_lag_config = Debug_BattleLagConfig,
+	})
+end
+
+if debug then
+	debug._register("battle", Debug_BattleLagTest, "Long-match profiler: telemetry + structured summaries + production stress loop", 2)
+	debug._register("battle_stop", Debug_BattleLagStop, "Stop battle lag harness early", 2)
+	debug._register("battle_config", Debug_BattleLagConfig, "Print battle lag profiler configuration", 2)
+end

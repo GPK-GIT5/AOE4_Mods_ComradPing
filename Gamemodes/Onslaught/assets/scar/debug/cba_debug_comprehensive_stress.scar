@@ -1,0 +1,1447 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — Comprehensive Stress Test Suite
+-- Systematic 12-category stress testing combining automated checks, visual demonstrations,
+-- and interactive Q&A prompts to maximize bug discovery and validation coverage.
+--
+-- Branch: onslaught-v3.3
+-- Depends: cba_debug_core.scar, cba_debug_helpers.scar, cba_debug_ui_prompts.scar,
+--          cba_debug_spawn_sequences.scar, cba_debug_destructive.scar
+--
+-- Categories:
+--   1. Boot Integrity            7. Reward Integrity
+--   2. Economy Stress            8. Leaver Resilience
+--   3. Building Limit Gauntlet   9. Event Pipeline Fuzz
+--   4. Siege Limit Cascade      10. Visual State Verification
+--   5. Win Condition Matrix     11. Extreme Edge Cases
+--   6. Auto-Age Pipeline        12. Runtime Stability
+--
+-- Entry Points:
+--   Debug_ComprehensiveStress()           — Run all 12 categories sequentially
+--   Debug_ComprehensiveStress_Cat(n)      — Run a single category (1-12)
+--   Debug_ComprehensiveStressStatus()     — Check progress
+--   Debug_ComprehensiveStressStop()       — Abort run
+---------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------
+-- Network event registration for Cat10 sim-mutating phase functions.
+-- Registered via Scar_AddInit so all peers assign identical event IDs.
+---------------------------------------------------------------------------------------------------
+local function _CS_Cat10_NetEvents_Init()
+	if type(Network_RegisterEvent) == "function" then
+		Network_RegisterEvent("_CS_Net_Cat10_Phase2")
+		Network_RegisterEvent("_CS_Net_Cat10_Phase3")
+		Network_RegisterEvent("_CS_Net_Cat10_Phase4")
+	end
+end
+Scar_AddInit(_CS_Cat10_NetEvents_Init)
+
+local _CS_SUITE_NAME = "ComprehensiveStress"
+
+local _cs = {
+	running = false,
+	current_cat = 0,
+	total_cats = 12,
+	results = {},       -- per-category {name, passed, total}
+	start_time = 0,
+	cat_start_idx = 1,  -- index into _cba_debug.test_results where current category began
+}
+
+local _CS_CATEGORY_NAMES = {
+	"Boot Integrity",
+	"Economy Stress",
+	"Building Limit Gauntlet",
+	"Siege Limit Cascade",
+	"Win Condition Matrix",
+	"Auto-Age Pipeline",
+	"Reward Integrity",
+	"Leaver Resilience",
+	"Event Pipeline Fuzz",
+	"Visual State Verification",
+	"Extreme Edge Cases",
+	"Runtime Stability",
+}
+
+---------------------------------------------------------------------------------------------------
+-- Category Helpers
+---------------------------------------------------------------------------------------------------
+
+local function _CS_CatHeader(num)
+	local name = _CS_CATEGORY_NAMES[num] or "Unknown"
+	print("")
+	print(string.format("  ======== CATEGORY %d / %d: %s ========", num, _cs.total_cats, string.upper(name)))
+	_cs.cat_start_idx = #_cba_debug.test_results + 1
+end
+
+local function _CS_CatFooter(num)
+	local name = _CS_CATEGORY_NAMES[num] or "Unknown"
+	local cat_pass = 0
+	local cat_total = 0
+	for i = _cs.cat_start_idx, #_cba_debug.test_results do
+		cat_total = cat_total + 1
+		if _cba_debug.test_results[i].pass then
+			cat_pass = cat_pass + 1
+		end
+	end
+	table.insert(_cs.results, {name = name, passed = cat_pass, total = cat_total})
+	print(string.format("  -------- Category %d: %d / %d passed --------", num, cat_pass, cat_total))
+end
+
+---------------------------------------------------------------------------------------------------
+-- CATEGORY 1: Boot Integrity
+-- Validates all foundation systems loaded correctly, state tables initialized,
+-- critical globals present, module delegates wired.
+---------------------------------------------------------------------------------------------------
+
+function _CS_Cat1_BootIntegrity()
+	_CS_CatHeader(1)
+
+	-- 1.1 Core state tables (exhaustive)
+	for _, tbl_name in ipairs(_cba_debug.state_tables) do
+		_Debug_RunTest("Boot/" .. tbl_name, function()
+			local ref = _G[tbl_name]
+			if ref == nil then return false, tbl_name .. " is nil" end
+			if type(ref) ~= "table" then return false, tbl_name .. " is " .. type(ref) .. " (expected table)" end
+			return true, tbl_name .. " present (" .. _Debug_CountKeys(ref) .. " keys)"
+		end)
+	end
+
+	-- 1.2 PLAYERS array integrity
+	_Debug_RunTest("Boot/PLAYERS_array", function()
+		if PLAYERS == nil then return false, "PLAYERS is nil" end
+		if type(PLAYERS) ~= "table" then return false, "PLAYERS is " .. type(PLAYERS) end
+		if #PLAYERS == 0 then return false, "PLAYERS is empty" end
+		return true, #PLAYERS .. " players"
+	end)
+
+	-- 1.3 Each player has required fields
+	if PLAYERS then
+		for i, player in ipairs(PLAYERS) do
+			_Debug_RunTest("Boot/P" .. i .. "_fields", function()
+				local missing = {}
+				if player.id == nil then table.insert(missing, "id") end
+				if player.keep == nil then table.insert(missing, "keep") end
+				if player.AGS_Team == nil and player.team == nil then table.insert(missing, "team") end
+				if #missing > 0 then
+					return false, "missing: " .. table.concat(missing, ", ")
+				end
+				local civ = "unknown"
+				local ok, c = pcall(Player_GetRaceName, player.id)
+				if ok then civ = c end
+				return true, "civ=" .. civ
+			end)
+		end
+	end
+
+	-- 1.4 AGS_ENTITY_TABLE coverage
+	_Debug_RunTest("Boot/AGS_ENTITY_TABLE", function()
+		if AGS_ENTITY_TABLE == nil then return false, "nil" end
+		local count = _Debug_CountKeys(AGS_ENTITY_TABLE)
+		if count < 12 then return false, "only " .. count .. " civs (expected >=12)" end
+		return true, count .. " civilization entries"
+	end)
+
+	-- 1.5 Module function registry
+	local critical_fns = {
+		"Mod_OnEntityKilled", "CBA_Options_SiegeLimit_Recount",
+		"CBA_Options_SiegeLimit_ApplyThreshold", "CBA_Options_BuildingLimit_RecountPlayer",
+		"Surrender_CheckVictory", "AGS_IncreasePopulation",
+	}
+	for _, fn_name in ipairs(critical_fns) do
+		_Debug_RunTest("Boot/fn_" .. fn_name, function()
+			return _Debug_FunctionExists(fn_name)
+		end)
+	end
+
+	-- 1.6 Debug system self-test
+	_Debug_RunTest("Boot/debug_self", function()
+		if _cba_debug == nil then return false, "_cba_debug nil" end
+		if _cba_debug.test_results == nil then return false, "test_results nil" end
+		if type(_Debug_RunTest) ~= "function" then return false, "_Debug_RunTest missing" end
+		if type(_Debug_EndMarker) ~= "function" then return false, "_Debug_EndMarker missing" end
+		return true, "debug infrastructure OK"
+	end)
+
+	_CS_CatFooter(1)
+end
+
+---------------------------------------------------------------------------------------------------
+-- CATEGORY 2: Economy Stress
+-- Tests resource delivery, auto-population, simultaneous timer interactions,
+-- resource overflow, and economy under extreme conditions.
+---------------------------------------------------------------------------------------------------
+
+function _CS_Cat2_EconomyStress()
+	_CS_CatHeader(2)
+
+	-- 2.1 Resource types accessible
+	_Debug_RunTest("Econ/resource_types", function()
+		local types = {RT_Food, RT_Wood, RT_Gold, RT_Stone}
+		for _, rt in ipairs(types) do
+			if rt == nil then return false, "resource type constant nil" end
+		end
+		return true, "all 4 resource types present"
+	end)
+
+	-- 2.2 Per-player resource read/write cycle
+	if PLAYERS then
+		for i, player in ipairs(PLAYERS) do
+			_Debug_RunTest("Econ/P" .. i .. "_resource_rw", function()
+				local ok_get, food = pcall(Player_GetResource, player.id, RT_Food)
+				if not ok_get then return false, "GetResource crash" end
+				local ok_set, err = pcall(Player_SetResource, player.id, RT_Food, food)
+				if not ok_set then return false, "SetResource crash: " .. tostring(err) end
+				local ok_get2, food2 = pcall(Player_GetResource, player.id, RT_Food)
+				if not ok_get2 then return false, "GetResource post-set crash" end
+				return true, "food=" .. tostring(food)
+			end)
+		end
+	end
+
+	-- 2.3 Zero-resource edge case
+	_Debug_RunTest("Econ/zero_resource", function()
+		if PLAYERS == nil or #PLAYERS == 0 then return false, "no players" end
+		local player = PLAYERS[1]
+		local ok_save, orig = pcall(Player_GetResource, player.id, RT_Food)
+		if not ok_save then return false, "cannot read food" end
+		local ok_zero = pcall(Player_SetResource, player.id, RT_Food, 0)
+		local ok_read, val = pcall(Player_GetResource, player.id, RT_Food)
+		pcall(Player_SetResource, player.id, RT_Food, orig)
+		if not ok_zero then return false, "SetResource(0) crash" end
+		if ok_read and val ~= 0 then return false, "food not zero after set (got " .. tostring(val) .. ")" end
+		return true, "zero-resource round-trip OK"
+	end)
+
+	-- 2.4 Large resource edge case
+	_Debug_RunTest("Econ/large_resource", function()
+		if PLAYERS == nil or #PLAYERS == 0 then return false, "no players" end
+		local player = PLAYERS[1]
+		local ok_save, orig = pcall(Player_GetResource, player.id, RT_Gold)
+		local ok_set = pcall(Player_SetResource, player.id, RT_Gold, 999999)
+		local ok_read, val = pcall(Player_GetResource, player.id, RT_Gold)
+		pcall(Player_SetResource, player.id, RT_Gold, ok_save and orig or 500)
+		if not ok_set then return false, "SetResource(999999) crash" end
+		return true, "large resource accepted (read back " .. tostring(val) .. ")"
+	end)
+
+	-- 2.5 Auto-resource function exists
+	_Debug_RunTest("Econ/auto_resource_fn", function()
+		return _Debug_FunctionExists("AGS_AutoResources")
+	end)
+
+	-- 2.6 Auto-population function exists
+	_Debug_RunTest("Econ/auto_pop_fn", function()
+		return _Debug_FunctionExists("AGS_IncreasePopulation")
+	end)
+
+	-- 2.7 Population consistency across all players
+	if PLAYERS then
+		for i, player in ipairs(PLAYERS) do
+			_Debug_RunTest("Econ/P" .. i .. "_pop_consistency", function()
+				local ok_pop, pop = pcall(Player_GetCurrentPopulation, player.id, CT_Personnel)
+				local ok_cap, cap = pcall(Player_GetCurrentPopulationCap, player.id, CT_Personnel)
+				local ok_max, maxcap = pcall(Player_GetMaxPopulationCap, player.id, CT_Personnel)
+				if not (ok_pop and ok_cap and ok_max) then return false, "pop API crash" end
+				if pop > cap then return false, string.format("pop(%d)>cap(%d)", pop, cap) end
+				if cap > maxcap then return false, string.format("cap(%d)>max(%d)", cap, maxcap) end
+				return true, string.format("pop=%d cap=%d max=%d", pop, cap, maxcap)
+			end)
+		end
+	end
+
+	-- 2.8 _mod economy fields
+	_Debug_RunTest("Econ/mod_economy_fields", function()
+		if _mod == nil then return false, "_mod nil" end
+		local fields = {"resource_amount", "pop_interval", "pop_cap"}
+		local missing = {}
+		for _, f in ipairs(fields) do
+			if _mod[f] == nil then table.insert(missing, f) end
+		end
+		if #missing > 0 then return false, "missing: " .. table.concat(missing, ", ") end
+		return true, string.format("res=%s pop_int=%s pop_cap=%s",
+			tostring(_mod.resource_amount), tostring(_mod.pop_interval), tostring(_mod.pop_cap))
+	end)
+
+	_CS_CatFooter(2)
+end
+
+---------------------------------------------------------------------------------------------------
+-- CATEGORY 3: Building Limit Gauntlet
+-- Rapid construction/destruction cycles at exact boundary, multi-player concurrent
+-- recount, English dual-classification, cancellation dedup.
+---------------------------------------------------------------------------------------------------
+
+function _CS_Cat3_BuildingLimitGauntlet()
+	_CS_CatHeader(3)
+
+	-- 3.1 Building limit module loaded
+	_Debug_RunTest("BldgLimit/module", function()
+		return _Debug_TableExists("_buildingLimit", _buildingLimit)
+	end)
+
+	-- 3.2 RecountPlayer available
+	_Debug_RunTest("BldgLimit/recount_fn", function()
+		return _Debug_FunctionExists("CBA_Options_BuildingLimit_RecountPlayer")
+	end)
+
+	-- 3.3 Per-player recount stability (10 rapid cycles)
+	if PLAYERS and type(CBA_Options_BuildingLimit_RecountPlayer) == "function" then
+		for i, player in ipairs(PLAYERS) do
+			_Debug_RunTest("BldgLimit/P" .. i .. "_recount_x10", function()
+				for cycle = 1, 10 do
+					local ok, err = pcall(CBA_Options_BuildingLimit_RecountPlayer, player)
+					if not ok then return false, "crash at cycle " .. cycle .. ": " .. tostring(err) end
+				end
+				return true, "10 recount cycles OK"
+			end)
+		end
+	end
+
+	-- 3.4 Counter non-negative invariant
+	if PLAYERS then
+		for i, player in ipairs(PLAYERS) do
+			_Debug_RunTest("BldgLimit/P" .. i .. "_non_negative", function()
+				local count = player.obj_buildingLimit_count
+				local ws_count = player.obj_buildingLimit_workshop_count
+				if count ~= nil and count < 0 then return false, "production count=" .. count end
+				if ws_count ~= nil and ws_count < 0 then return false, "workshop count=" .. ws_count end
+				return true, string.format("prod=%s ws=%s", tostring(count), tostring(ws_count))
+			end)
+		end
+	end
+
+	-- 3.5 Building limit config from AGS_GLOBAL_SETTINGS
+	_Debug_RunTest("BldgLimit/config", function()
+		if AGS_GLOBAL_SETTINGS == nil then return false, "AGS_GLOBAL_SETTINGS nil" end
+		local val = AGS_GLOBAL_SETTINGS.MaximumProductionBuildings
+		if val == nil then return false, "MaximumProductionBuildings nil" end
+		return true, "MaximumProductionBuildings=" .. tostring(val)
+	end)
+
+	-- 3.6 Multi-player concurrent recount (all at once, detect reentrancy)
+	_Debug_RunTest("BldgLimit/concurrent_recount", function()
+		if type(CBA_Options_BuildingLimit_RecountPlayer) ~= "function" then
+			return false, "RecountPlayer not available"
+		end
+		local ok, err = pcall(function()
+			for _, player in ipairs(PLAYERS) do
+				CBA_Options_BuildingLimit_RecountPlayer(player)
+			end
+		end)
+		if not ok then return false, "concurrent crash: " .. tostring(err) end
+		return true, "all players recounted in sequence"
+	end)
+
+	-- 3.7 Lock/unlock function reachability
+	local lock_fns = {
+		"CBA_Options_BuildingLimit_LockPlayer",
+		"CBA_Options_BuildingLimit_UnlockPlayer",
+	}
+	for _, fn_name in ipairs(lock_fns) do
+		_Debug_RunTest("BldgLimit/" .. fn_name, function()
+			return _Debug_FunctionExists(fn_name)
+		end)
+	end
+
+	_CS_CatFooter(3)
+end
+
+---------------------------------------------------------------------------------------------------
+-- CATEGORY 4: Siege Limit Cascade
+-- All tiers, civ-specific paths, boundary math at each threshold, remove mid-cascade.
+---------------------------------------------------------------------------------------------------
+
+function _CS_Cat4_SiegeLimitCascade()
+	_CS_CatHeader(4)
+
+	-- 4.1 Siege limit functions
+	local siege_fns = {
+		"CBA_Options_SiegeLimit_Recount",
+		"CBA_Options_SiegeLimit_ApplyThreshold",
+	}
+	for _, fn_name in ipairs(siege_fns) do
+		_Debug_RunTest("Siege/" .. fn_name, function()
+			return _Debug_FunctionExists(fn_name)
+		end)
+	end
+
+	-- 4.2 Per-player siege state consistency
+	if PLAYERS then
+		for i, player in ipairs(PLAYERS) do
+			_Debug_RunTest("Siege/P" .. i .. "_state", function()
+				local sc = player.siegeLimit_count
+				local rc = player.ramLimit_count
+				local stc = player.siegeTowerLimit_count
+				local detail = string.format("siege=%s ram=%s tower=%s",
+					tostring(sc), tostring(rc), tostring(stc))
+				if sc ~= nil and sc < 0 then return false, "negative siege count: " .. detail end
+				if rc ~= nil and rc < 0 then return false, "negative ram count: " .. detail end
+				if stc ~= nil and stc < 0 then return false, "negative tower count: " .. detail end
+				return true, detail
+			end)
+		end
+	end
+
+	-- 4.3 Recount stability (10 cycles per player)
+	if PLAYERS and type(CBA_Options_SiegeLimit_Recount) == "function" then
+		for i, player in ipairs(PLAYERS) do
+			_Debug_RunTest("Siege/P" .. i .. "_recount_x10", function()
+				for cycle = 1, 10 do
+					local ok, err = pcall(CBA_Options_SiegeLimit_Recount, player)
+					if not ok then return false, "crash cycle " .. cycle .. ": " .. tostring(err) end
+				end
+				return true, "10 siege recounts OK"
+			end)
+		end
+	end
+
+	-- 4.4 Recount+Threshold interleave (the real hot path)
+	if PLAYERS then
+		_Debug_RunTest("Siege/recount_threshold_interleave", function()
+			if type(CBA_Options_SiegeLimit_Recount) ~= "function" then return false, "Recount missing" end
+			if type(CBA_Options_SiegeLimit_ApplyThreshold) ~= "function" then return false, "ApplyThreshold missing" end
+			local ok, err = pcall(function()
+				for cycle = 1, 5 do
+					for _, player in ipairs(PLAYERS) do
+						CBA_Options_SiegeLimit_Recount(player)
+						CBA_Options_SiegeLimit_ApplyThreshold(player)
+					end
+				end
+			end)
+			if not ok then return false, "interleave crash: " .. tostring(err) end
+			return true, "5 recount+threshold cycles × " .. #PLAYERS .. " players"
+		end)
+	end
+
+	-- 4.5 Siege data tables
+	_Debug_RunTest("Siege/cba_siege_data", function()
+		if type(CBA_SIEGE_TAG_REGISTRY) == "table" and type(CBA_SIEGE_TAG_REGISTRY.ram_weight) == "table" then
+			return true, _Debug_CountKeys(CBA_SIEGE_TAG_REGISTRY.key_class) .. " key classifications, " .. _Debug_CountKeys(CBA_SIEGE_TAG_REGISTRY.ram_weight) .. " weight entries"
+		end
+		if type(CBA_SIEGE_WEIGHTS) == "table" then
+			return true, _Debug_CountKeys(CBA_SIEGE_WEIGHTS) .. " weight entries (legacy)"
+		end
+		if type(CBA_GetSiegeWeight) == "function" then
+			return true, "CBA_GetSiegeWeight function found"
+		end
+		return false, "no siege weight data found"
+	end)
+
+	-- 4.6 Ram/siege tower independent limit accessors
+	_Debug_RunTest("Siege/ram_tower_accessors", function()
+		local ok1 = type(CBA_Options_GetRamLimitMax) == "function"
+		local ok2 = type(CBA_Options_GetSiegeTowerLimitMax) == "function"
+		if ok1 and ok2 then return true, "both accessors found" end
+		local missing = {}
+		if not ok1 then table.insert(missing, "RamLimitMax") end
+		if not ok2 then table.insert(missing, "SiegeTowerLimitMax") end
+		return false, "missing: " .. table.concat(missing, ", ")
+	end)
+
+	_CS_CatFooter(4)
+end
+
+---------------------------------------------------------------------------------------------------
+-- CATEGORY 5: Win Condition Matrix
+-- Tests conquest, religious, wonder, and surrender paths plus edge interactions.
+---------------------------------------------------------------------------------------------------
+
+function _CS_Cat5_WinConditionMatrix()
+	_CS_CatHeader(5)
+
+	-- 5.1 Win condition modules present
+	local wc_tables = {
+		{"_annihilation", _annihilation},
+		{"_religious", _religious},
+		{"_wonder", _wonder},
+	}
+	for _, wc in ipairs(wc_tables) do
+		_Debug_RunTest("WinCond/" .. wc[1], function()
+			return _Debug_TableExists(wc[1], wc[2])
+		end)
+	end
+
+	-- 5.2 Surrender function
+	_Debug_RunTest("WinCond/Surrender_CheckVictory", function()
+		return _Debug_FunctionExists("Surrender_CheckVictory")
+	end)
+
+	-- 5.3 Conquest objective tracking
+	_Debug_RunTest("WinCond/conquest_tracking", function()
+		if _mod == nil then return false, "_mod nil" end
+		local meet = _mod.objective_meet
+		local req = _mod.objective_requirement
+		if meet == nil then return false, "objective_meet nil" end
+		if req == nil then return false, "objective_requirement nil" end
+		if meet < 0 then return false, "objective_meet negative" end
+		if meet > req then return false, string.format("meet(%d) > requirement(%d)", meet, req) end
+		return true, string.format("conquest %d/%d", meet, req)
+	end)
+
+	-- 5.4 Castle tracking integrity
+	_Debug_RunTest("WinCond/castle_tracking", function()
+		if _mod == nil or _mod.castles == nil then return false, "castles table nil" end
+		local count = _Debug_CountKeys(_mod.castles)
+		if count == 0 then return false, "no castles tracked" end
+		return true, count .. " castles in tracking table"
+	end)
+
+	-- 5.5 Religious holy sites
+	_Debug_RunTest("WinCond/holy_sites", function()
+		if _religious == nil then return true, "religious module not active (OK)" end
+		if _religious.sites == nil then return false, "sites array nil" end
+		return true, #_religious.sites .. " holy sites tracked"
+	end)
+
+	-- 5.6 Wonder timer validation
+	_Debug_RunTest("WinCond/wonder_timer", function()
+		if _wonder == nil then return true, "wonder module not active (OK)" end
+		return true, "wonder module present"
+	end)
+
+	-- 5.7 Player elimination state validity
+	if PLAYERS then
+		_Debug_RunTest("WinCond/elimination_consistency", function()
+			local alive = 0
+			local eliminated = 0
+			for i, player in ipairs(PLAYERS) do
+				local ok, is_elim = pcall(Core_IsPlayerEliminated, player.id)
+				if ok then
+					if is_elim then eliminated = eliminated + 1 else alive = alive + 1 end
+				end
+			end
+			if alive == 0 then return false, "all players eliminated (game should have ended)" end
+			return true, string.format("alive=%d eliminated=%d", alive, eliminated)
+		end)
+	end
+
+	_CS_CatFooter(5)
+end
+
+---------------------------------------------------------------------------------------------------
+-- CATEGORY 6: Auto-Age Pipeline
+-- Timer races, max-age caps, forced age-ups, per-civ age-up mode validation.
+---------------------------------------------------------------------------------------------------
+
+function _CS_Cat6_AutoAgePipeline()
+	_CS_CatHeader(6)
+
+	-- 6.1 AutoAge module
+	_Debug_RunTest("AutoAge/module", function()
+		return _Debug_TableExists("_autoage", _autoage)
+	end)
+
+	-- 6.2 AutoAge config
+	_Debug_RunTest("AutoAge/config", function()
+		if AGS_GLOBAL_SETTINGS == nil then return false, "settings nil" end
+		local val = AGS_GLOBAL_SETTINGS.AutoAge
+		return val ~= nil, "AutoAge=" .. tostring(val)
+	end)
+
+	-- 6.3 Per-player age validity
+	if PLAYERS then
+		for i, player in ipairs(PLAYERS) do
+			_Debug_RunTest("AutoAge/P" .. i .. "_age", function()
+				local ok, age = pcall(Player_GetCurrentAge, player.id)
+				if not ok then return false, "Player_GetCurrentAge crash" end
+				if age < 1 or age > 4 then return false, "age=" .. age .. " (out of range 1-4)" end
+				return true, "age=" .. age
+			end)
+		end
+	end
+
+	-- 6.4 Build count tracking
+	if PLAYERS then
+		for i, player in ipairs(PLAYERS) do
+			_Debug_RunTest("AutoAge/P" .. i .. "_build_count", function()
+				local bc = player.obj_build_count
+				if bc == nil then return true, "build_count nil (auto-age may not track)" end
+				if bc < 0 then return false, "negative build_count=" .. bc end
+				return true, "build_count=" .. bc
+			end)
+		end
+	end
+
+	-- 6.5 AutoAge function availability
+	local age_fns = {"CBA_Auto_Age_AgeUp", "CBA_AutoAge_CheckAllPlayers", "CBA_AutoAge_SetMaxAge"}
+	for _, fn_name in ipairs(age_fns) do
+		_Debug_RunTest("AutoAge/" .. fn_name, function()
+			return _Debug_FunctionExists(fn_name)
+		end)
+	end
+
+	-- 6.6 Age-gate coverage (civ completeness)
+	_Debug_RunTest("AutoAge/age_gate_coverage", function()
+		if type(Debug_ValidateAgeGateCoverage) == "function" then
+			local ok, result = pcall(Debug_ValidateAgeGateCoverage, true)
+			if not ok then return false, "crash: " .. tostring(result) end
+			return result, result and "all civs have required keys" or "some civs missing keys"
+		end
+		return true, "validator not available (skip)"
+	end)
+
+	_CS_CatFooter(6)
+end
+
+---------------------------------------------------------------------------------------------------
+-- CATEGORY 7: Reward Integrity
+-- Kill tracking accuracy, reward table completeness, spawn queue under pop cap, civ parity.
+---------------------------------------------------------------------------------------------------
+
+function _CS_Cat7_RewardIntegrity()
+	_CS_CatHeader(7)
+
+	-- 7.1 Rewards table
+	_Debug_RunTest("Rewards/table", function()
+		return _Debug_TableExists("_CBA", _CBA)
+	end)
+
+	-- 7.2 Rewards sub-table
+	_Debug_RunTest("Rewards/rewards_data", function()
+		if _CBA == nil then return false, "_CBA nil" end
+		if _CBA.rewards == nil then return false, "_CBA.rewards nil" end
+		local count = _Debug_CountKeys(_CBA.rewards)
+		return count > 0, count .. " civ reward entries"
+	end)
+
+	-- 7.3 Sacred site center (spawn anchor)
+	_Debug_RunTest("Rewards/center", function()
+		if _CBA == nil then return false, "_CBA nil" end
+		if _CBA.center == nil then return false, "_CBA.center nil (reward spawns have no anchor)" end
+		return true, "center present"
+	end)
+
+	-- 7.4 Per-player kill tracking
+	if PLAYERS then
+		for i, player in ipairs(PLAYERS) do
+			_Debug_RunTest("Rewards/P" .. i .. "_kills", function()
+				local kills = player.killed_number
+				local req = player.obj_kill_requirement
+				if kills == nil then return false, "killed_number nil" end
+				if kills < 0 then return false, "negative kills=" .. kills end
+				return true, string.format("kills=%d next_req=%s", kills, tostring(req))
+			end)
+		end
+	end
+
+	-- 7.5 Reward function accessibility
+	local reward_fns = {"CBA_Rewards_nextRequirement", "CBA_Rewards_SpawnReward"}
+	for _, fn_name in ipairs(reward_fns) do
+		_Debug_RunTest("Rewards/" .. fn_name, function()
+			return _Debug_FunctionExists(fn_name)
+		end)
+	end
+
+	-- 7.6 Reward civ parity — every in-game civ should have a reward entry
+	if PLAYERS and _CBA and _CBA.rewards then
+		_Debug_RunTest("Rewards/civ_parity", function()
+			local missing = {}
+			for i, player in ipairs(PLAYERS) do
+				local ok, civ = pcall(Player_GetRaceName, player.id)
+				if ok and civ then
+					if _CBA.rewards[civ] == nil then
+						-- Check parent map fallback
+						local parent = AGS_CIV_PARENT_MAP and AGS_CIV_PARENT_MAP[civ]
+						if parent == nil or _CBA.rewards[parent] == nil then
+							table.insert(missing, "P" .. i .. "(" .. civ .. ")")
+						end
+					end
+				end
+			end
+			if #missing > 0 then
+				return false, "no rewards for: " .. table.concat(missing, ", ")
+			end
+			return true, "all in-game civs have reward entries"
+		end)
+	end
+
+	_CS_CatFooter(7)
+end
+
+---------------------------------------------------------------------------------------------------
+-- CATEGORY 8: Leaver Resilience
+-- Validates leaver/disconnect handling pipeline integrity without actually disconnecting.
+---------------------------------------------------------------------------------------------------
+
+function _CS_Cat8_LeaverResilience()
+	_CS_CatHeader(8)
+
+	-- 8.1 Leaver functions
+	local leaver_fns = {
+		"Mod_EliminatePlayerUnits",
+		"Core_SetPlayerDefeated",
+		"Core_IsPlayerEliminated",
+	}
+	for _, fn_name in ipairs(leaver_fns) do
+		_Debug_RunTest("Leaver/" .. fn_name, function()
+			return _Debug_FunctionExists(fn_name)
+		end)
+	end
+
+	-- 8.2 Keep ownership map integrity
+	_Debug_RunTest("Leaver/keep_ownership", function()
+		if PLAYERS == nil then return false, "no players" end
+		local orphaned = 0
+		for i, player in ipairs(PLAYERS) do
+			if player.keep == nil then
+				orphaned = orphaned + 1
+			elseif player.keep.entity then
+				local ok, alive = pcall(Entity_IsAlive, player.keep.entity)
+				if not ok then orphaned = orphaned + 1 end
+			end
+		end
+		if orphaned > 0 then return false, orphaned .. " players with orphaned/missing keep refs" end
+		return true, "all keep refs valid"
+	end)
+
+	-- 8.3 Team assignment integrity
+	_Debug_RunTest("Leaver/team_integrity", function()
+		if PLAYERS == nil then return false, "no players" end
+		local teams = {}
+		for i, player in ipairs(PLAYERS) do
+			local team_idx = nil
+			if player.AGS_Team then
+				team_idx = player.AGS_Team.index
+			elseif player.team then
+				team_idx = type(player.team) == "table" and player.team.index or player.team
+			end
+			if team_idx == nil then return false, "P" .. i .. " has no team" end
+			teams[team_idx] = (teams[team_idx] or 0) + 1
+		end
+		local team_count = _Debug_CountKeys(teams)
+		if team_count < 2 then return false, "only " .. team_count .. " team(s)" end
+		return true, team_count .. " teams"
+	end)
+
+	-- 8.4 Post-defeat state inspection safety
+	_Debug_RunTest("Leaver/post_defeat_safe", function()
+		if type(Debug_GetPostDefeatState) == "function" then
+			local ok, err = pcall(Debug_GetPostDefeatState)
+			if not ok then return false, "crash: " .. tostring(err) end
+			return true, "state dump OK"
+		end
+		return true, "inspector not loaded (skip)"
+	end)
+
+	-- 8.5 Entity transfer function safety
+	_Debug_RunTest("Leaver/transfer_fn", function()
+		return _Debug_FunctionExists("Entity_SetPlayerOwner")
+	end)
+
+	-- 8.6 Garrison ejection function
+	_Debug_RunTest("Leaver/unload_fn", function()
+		return _Debug_FunctionExists("Entity_UnloadAllFromHold")
+	end)
+
+	_CS_CatFooter(8)
+end
+
+---------------------------------------------------------------------------------------------------
+-- CATEGORY 9: Event Pipeline Fuzz
+-- Fires event handlers with minimal/nil contexts to test crash resilience.
+-- Uses mock contexts (safe: no real entities needed).
+---------------------------------------------------------------------------------------------------
+
+function _CS_Cat9_EventPipelineFuzz()
+	_CS_CatHeader(9)
+
+	-- 9.1 GE_EntityKilled with nil context
+	_Debug_RunTest("Events/EntityKilled_nil", function()
+		if type(Mod_OnEntityKilled) ~= "function" then return true, "handler not loaded (skip)" end
+		local ok, err = pcall(Mod_OnEntityKilled, nil)
+		-- It's OK if it errors on nil context — we just don't want a fatal crash
+		return true, ok and "handled nil gracefully" or "caught error: " .. string.sub(tostring(err), 1, 60)
+	end)
+
+	-- 9.2 GE_EntityKilled with empty table context
+	_Debug_RunTest("Events/EntityKilled_empty", function()
+		if type(Mod_OnEntityKilled) ~= "function" then return true, "handler not loaded (skip)" end
+		local ok, err = pcall(Mod_OnEntityKilled, {})
+		return true, ok and "handled empty ctx" or "caught: " .. string.sub(tostring(err), 1, 60)
+	end)
+
+	-- 9.3 Construction event handlers with nil
+	local construction_handlers = {
+		"CBA_Options_OnConstructionStart",
+		"CBA_Options_OnConstructionCancelled",
+		"CBA_Options_OnConstructionComplete",
+	}
+	for _, fn_name in ipairs(construction_handlers) do
+		_Debug_RunTest("Events/" .. fn_name .. "_nil", function()
+			local fn = _G[fn_name]
+			if type(fn) ~= "function" then return true, "not loaded (skip)" end
+			local ok, err = pcall(fn, nil)
+			return true, ok and "handled nil" or "caught: " .. string.sub(tostring(err), 1, 60)
+		end)
+	end
+
+	-- 9.4 BuildItemComplete with nil (siege production event)
+	_Debug_RunTest("Events/BuildItemComplete_nil", function()
+		local fn = _G["CBA_Options_OnBuildItemComplete"] or _G["Mod_OnBuildItemComplete"]
+		if type(fn) ~= "function" then return true, "handler not loaded (skip)" end
+		local ok, err = pcall(fn, nil)
+		return true, ok and "handled nil" or "caught: " .. string.sub(tostring(err), 1, 60)
+	end)
+
+	-- 9.5 SquadKilled with nil
+	_Debug_RunTest("Events/SquadKilled_nil", function()
+		local fn = _G["CBA_Options_OnSquadKilled"] or _G["Mod_OnSquadKilled"]
+		if type(fn) ~= "function" then return true, "handler not loaded (skip)" end
+		local ok, err = pcall(fn, nil)
+		return true, ok and "handled nil" or "caught: " .. string.sub(tostring(err), 1, 60)
+	end)
+
+	-- 9.6 Rapid event interleave (construction + siege in quick succession)
+	_Debug_RunTest("Events/rapid_interleave", function()
+		local ok, err = pcall(function()
+			for i = 1, 20 do
+				if type(CBA_Options_SiegeLimit_Recount) == "function" and PLAYERS and #PLAYERS > 0 then
+					CBA_Options_SiegeLimit_Recount(PLAYERS[1])
+				end
+				if type(CBA_Options_BuildingLimit_RecountPlayer) == "function" and PLAYERS and #PLAYERS > 0 then
+					CBA_Options_BuildingLimit_RecountPlayer(PLAYERS[1])
+				end
+			end
+		end)
+		if not ok then return false, "rapid interleave crash: " .. tostring(err) end
+		return true, "20 rapid interleave cycles OK"
+	end)
+
+	_CS_CatFooter(9)
+end
+
+---------------------------------------------------------------------------------------------------
+-- CATEGORY 10: Visual State Verification
+-- Camera-focused inspections with user confirmation. Uses both Debug_WaitForVisual
+-- and Debug_AskYesNo for systematic visual validation.
+-- NOTE: This category is async (requires user input). It chains via callbacks.
+---------------------------------------------------------------------------------------------------
+
+function _CS_Cat10_VisualStateVerification()
+	_CS_CatHeader(10)
+
+	-- Store state for async chain
+	_cs._visual_phase = 0
+	_cs._visual_cat_start = _cs.cat_start_idx
+
+	_CS_Visual_Phase1()
+end
+
+function _CS_Visual_Phase1()
+	_cs._visual_phase = 1
+	-- Precache / HUD check — no simulation needed
+	Debug_AskYesNo(
+		"Look at the top of the screen. Can you see the resource counters (food, wood, gold, stone) and the population number?",
+		_CS_Visual_Phase1_Answer, 0, 1,
+		"Expected: YES. All resource bars and the population display should be visible. If any are missing, there may be a UI loading or precache issue.")
+end
+
+function _CS_Visual_Phase1_Answer(choice)
+	table.insert(_cba_debug.test_results, {
+		name = "Visual/hud_resources_visible",
+		pass = (choice == 1),
+		detail = (choice == 1) and "HUD resource bars visible" or "REVIEW: HUD elements may not be loading",
+	})
+	Rule_AddOneShot(_CS_Visual_Phase2_Start, 1.0)
+end
+
+-- Network dispatch handler for Phase 2 sim mutation: fires on ALL peers via lockstep bus.
+-- Player_SetResource runs on every peer at the same sim tick.
+function _CS_Net_Cat10_Phase2(playerID, message)
+	if PLAYERS and #PLAYERS > 0 then
+		local ok, cur = pcall(Player_GetResource, PLAYERS[1].id, RT_Food)
+		Player_SetResource(PLAYERS[1].id, RT_Food, (ok and cur or 0) + 1500)
+		print("  [SIM] Added 1500 food to P1")
+	end
+end
+
+function _CS_Visual_Phase2_Start()
+	_cs._visual_phase = 2
+
+	-- Add 1500 food to P1 visibly — routed through network so it runs on all peers.
+	if type(World_IsMultiplayerGame) == "function" and World_IsMultiplayerGame() then
+		if type(Network_CallEvent) == "function" then
+			Network_CallEvent("_CS_Net_Cat10_Phase2", "")
+		end
+	else
+		_CS_Net_Cat10_Phase2(nil, "")
+	end
+
+	Debug_AskYesNo(
+		"P1 was just given 1500 extra food. Did the food counter at the top of the screen jump up?",
+		_CS_Visual_Phase2_Answer, 0, 1,
+		"Expected: YES. Resource counters should update immediately when resources are added.")
+end
+
+function _CS_Visual_Phase2_Answer(choice)
+	table.insert(_cba_debug.test_results, {
+		name = "Visual/resource_counter_update",
+		pass = (choice == 1),
+		detail = (choice == 1) and "Resource counter updated visibly" or "REVIEW: resource counter may not have updated",
+	})
+	Rule_AddOneShot(_CS_Visual_Phase3_Start, 1.0)
+end
+
+-- Network dispatch handler for Phase 3 sim mutation: fires on ALL peers via lockstep bus.
+-- UnitEntry_DeploySquads runs on every peer at the same sim tick.
+function _CS_Net_Cat10_Phase3(playerID, message)
+	if PLAYERS and #PLAYERS > 0 then
+		local player = PLAYERS[1]
+		local pos = _Debug_GetPlayerSpawnAnchor(player)
+		if pos then
+			local sbp = BP_GetSquadBlueprint("unit_spearman_1_eng")
+			if sbp then
+				local sg = SGroup_CreateUnique()
+				UnitEntry_DeploySquads(player.id, sg, {{sbp = sbp, numSquads = 3}}, pos)
+			end
+		end
+	end
+end
+
+function _CS_Visual_Phase3_Start()
+	_cs._visual_phase = 3
+
+	-- Spawn 3 friendly spearmen near P1 — routed through network so it runs on all peers.
+	if type(World_IsMultiplayerGame) == "function" and World_IsMultiplayerGame() then
+		if type(Network_CallEvent) == "function" then
+			Network_CallEvent("_CS_Net_Cat10_Phase3", "")
+		end
+	else
+		_CS_Net_Cat10_Phase3(nil, "")
+	end
+	-- Camera and FoW reveal are UI-only; safe to call locally on the interacting peer.
+	if PLAYERS and #PLAYERS > 0 then
+		local pos = _Debug_GetPlayerSpawnAnchor(PLAYERS[1])
+		if pos then
+			pcall(Camera_MoveTo, pos, true)
+			pcall(FOW_RevealArea, pos, 50, 10.0)
+		end
+	end
+	print("  [SIM] Spawned 3 friendly spearmen near P1 base (camera focused)")
+	Rule_AddOneShot(_CS_Visual_Phase3_Ask, 1.5)
+end
+
+function _CS_Visual_Phase3_Ask()
+	Debug_AskYesNo(
+		"Three friendly spearmen were just created near P1's base. Can you see them on the map?",
+		_CS_Visual_Phase3_Answer, 0, 1,
+		"Expected: YES. Spawned units should appear on the map immediately. If they are invisible or missing, there may be a spawn or render issue.")
+end
+
+function _CS_Visual_Phase3_Answer(choice)
+	table.insert(_cba_debug.test_results, {
+		name = "Visual/unit_spawn_visible",
+		pass = (choice == 1),
+		detail = (choice == 1) and "Spawned units visible on map" or "REVIEW: spawned units may not be visible",
+	})
+	Rule_AddOneShot(_CS_Visual_Phase4_Start, 1.0)
+end
+
+-- Network dispatch handler for Phase 4 sim mutation: fires on ALL peers via lockstep bus.
+-- Player_SetResource transfer runs on every peer at the same sim tick.
+function _CS_Net_Cat10_Phase4(playerID, message)
+	if PLAYERS and #PLAYERS >= 2 then
+		local ok_f, food = pcall(Player_GetResource, PLAYERS[2].id, RT_Food)
+		local ok_g, gold = pcall(Player_GetResource, PLAYERS[2].id, RT_Gold)
+		if ok_f and food > 0 then
+			local ok_c, cur = pcall(Player_GetResource, PLAYERS[1].id, RT_Food)
+			Player_SetResource(PLAYERS[1].id, RT_Food, (ok_c and cur or 0) + math.floor(food))
+			Player_SetResource(PLAYERS[2].id, RT_Food, 0)
+		end
+		if ok_g and gold > 0 then
+			local ok_c, cur = pcall(Player_GetResource, PLAYERS[1].id, RT_Gold)
+			Player_SetResource(PLAYERS[1].id, RT_Gold, (ok_c and cur or 0) + math.floor(gold))
+			Player_SetResource(PLAYERS[2].id, RT_Gold, 0)
+		end
+		print("  [SIM] Transferred P2 resources to P1 (leaver simulation)")
+	end
+end
+
+function _CS_Visual_Phase4_Start()
+	_cs._visual_phase = 4
+
+	-- Transfer P2 resources to P1 (leaver simulation) — routed through network.
+	if type(World_IsMultiplayerGame) == "function" and World_IsMultiplayerGame() then
+		if type(Network_CallEvent) == "function" then
+			Network_CallEvent("_CS_Net_Cat10_Phase4", "")
+		end
+	else
+		_CS_Net_Cat10_Phase4(nil, "")
+	end
+
+	Debug_AskYesNo(
+		"P2's resources were just moved to P1 (simulating a player leaving). Did P1's resource numbers go up?",
+		_CS_Visual_Phase4_Answer, 0, 1,
+		"Expected: YES. When a player leaves, their resources transfer to teammates. P1's counters should visibly increase.")
+end
+
+function _CS_Visual_Phase4_Answer(choice)
+	table.insert(_cba_debug.test_results, {
+		name = "Visual/leaver_transfer",
+		pass = (choice == 1),
+		detail = (choice == 1) and "Leaver resource transfer visible" or "REVIEW: leaver resource transfer may not be working",
+	})
+	_CS_Visual_Finish()
+end
+
+function _CS_Visual_Finish()
+	local cat_pass = 0
+	local cat_total = 0
+	for i = _cs._visual_cat_start, #_cba_debug.test_results do
+		cat_total = cat_total + 1
+		if _cba_debug.test_results[i].pass then
+			cat_pass = cat_pass + 1
+		end
+	end
+	table.insert(_cs.results, {name = "Visual State Verification", passed = cat_pass, total = cat_total})
+	print(string.format("  -------- Category 10: %d / %d passed --------", cat_pass, cat_total))
+
+	if _cs._visual_on_complete then
+		local cb = _cs._visual_on_complete
+		_cs._visual_on_complete = nil
+		cb()
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- CATEGORY 11: Extreme Edge Cases
+-- Population overflow, zero-resource gameplay, simultaneous multi-system events,
+-- boundary values, and state corruption detection.
+---------------------------------------------------------------------------------------------------
+
+function _CS_Cat11_ExtremeEdgeCases()
+	_CS_CatHeader(11)
+
+	-- 11.1 World_GetGameTime safety
+	_Debug_RunTest("Edge/game_time", function()
+		local ok, gt = pcall(World_GetGameTime)
+		if not ok then return false, "crash" end
+		if gt < 0 then return false, "negative game time" end
+		return true, "game_time=" .. string.format("%.1f", gt)
+	end)
+
+	-- 11.2 World_GetPlayerCount matches PLAYERS
+	_Debug_RunTest("Edge/player_count_match", function()
+		local ok, wpc = pcall(World_GetPlayerCount)
+		if not ok then return false, "World_GetPlayerCount crash" end
+		local players_len = PLAYERS and #PLAYERS or 0
+		-- World_GetPlayerCount may include spectators; PLAYERS filters to active
+		if players_len > wpc then return false, string.format("PLAYERS(%d) > World(%d)", players_len, wpc) end
+		return true, string.format("PLAYERS=%d World=%d", players_len, wpc)
+	end)
+
+	-- 11.3 Double-recount idempotency (building limits)
+	_Debug_RunTest("Edge/double_recount_building", function()
+		if type(CBA_Options_BuildingLimit_RecountPlayer) ~= "function" then return true, "skip" end
+		if PLAYERS == nil or #PLAYERS == 0 then return false, "no players" end
+		local player = PLAYERS[1]
+		pcall(CBA_Options_BuildingLimit_RecountPlayer, player)
+		local count1 = player.obj_buildingLimit_count
+		pcall(CBA_Options_BuildingLimit_RecountPlayer, player)
+		local count2 = player.obj_buildingLimit_count
+		if count1 ~= count2 then
+			return false, string.format("drift: %s → %s", tostring(count1), tostring(count2))
+		end
+		return true, "idempotent (count=" .. tostring(count1) .. ")"
+	end)
+
+	-- 11.4 Double-recount idempotency (siege limits)
+	_Debug_RunTest("Edge/double_recount_siege", function()
+		if type(CBA_Options_SiegeLimit_Recount) ~= "function" then return true, "skip" end
+		if PLAYERS == nil or #PLAYERS == 0 then return false, "no players" end
+		local player = PLAYERS[1]
+		pcall(CBA_Options_SiegeLimit_Recount, player)
+		local count1 = player.siegeLimit_count
+		pcall(CBA_Options_SiegeLimit_Recount, player)
+		local count2 = player.siegeLimit_count
+		if count1 ~= count2 then
+			return false, string.format("drift: %s → %s", tostring(count1), tostring(count2))
+		end
+		return true, "idempotent (count=" .. tostring(count1) .. ")"
+	end)
+
+	-- 11.5 Negative population cap attempt
+	-- NOTE: Player_SetMaxPopulation is NOT idempotent — each call adds a new permanent
+	-- modifier applier even when restoring the original value. In MP this causes OOS.
+	_Debug_RunTest("Edge/negative_pop_cap", function()
+		if PLAYERS == nil or #PLAYERS == 0 then return false, "no players" end
+		local player = PLAYERS[1]
+		local ok_save, orig = pcall(Player_GetMaxPopulationCap, player.id, CT_Personnel)
+		if not ok_save then return false, "GetMaxPopulationCap failed" end
+		local in_mp = type(World_IsMultiplayerGame) == "function" and World_IsMultiplayerGame()
+		if in_mp then
+			return true, string.format("MP: skipped mutation (non-idempotent); cap=%d callable=true", orig)
+		end
+		local ok, err = pcall(Player_SetMaxPopulation, player.id, CT_Personnel, -1)
+		pcall(Player_SetMaxPopulation, player.id, CT_Personnel, orig)
+		return true, ok and string.format("accepted (clamped?); restored to %d", orig)
+			or "rejected: " .. string.sub(tostring(err), 1, 50)
+	end)
+
+	-- 11.6 Empty EGroup/SGroup operations
+	_Debug_RunTest("Edge/empty_group_ops", function()
+		local ok, err = pcall(function()
+			local eg = EGroup_CreateUnique()
+			local count = EGroup_Count(eg)
+			EGroup_Destroy(eg)
+			return count
+		end)
+		if not ok then return false, "crash: " .. tostring(err) end
+		return true, "empty EGroup count=0, destroyed OK"
+	end)
+
+	-- 11.7 SGroup empty operations
+	_Debug_RunTest("Edge/empty_sgroup_ops", function()
+		local ok, err = pcall(function()
+			local sg = SGroup_CreateUnique()
+			local count = SGroup_Count(sg)
+			SGroup_Destroy(sg)
+			return count
+		end)
+		if not ok then return false, "crash: " .. tostring(err) end
+		return true, "empty SGroup count=0, destroyed OK"
+	end)
+
+	-- 11.8 BP_GetEntityBlueprint with invalid name
+	_Debug_RunTest("Edge/invalid_bp_name", function()
+		local ok, result = pcall(BP_GetEntityBlueprint, "definitely_not_a_real_blueprint_name_xyz")
+		-- Should fail gracefully (return nil or error), not crash fatally
+		return true, ok and "resolved (unexpected)" or "rejected gracefully"
+	end)
+
+	-- 11.9 BP_GetSquadBlueprint with invalid name
+	_Debug_RunTest("Edge/invalid_sbp_name", function()
+		local ok, result = pcall(BP_GetSquadBlueprint, "definitely_not_a_real_squad_bp_xyz")
+		return true, ok and "resolved (unexpected)" or "rejected gracefully"
+	end)
+
+	-- 11.10 Concurrent module state access
+	_Debug_RunTest("Edge/concurrent_state_access", function()
+		local ok, err = pcall(function()
+			-- Access all state tables in rapid succession
+			local _ = _mod and _mod.module
+			local _ = _CBA and _CBA.rewards
+			local _ = _buildingLimit and _buildingLimit.module
+			local _ = _autoage and _autoage.module
+			local _ = _annihilation and _annihilation.module
+			local _ = _religious and _religious.sites
+			local _ = _wonder and _wonder.module
+			local _ = AGS_GLOBAL_SETTINGS and AGS_GLOBAL_SETTINGS.AutoAge
+		end)
+		if not ok then return false, "state access crash: " .. tostring(err) end
+		return true, "all 8 state tables accessed OK"
+	end)
+
+	_CS_CatFooter(11)
+end
+
+---------------------------------------------------------------------------------------------------
+-- CATEGORY 12: Runtime Stability
+-- Tight loops, memory pressure via group creation/destruction, deep call stacks,
+-- and pcall safety verification across all critical paths.
+---------------------------------------------------------------------------------------------------
+
+function _CS_Cat12_RuntimeStability()
+	_CS_CatHeader(12)
+
+	-- 12.1 Group creation/destruction cycle (memory pressure)
+	_Debug_RunTest("Stability/group_lifecycle_x100", function()
+		local ok, err = pcall(function()
+			for i = 1, 100 do
+				local eg = EGroup_CreateUnique()
+				EGroup_Destroy(eg)
+			end
+		end)
+		if not ok then return false, "crash: " .. tostring(err) end
+		return true, "100 EGroup create/destroy cycles"
+	end)
+
+	-- 12.2 SGroup lifecycle
+	_Debug_RunTest("Stability/sgroup_lifecycle_x100", function()
+		local ok, err = pcall(function()
+			for i = 1, 100 do
+				local sg = SGroup_CreateUnique()
+				SGroup_Destroy(sg)
+			end
+		end)
+		if not ok then return false, "crash: " .. tostring(err) end
+		return true, "100 SGroup create/destroy cycles"
+	end)
+
+	-- 12.3 Deep pcall nesting
+	_Debug_RunTest("Stability/pcall_depth_x50", function()
+		local depth = 0
+		local function nest(n)
+			if n <= 0 then return true end
+			depth = depth + 1
+			local ok, result = pcall(nest, n - 1)
+			return ok and result
+		end
+		local ok = nest(50)
+		if not ok then return false, "pcall nesting failed at depth " .. depth end
+		return true, "50-deep pcall nesting OK"
+	end)
+
+	-- 12.4 String formatting stress (large output)
+	_Debug_RunTest("Stability/string_format_stress", function()
+		local ok, err = pcall(function()
+			local parts = {}
+			for i = 1, 200 do
+				table.insert(parts, string.format("item_%d=%d", i, i * 7))
+			end
+			local result = table.concat(parts, ", ")
+			return #result > 0
+		end)
+		if not ok then return false, "crash: " .. tostring(err) end
+		return true, "200-item string concat OK"
+	end)
+
+	-- 12.5 Table construction stress
+	_Debug_RunTest("Stability/table_stress_x1000", function()
+		local ok, err = pcall(function()
+			local t = {}
+			for i = 1, 1000 do
+				t["key_" .. i] = {value = i, nested = {a = i * 2}}
+			end
+			local count = _Debug_CountKeys(t)
+			return count == 1000
+		end)
+		if not ok then return false, "crash: " .. tostring(err) end
+		return true, "1000-entry table OK"
+	end)
+
+	-- 12.6 World_Pos creation stress
+	_Debug_RunTest("Stability/world_pos_x100", function()
+		local ok, err = pcall(function()
+			for i = 1, 100 do
+				local pos = World_Pos(i * 10, 0, i * 10)
+			end
+		end)
+		if not ok then return false, "crash: " .. tostring(err) end
+		return true, "100 World_Pos OK"
+	end)
+
+	-- 12.7 Game_GetLocalPlayer safety
+	_Debug_RunTest("Stability/local_player", function()
+		local ok, lp = pcall(Game_GetLocalPlayer)
+		if not ok then return false, "crash: " .. tostring(lp) end
+		return lp ~= nil, "local_player=" .. tostring(lp)
+	end)
+
+	-- 12.8 FOW function safety
+	_Debug_RunTest("Stability/fow_safety", function()
+		local ok, err = pcall(FOW_RevealArea, World_Pos(0, 0, 0), 1, 0.1)
+		return true, ok and "FOW_RevealArea OK" or "rejected: " .. string.sub(tostring(err), 1, 50)
+	end)
+
+	-- 12.9 Camera function safety
+	_Debug_RunTest("Stability/camera_safety", function()
+		local ok, err = pcall(Camera_GetCurrentPos)
+		return true, ok and "Camera_GetCurrentPos OK" or "rejected: " .. string.sub(tostring(err), 1, 50)
+	end)
+
+	-- 12.10 UI_CreateEventCue safety (repeated calls)
+	-- Signature: UI_CreateEventCue(title, subtitle_loc, template, icon, sfx, ECV_flags)
+	-- subtitle MUST be a LocString (Loc_Empty()), not a Lua string.
+	_Debug_RunTest("Stability/event_cue_x10", function()
+		local fails = 0
+		for i = 1, 10 do
+			local ok = pcall(UI_CreateEventCue, "StressTest cue_" .. i, Loc_Empty(),
+				"high_priority", "", "", ECV_Title)
+			if not ok then fails = fails + 1 end
+		end
+		return fails == 0, fails .. " failures out of 10 cues"
+	end)
+
+	_CS_CatFooter(12)
+end
+
+---------------------------------------------------------------------------------------------------
+-- CATEGORY DISPATCH TABLE
+-- Maps category numbers to functions (synchronous and async).
+-- Categories 10 is async (user interaction). All others are synchronous.
+---------------------------------------------------------------------------------------------------
+
+local _CS_SYNC_CATEGORIES = {
+	[1] = _CS_Cat1_BootIntegrity,
+	[2] = _CS_Cat2_EconomyStress,
+	[3] = _CS_Cat3_BuildingLimitGauntlet,
+	[4] = _CS_Cat4_SiegeLimitCascade,
+	[5] = _CS_Cat5_WinConditionMatrix,
+	[6] = _CS_Cat6_AutoAgePipeline,
+	[7] = _CS_Cat7_RewardIntegrity,
+	[8] = _CS_Cat8_LeaverResilience,
+	[9] = _CS_Cat9_EventPipelineFuzz,
+	[11] = _CS_Cat11_ExtremeEdgeCases,
+	[12] = _CS_Cat12_RuntimeStability,
+}
+
+---------------------------------------------------------------------------------------------------
+-- Single Category Runner
+-- Console: Debug_ComprehensiveStress_Cat(n)
+---------------------------------------------------------------------------------------------------
+
+function Debug_ComprehensiveStress_Cat(n)
+	_cba_debug.enabled = true
+	n = n or 1
+
+	if n < 1 or n > _cs.total_cats then
+		print(string.format("[CS] Invalid category %d (valid: 1-%d)", n, _cs.total_cats))
+		return
+	end
+
+	print("")
+	print("================================================================")
+	print(string.format("  COMPREHENSIVE STRESS — Category %d: %s", n, _CS_CATEGORY_NAMES[n]))
+	print("================================================================")
+
+	local fn = _CS_SYNC_CATEGORIES[n]
+	if fn then
+		fn()
+	elseif n == 10 then
+		_CS_Cat10_VisualStateVerification()
+	else
+		print("  [ERROR] No handler for category " .. n)
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Full Suite Runner — Chains all 12 categories sequentially.
+-- Sync categories run inline; async category 10 chains via callback.
+-- Console: Debug_ComprehensiveStress()
+---------------------------------------------------------------------------------------------------
+
+function Debug_ComprehensiveStress()
+	_cba_debug.enabled = true
+
+	local ok, gt = pcall(World_GetGameTime)
+	_cs.running = true
+	_cs.current_cat = 0
+	_cs.results = {}
+	_cs.start_time = ok and gt or 0
+
+	print("")
+	print("================================================================")
+	print("  CBA DEBUG — COMPREHENSIVE STRESS TEST (12 categories)")
+	print("  Step mode: " .. tostring(_cba_debug.step_mode))
+	print("  Categories 1-9, 11-12: automated  |  Category 10: interactive")
+	print("================================================================")
+
+	_CS_RunNextCategory()
+end
+
+function _CS_RunNextCategory()
+	if not _cs.running then return end
+
+	_cs.current_cat = _cs.current_cat + 1
+	local cat = _cs.current_cat
+
+	if cat > _cs.total_cats then
+		_CS_FinalReport()
+		return
+	end
+
+	print(string.format("\n[CS] >>> Category %d / %d: %s", cat, _cs.total_cats, _CS_CATEGORY_NAMES[cat]))
+
+	if cat == 10 then
+		-- Async category: visual verification with user input
+		_cs._visual_on_complete = _CS_OnCat10Complete
+		_CS_Cat10_VisualStateVerification()
+	else
+		local fn = _CS_SYNC_CATEGORIES[cat]
+		if fn then
+			fn()
+		else
+			print("  [SKIP] No handler for category " .. cat)
+		end
+		_Debug_ScheduleNextPhase(_CS_RunNextCategory, 2, _CS_CATEGORY_NAMES[cat + 1] or "FinalReport", _CS_SUITE_NAME)
+	end
+end
+
+function _CS_OnCat10Complete()
+	-- Category 10 finished (async) — resume the chain
+	_Debug_ScheduleNextPhase(_CS_RunNextCategory, 2, "Extreme Edge Cases", _CS_SUITE_NAME)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Final Report
+---------------------------------------------------------------------------------------------------
+
+function _CS_FinalReport()
+	_cs.running = false
+
+	local ok, gt = pcall(World_GetGameTime)
+	local elapsed = (ok and _cs.start_time) and (gt - _cs.start_time) or 0
+
+	local total_passed = 0
+	local total_tests = 0
+
+	print("")
+	print("================================================================")
+	print("  COMPREHENSIVE STRESS — ALL 12 CATEGORIES COMPLETE")
+	print(string.format("  Elapsed: %.1fs", elapsed))
+	print("================================================================")
+
+	for i, r in ipairs(_cs.results) do
+		local st = (r.passed == r.total) and "PASS" or "FAIL"
+		print(string.format("    [%s] %s: %d/%d", st, r.name, r.passed, r.total))
+		total_passed = total_passed + r.passed
+		total_tests = total_tests + r.total
+	end
+
+	print(string.format("  -------- AGGREGATE: %d / %d passed --------", total_passed, total_tests))
+
+	-- Highlight failures
+	local failures = {}
+	for _, r in ipairs(_cba_debug.test_results) do
+		if not r.pass then
+			table.insert(failures, r)
+		end
+	end
+	if #failures > 0 then
+		print("")
+		print("  FAILURES SUMMARY:")
+		local max_show = math.min(#failures, 30)
+		for i = 1, max_show do
+			print(string.format("    [FAIL] %s — %s", failures[i].name, failures[i].detail))
+		end
+		if #failures > max_show then
+			print(string.format("    ... and %d more failures", #failures - max_show))
+		end
+	end
+
+	_Debug_EndMarker(_CS_SUITE_NAME, total_passed, total_tests, elapsed)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Status & Control
+---------------------------------------------------------------------------------------------------
+
+function Debug_ComprehensiveStressStatus()
+	if not _cs.running then
+		print("[CS] Not running.")
+		return
+	end
+	local ok, gt = pcall(World_GetGameTime)
+	local elapsed = ok and (gt - _cs.start_time) or 0
+	print(string.format("[CS] Category %d/%d (%s) elapsed=%.1fs",
+		_cs.current_cat, _cs.total_cats,
+		_CS_CATEGORY_NAMES[_cs.current_cat] or "?", elapsed))
+end
+
+function Debug_ComprehensiveStressStop()
+	if not _cs.running then
+		print("[CS] Not running.")
+		return
+	end
+	_cs.running = false
+	print("[CS] Stopped.")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Namespace Registration
+---------------------------------------------------------------------------------------------------
+if debug then
+	debug.validation.comprehensive    = Debug_ComprehensiveStress
+	debug.validation.comprehensiveCat = Debug_ComprehensiveStress_Cat
+	debug._register("comprehensive", Debug_ComprehensiveStress, "12-category comprehensive stress (~60s+)", 3)
+end

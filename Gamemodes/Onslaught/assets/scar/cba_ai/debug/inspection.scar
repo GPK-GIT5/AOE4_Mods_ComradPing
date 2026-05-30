@@ -1,0 +1,302 @@
+---------------------------------------------------------------------------------------------------
+-- CBA AI Player — Debug: Inspection Commands
+-- Console commands for deep construction/strategy/zone diagnostics.
+-- Origin: cba_ai_player.scar lines 4072–4195 (ConstructionProbe),
+--   4200–4380 (StrategyReport), 4380–4435 (BuildTimeline),
+--   4435–4525 (ZoneReport), 4000–4070 (TaskAudit)
+---------------------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------
+-- Console: CBA_AIPlayer_TaskAudit()
+-----------------------------------------------------------------------
+
+function CBA_AIPlayer_TaskAudit()
+	if #_ai_players == 0 then
+		_AI_DebugLog(1, "[AI_PLAYER] TaskAudit: no AI players active.")
+		return
+	end
+	_AI_DebugLog(1, "[AI_PLAYER] ====== TaskAudit ======")
+	for _, player in ipairs(_ai_players) do
+		local ai = player.ai
+		local t = ai.telemetry or {}
+		local now = World_GetGameTime()
+		local hold_for = math.max(0, (ai.patrol_order_hold_until or 0) - now)
+		local rt_assign_avg = 0
+		if (t.team_release_to_assign_samples or 0) > 0 then
+			rt_assign_avg = (t.team_release_to_assign_total or 0) / t.team_release_to_assign_samples
+		end
+		_AI_DebugLog(1, string.format("[AI_PLAYER] %s patrol_source=%s hold_for=%.1fs queue=%d staging=%d",
+			ai.label or "P?",
+			tostring(ai.patrol_last_order_source or "none"),
+			hold_for,
+			#(ai.construction_queue or {}),
+			ai.staging_sg and SGroup_CountSpawned(ai.staging_sg) or 0))
+		print(string.format("  PatrolDebug: seq=%d tier=%d swaps=%d overwrites=%d hold_sets=%d hold_ext=%d",
+			ai.patrol_command_seq or 0,
+			ai.patrol_owner_tier or 0,
+			t.patrol_owner_swaps or 0,
+			t.patrol_overwrites or 0,
+			t.patrol_hold_sets or 0,
+			t.patrol_hold_extensions or 0))
+		print(string.format("  PatrolWriters: patrol=%d maa=%d dispatch=%d combat=%d stop=%d target=%s",
+			t.patrol_cmd_patrol or 0,
+			t.patrol_cmd_maa or 0,
+			t.patrol_cmd_dispatch or 0,
+			t.patrol_cmd_combat or 0,
+			t.patrol_cmd_stop or 0,
+			_AI_FormatWorldPos(ai.patrol_last_order_target)))
+		print(string.format("  TeamFlow: assign=%d release=%d release_to_assign_avg=%.2fs free_teams=%d busy_teams=%d",
+			t.team_assignments or 0,
+			t.team_releases or 0,
+			rt_assign_avg,
+			_AI_CountFreeTeams(player),
+			math.max(0, #(ai.villager_teams or {}) - _AI_CountFreeTeams(player))))
+		print(string.format("  Overrides: park_orders=%d park_suppressed=%d patrol_orders=%d patrol_suppressed=%d patrol_assault_joins=%d",
+			t.villager_park_orders or 0,
+			t.villager_park_suppressed or 0,
+			t.patrol_orders or 0,
+			t.patrol_orders_suppressed or 0,
+			t.patrol_assault_joins or 0))
+	end
+	_AI_DebugLog(1, "[AI_PLAYER] ====== /TaskAudit ======")
+end
+
+-----------------------------------------------------------------------
+-- Console: CBA_AIPlayer_ConstructionProbe()
+-----------------------------------------------------------------------
+
+function CBA_AIPlayer_ConstructionProbe()
+	if _ai_players == nil then
+		_AI_DebugLog(1, "[AI_PLAYER] ConstructionProbe: _ai_players not initialised.")
+		return
+	end
+	_AI_DebugLog(1, "[AI_PLAYER] ====== ConstructionProbe ======")
+	for _, player in ipairs(_ai_players) do
+		local ai = player.ai
+		if ai == nil then
+			_AI_DebugLog(1, string.format("[AI_PLAYER] P%s: no ai state", tostring(player.id)))
+		else
+			local t = ai.telemetry or {}
+			_AI_DebugLog(1, string.format("[AI_PLAYER] %s: queue=%d pending_limit=%d queue_created=%d queue_done=%d queue_abandon=%d queue_destroyed=%d park_orders=%d park_suppressed=%d",
+				ai.label or "P?", #ai.construction_queue, _AI_MAX_PENDING_FOUNDATIONS,
+				t.queue_entries_created or 0,
+				t.queue_terminal_completed or 0,
+				t.queue_terminal_abandoned or 0,
+				t.queue_terminal_destroyed or 0,
+				t.villager_park_orders or 0,
+				t.villager_park_suppressed or 0))
+			local now = World_GetGameTime()
+			for i, entry in ipairs(ai.construction_queue) do
+				local ok_p, p = false, -1
+				local ok_alive, alive = false, false
+				local ok_eid, eid = false, "nil"
+				local ok_uc, uc = false, false
+				if entry.entity ~= nil then
+					ok_p, p = pcall(Entity_GetBuildingProgress, entry.entity)
+					ok_alive, alive = pcall(Entity_IsAlive, entry.entity)
+					ok_eid, eid = pcall(Entity_GetID, entry.entity)
+					ok_uc, uc = pcall(Entity_IsUnderConstruction, entry.entity)
+				end
+				print(string.format("  [%d] %-12s (%.0f,%.0f) id=%s prog=%.2f alive=%s uc=%s issues=%d age=%.1fs since_prog=%.1fs since_issue=%.1fs team=%s completed=%s",
+					i, entry.type_key or "?",
+					entry.pos and entry.pos.x or 0, entry.pos and entry.pos.z or 0,
+					tostring(ok_eid and eid or "?"),
+					ok_p and p or -1,
+					tostring(ok_alive and alive or false),
+					tostring(ok_uc and uc or false),
+					entry.issue_count or 0,
+					entry.queued_at and (now - entry.queued_at) or -1,
+					entry.last_progress_at and (now - entry.last_progress_at) or -1,
+					entry.last_issue_at and (now - entry.last_issue_at) or -1,
+					entry.assigned_team and entry.assigned_team.sg_name or "none",
+					tostring(entry.completed == true)))
+			end
+		end
+	end
+	_AI_DebugLog(1, "[AI_PLAYER] ====== /ConstructionProbe ======")
+end
+
+-----------------------------------------------------------------------
+-- Console: CBA_AIPlayer_StrategyReport()
+-----------------------------------------------------------------------
+
+function CBA_AIPlayer_StrategyReport()
+	if _ai_players == nil then
+		_AI_DebugLog(1, "[AI_PLAYER] StrategyReport: _ai_players not initialised.")
+		return
+	end
+	local now = World_GetGameTime()
+	_AI_DebugLog(1, "[AI_PLAYER] ====== Construction Report ======")
+	print(string.format("  Game time: %.1fs | AI players: %d", now, #_ai_players))
+	print("")
+
+	for _, player in ipairs(_ai_players) do
+		local ai = player.ai
+		if ai ~= nil then
+			local pending = _AI_CountPendingFoundations(player)
+			local prod_total = 0
+			for _, egs in pairs(ai.production_egroups) do prod_total = prod_total + #egs end
+			local vill_count = ai.villager_sg and SGroup_CountSpawned(ai.villager_sg) or 0
+			local pop = Player_GetCurrentPopulation(player.id, CT_Personnel)
+
+			print(string.format("  %s [%s]",
+				ai.label or "P?", Player_GetRaceName(player.id)))
+			print(string.format("    Build: completed=%d pending=%d queue=%d",
+				prod_total, pending, #ai.construction_queue))
+			print(string.format("    Production egroups: barracks=%d archery=%d stable=%d siege=%d",
+				#(ai.production_egroups.barracks or {}),
+				#(ai.production_egroups.archery_range or {}),
+				#(ai.production_egroups.stable or {}),
+				#(ai.production_egroups.siege_workshop or {})))
+			print(string.format("    Villagers=%d Pop=%d Eliminated=%s",
+				vill_count, pop, tostring(_AI_IsEliminated(player))))
+			if ai.telemetry then
+				local t = ai.telemetry
+				print(string.format("    Telemetry: attempts=%d ok=%d fail=%d abandon=%d forced=%d blocked=%d",
+					t.build_attempts, t.build_successes, t.build_failures,
+					t.build_abandoned, t.build_forced, t.build_blocked))
+				print(string.format("    Telemetry: queue_created=%d queue_done=%d queue_abandon=%d queue_destroyed=%d sanity_drops=%d prod_dead_skips=%d",
+					t.queue_entries_created or 0,
+					t.queue_terminal_completed or 0,
+					t.queue_terminal_abandoned or 0,
+					t.queue_terminal_destroyed or 0,
+					t.queue_sanity_drops or 0,
+					t.production_dead_skips or 0))
+				print(string.format("    Telemetry: team_assign=%d team_release=%d park_orders=%d park_suppressed=%d patrol_orders=%d patrol_suppressed=%d patrol_assault_joins=%d",
+					t.team_assignments or 0,
+					t.team_releases or 0,
+					t.villager_park_orders or 0,
+					t.villager_park_suppressed or 0,
+					t.patrol_orders or 0,
+					t.patrol_orders_suppressed or 0,
+					t.patrol_assault_joins or 0))
+			end
+
+			for i, entry in ipairs(ai.construction_queue) do
+				local ok_p, p = false, -1
+				local ok_alive, alive = false, false
+				local ok_uc, uc = false, false
+				if entry.entity ~= nil then
+					ok_p, p = pcall(Entity_GetBuildingProgress, entry.entity)
+					ok_alive, alive = pcall(Entity_IsAlive, entry.entity)
+					ok_uc, uc = pcall(Entity_IsUnderConstruction, entry.entity)
+				end
+				local age = now - (entry.queued_at or now)
+				print(string.format("      [%d] %s prog=%.2f alive=%s uc=%s age=%.1fs issues=%d",
+					i, entry.type_key or "?",
+					ok_p and p or -1,
+					tostring(ok_alive and alive or false),
+					tostring(ok_uc and uc or "?"),
+					age,
+					entry.issue_count or 0))
+			end
+		end
+	end
+
+	print("")
+	print("  --- Queue Summary ---")
+	local total_completed = 0
+	local total_pending = 0
+	for _, player in ipairs(_ai_players) do
+		local ai = player.ai
+		if ai ~= nil then
+			for _, egs in pairs(ai.production_egroups) do total_completed = total_completed + #egs end
+			total_pending = total_pending + _AI_CountPendingFoundations(player)
+		end
+	end
+	print(string.format("    completed=%d pending=%d", total_completed, total_pending))
+
+	_AI_DebugLog(1, "[AI_PLAYER] ====== /Construction Report ======")
+end
+
+-----------------------------------------------------------------------
+-- Console: CBA_AIPlayer_BuildTimeline()
+-----------------------------------------------------------------------
+
+function CBA_AIPlayer_BuildTimeline()
+	if _ai_players == nil or #_ai_players == 0 then
+		_AI_DebugLog(1, "[AI_PLAYER] BuildTimeline: no AI players.")
+		return
+	end
+	_AI_DebugLog(1, "[AI_PLAYER] ====== Build Timeline ======")
+	for _, player in ipairs(_ai_players) do
+		local ai = player.ai
+		if ai ~= nil and ai.build_timeline ~= nil and #ai.build_timeline > 0 then
+			print(string.format("  %s (%d events, idx=%d):",
+				ai.label or "P?", #ai.build_timeline, ai.build_timeline_idx or 0))
+			local sorted = {}
+			for _, ev in ipairs(ai.build_timeline) do
+				if ev ~= nil then table.insert(sorted, ev) end
+			end
+			table.sort(sorted, function(a, b) return (a.seq or 0) < (b.seq or 0) end)
+			for _, ev in ipairs(sorted) do
+				print(string.format("    [%3d] t=%.1fs %-20s %s %s",
+					ev.seq or 0, ev.time or 0, ev.event or "?", ev.type_key or "?", ev.detail or ""))
+			end
+		else
+			print(string.format("  %s: (no events)", ai and ai.label or "P?"))
+		end
+	end
+	_AI_DebugLog(1, "[AI_PLAYER] ====== /Build Timeline ======")
+end
+
+-----------------------------------------------------------------------
+-- Console: CBA_AIPlayer_ZoneReport()
+-----------------------------------------------------------------------
+
+function CBA_AIPlayer_ZoneReport()
+	if _ai_players == nil or #_ai_players == 0 then
+		_AI_DebugLog(1, "[AI_PLAYER] ZoneReport: no AI players.")
+		return
+	end
+	_AI_DebugLog(1, "[AI_PLAYER] ====== Zone Report ======")
+	for _, player in ipairs(_ai_players) do
+		local ai = player.ai
+		if ai == nil then goto next_player end
+
+		local primary_alive = 0
+		local secondary_alive = 0
+		local primary_pending = 0
+		local secondary_pending = 0
+
+		for type_key, type_data in pairs(ai.buildings) do
+			for _, rec in ipairs(type_data.entities) do
+				local ent = rec.entity or rec
+				local ok_alive, alive = pcall(Entity_IsAlive, ent)
+				if ok_alive and alive then
+					if (rec.zone or "primary") == "secondary" then
+						secondary_alive = secondary_alive + 1
+					else
+						primary_alive = primary_alive + 1
+					end
+				end
+			end
+		end
+
+		for _, entry in ipairs(ai.construction_queue) do
+			if not entry.completed then
+				if entry.zone == "secondary" then
+					secondary_pending = secondary_pending + 1
+				else
+					primary_pending = primary_pending + 1
+				end
+			end
+		end
+
+		local pri_center = _AI_GetPrimaryZoneCenter(player)
+		local sec_center = _AI_GetSecondaryZoneCenter(player)
+		print(string.format("  %s:", ai.label or "P?"))
+		print(string.format("    Primary zone:   center=(%.0f,%.0f) alive=%d pending=%d tracked=%d/%d budget_remaining=%d",
+			pri_center and pri_center.x or 0, pri_center and pri_center.z or 0,
+			primary_alive, primary_pending, ai.primary_zone_count, _AI_PRIMARY_ZONE_MAX,
+			math.max(0, _AI_PRIMARY_ZONE_MAX - ai.primary_zone_count)))
+		print(string.format("    Secondary zone: center=(%.0f,%.0f) alive=%d pending=%d tracked=%d/%d budget_remaining=%d",
+			sec_center and sec_center.x or 0, sec_center and sec_center.z or 0,
+			secondary_alive, secondary_pending, ai.secondary_zone_count, _AI_SECONDARY_ZONE_MAX,
+			math.max(0, _AI_SECONDARY_ZONE_MAX - ai.secondary_zone_count)))
+		print(string.format("    Total buildings: %d | Prod limit: %d",
+			ai.total_buildings, CBA_Options_GetPlayerProdLimit and CBA_Options_GetPlayerProdLimit(player) or 15))
+		::next_player::
+	end
+	_AI_DebugLog(1, "[AI_PLAYER] ====== /Zone Report ======")
+end

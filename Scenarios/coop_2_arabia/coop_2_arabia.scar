@@ -1,0 +1,977 @@
+--[[ CO-2 / Arabia
+By Comrad Ping
+Huge thanks to Foxplot and the AOE4 Modding Discord
+-------------------------------------------------
+- Fix building replacement (OBJ_CaptureSiegeWorkshop) 
+
+MAP
+- Add hostile camp middle, add resources, relics, treasures
+- Restrict building impass lake crossing(terrain bug)
+
+]]
+-- Relic scripts
+import("MissionOMatic/MissionOMatic.scar")   -- this imports the Cardinal scripts as well
+import("winconditions/annihilation.scar")    -- eliminates players without units left
+import("winconditions/surrender.scar")	        -- Support for player surrender (through pause menu)
+import("winconditions/elimination.scar")		-- Support for player quitting or dropping (through pause menu or disconnection)
+-- import data
+import("Coop_2_Arabia_data.scar")
+import("Coop_2_Arabia_difficulty.scar")
+import("Coop_2_Arabia_spawns.scar")
+import("Coop_2_Arabia_objectives.scar")
+import("Coop_2_Arabia_tribute.scar")
+import("Coop_2_Arabia_debug.scar")  -- Debug & event logging harness 
+
+-- Day & Night Cycle by Tommy / Edited version with increased transition time and tweaked shadow settings to decrease flikkering issues
+-- Requires Coop_2_Arabia.scenario > Atomspohere: day,dawn,dusk,dusk2,night,night12
+-- Wont work with 'default' because of fog 
+-- import("day_night_cycle.scar") 
+
+
+ -- Required for SetRestrictions
+AGS_BP_STONEWALL = "stone_wall"
+AGS_BP_PALISADE = "palisade_wall"
+AGS_BP_KEEP = "castle"
+AGS_BP_WORKSHOP = "siege_workshop"
+AGS_ENTITY_TABLE = {
+	
+	english = {
+		
+		castle = "building_defense_keep_eng",
+		town_center_capital = "building_town_center_capital_eng",
+		town_center = "building_town_center_eng",
+		town_center_landmark = "building_landmark_age2_westminster_palace_eng",
+		market = "building_econ_market_control_eng",
+		villager = "unit_villager_1_eng",
+		scout = "unit_scout_1_eng",
+		king = "unit_king_1_eng",
+		scar_dock = "building_unit_naval_eng",	
+		palisade_wall = "building_defense_palisade_eng",
+		palisade_gate = "building_defense_palisade_gate_eng",
+		monk = "unit_monk_3_eng",
+		monastery = "building_unit_religious_control_eng",
+		barracks = "building_unit_infantry_control_eng",
+		stable = "building_unit_cavalry_control_eng",
+		archery_range = "building_unit_ranged_control_eng",
+		siege_workshop = "building_unit_siege_control_eng",
+		scar_dock = "building_unit_naval_eng",		
+		house = "building_house_control_eng",
+		blacksmith = "building_tech_unit_infantry_control_eng",
+		wonder_imperial_age = "building_wonder_age4_canterbury_cathedral_eng",
+		crossbow = "unit_crossbowman_3_eng",
+		stone_wall = "building_defense_wall_eng",
+		mining_camp = "building_econ_mining_camp_control_eng",
+		lumber_camp = "building_econ_wood_control_eng",
+		mill = "building_econ_food_control_eng",
+		arsenal = "building_tech_unit_ranged_control_eng"
+
+	},	
+	chinese = {
+
+		castle = "building_defense_keep_chi",
+		town_center_capital = "building_town_center_capital_chi",
+		town_center = "building_town_center_chi",
+		market = "building_econ_market_control_chi",
+		villager = "unit_villager_1_chi",
+		scout = "unit_scout_1_chi",
+		king = "unit_king_1_chi",	
+		scar_dock = "building_unit_naval_chi",	
+		palisade_wall = "building_defense_palisade_chi",
+		palisade_gate = "building_defense_palisade_gate_chi",
+		monk = "unit_monk_3_chi",
+		monastery = "building_unit_religious_control_chi",
+		barracks = "building_unit_infantry_control_chi",
+		stable = "building_unit_cavalry_control_chi",
+		archery_range = "building_unit_ranged_control_chi",
+		siege_workshop = "building_unit_siege_control_chi",
+		scar_dock = "building_unit_naval_chi",	
+		house = "building_house_control_chi",	
+		blacksmith = "building_tech_unit_infantry_control_chi",	
+		wonder_imperial_age = "building_wonder_age4_forbidden_control_chi",
+		crossbow = "unit_crossbowman_3_chi",
+		stone_wall = "building_defense_wall_chi",
+		mining_camp = "building_econ_mining_camp_control_chi",
+		lumber_camp = "building_econ_wood_control_chi",
+		mill = "building_econ_food_control_chi",
+		arsenal = "building_tech_unit_ranged_control_chi"
+	},
+	french = {
+
+		castle = "building_defense_keep_fre",
+		town_center_capital = "building_town_center_capital_fre",
+		town_center = "building_town_center_fre",
+		market = "building_econ_market_control_fre",
+		villager = "unit_villager_1_fre",
+		scout = "unit_scout_1_fre",
+		king = "unit_king_1_fre",
+		scar_dock = "building_unit_naval_fre",
+		palisade_wall = "building_defense_palisade_fre",
+		palisade_gate = "building_defense_palisade_gate_fre",
+		monk = "unit_monk_3_fre",
+		monastery = "building_unit_religious_control_fre",
+		barracks = "building_unit_infantry_control_fre",
+		stable = "building_unit_cavalry_control_fre",
+		archery_range = "building_unit_ranged_control_fre",
+		siege_workshop = "building_unit_siege_control_fre",
+		scar_dock = "building_unit_naval_fre",	
+		house = "building_house_control_fre",	
+		blacksmith = "building_tech_unit_infantry_control_fre",
+		wonder_imperial_age = "building_wonder_age4_la_grande_cathedral_fre",
+		crossbow = "unit_crossbowman_3_fre",
+		stone_wall = "building_defense_wall_fre",
+		mining_camp = "building_econ_mining_camp_control_fre",
+		lumber_camp = "building_econ_wood_control_fre",
+		mill = "building_econ_food_control_fre",
+		arsenal = "building_tech_unit_ranged_control_fre"
+	},
+	hre = {
+
+		castle = "building_defense_keep_hre",
+		town_center_capital = "building_town_center_capital_hre",
+		town_center = "building_town_center_hre",
+		town_center_landmark = "building_landmark_age3_hohenzollern_castle_hre",
+		market = "building_econ_market_control_hre",
+		villager = "unit_villager_1_hre",
+		scout = "unit_scout_1_hre",
+		king = "unit_king_1_hre",
+		scar_dock = "building_unit_naval_hre",
+		palisade_wall = "building_defense_palisade_hre",
+		palisade_gate = "building_defense_palisade_gate_hre",
+		monk = "unit_monk_1_hre",
+		monastery = "building_unit_religious_control_hre",
+		barracks = "building_unit_infantry_control_hre",
+		stable = "building_unit_cavalry_control_hre",
+		archery_range = "building_unit_ranged_control_hre",
+		siege_workshop = "building_unit_siege_control_hre",
+		scar_dock = "building_unit_naval_hre",	
+		house = "building_house_control_hre",
+		blacksmith = "building_tech_unit_infantry_control_hre",	
+		wonder_imperial_age = "building_wonder_age4_glucksburg_castle_hre",
+		crossbow = "unit_crossbowman_3_hre",
+		stone_wall = "building_defense_wall_hre",
+		mining_camp = "building_econ_mining_camp_control_hre",
+		lumber_camp = "building_econ_wood_control_hre",
+		mill = "building_econ_food_control_hre",
+		arsenal = "building_tech_unit_ranged_control_hre"
+		
+	},
+	rus = {	
+
+		castle = "building_defense_keep_control_rus",
+		town_center_capital = "building_town_center_capital_rus",
+		town_center = "building_town_center_rus",
+		market = "building_econ_market_control_rus",
+		villager = "unit_villager_1_rus",
+		scout = "unit_scout_1_rus",
+		king = "unit_king_1_rus",
+		scar_dock = "building_unit_naval_rus",
+		palisade_wall = "building_defense_palisade_rus",
+		palisade_gate = "building_defense_palisade_gate_rus",
+		monk = "unit_monk_3_rus",
+		monastery = "building_unit_religious_control_rus",
+		barracks = "building_unit_infantry_control_rus",
+		stable = "building_unit_cavalry_control_rus",
+		archery_range = "building_unit_ranged_control_rus",
+		siege_workshop = "building_unit_siege_control_rus",
+		scar_dock = "building_unit_naval_rus",	
+		house = "building_house_control_rus",	
+		blacksmith = "building_tech_unit_infantry_control_rus",
+		wonder_imperial_age = "building_wonder_age4_saint_basils_cathedral_control_rus",
+		crossbow = "unit_crossbowman_3_rus",
+		stone_wall = "building_defense_wall_rus",
+		mining_camp = "building_econ_mining_camp_control_rus",
+		lumber_camp = "building_econ_wood_control_rus",
+		mill = "building_econ_food_control_rus",
+		arsenal = "building_tech_unit_ranged_control_rus"
+	},
+	abbasid = {
+		
+		springald_buildable = "unit_springald_3_buildable_abb",
+		mangonel_buildable = "unit_mangonel_3_buildable_abb",
+		castle = "building_defense_keep_control_abb",
+		town_center_capital = "building_town_center_capital_abb",
+		town_center = "building_town_center_abb",
+		market = "building_econ_market_control_abb",
+		villager = "unit_villager_1_abb",
+		scout = "unit_scout_1_abb",
+		king = "unit_king_1_abb",
+		scar_dock = "building_unit_naval_abb",
+		house_of_wisdom = "building_house_of_wisdom_control_abb",
+		palisade_wall = "building_defense_palisade_abb",
+		palisade_gate = "building_defense_palisade_gate_abb",
+		monk = "unit_monk_3_abb",
+		monastery = "building_unit_religious_control_abb",
+		barracks = "building_unit_infantry_control_abb",
+		stable = "building_unit_cavalry_control_abb",
+		archery_range = "building_unit_ranged_control_abb",
+		siege_workshop = "building_unit_siege_control_abb",
+		scar_dock = "building_unit_naval_abb",		
+		house = "building_house_control_abb",	
+		blacksmith = "building_tech_unit_infantry_control_abb",
+		wonder_imperial_age = "building_wonder_age4_great_mosque_control_abb",
+		crossbow = "unit_crossbowman_3_abb",
+		stone_wall = "building_defense_wall_abb",
+		mining_camp = "building_econ_mining_camp_control_abb",
+		lumber_camp = "building_econ_wood_control_abb",
+		mill = "building_econ_food_control_abb",
+		arsenal = "building_tech_unit_ranged_control_abb"
+	},
+	mongol = {
+		
+		castle = false, -- Mongols have no keep
+		town_center_capital = "building_town_center_capital_mon",
+		town_center_capital_moving = "building_town_center_capital_moving_mon",
+		town_center = "building_town_center_mon",
+		market = "building_econ_market_mon",
+		villager = "unit_villager_1_mon",
+		scout = "unit_khan_1_mon",
+		king = "unit_king_1_mon",
+		scar_dock = "building_unit_naval_mon",
+		house_moving = "building_house_moving_mon",
+		monk = "unit_monk_3_mon",
+		monastery = "building_unit_religious_mon",
+		barracks = "building_unit_infantry_mon",
+		stable = "building_unit_cavalry_mon",
+		archery_range = "building_unit_ranged_mon",
+		siege_workshop = "building_unit_siege_mon",
+		scar_dock = "building_unit_naval_mon",	
+		house = "building_house_mon",
+		blacksmith = "building_tech_unit_infantry_mon",
+		wonder_imperial_age = "building_wonder_age4_final_wonder_mon",
+		crossbow = "unit_crossbowman_3_mon",
+		mining_camp = false, -- Mongols have no mining camp
+		lumber_camp = false, -- Mongols have no lumber camp
+		mill = false, -- Mongols have no mill
+		arsenal = "building_tech_unit_ranged_mon"
+	},
+	sultanate = {
+
+		castle = "building_defense_keep_control_sul",
+		town_center_capital = "building_town_center_capital_sul",
+		town_center = "building_town_center_sul",
+		market = "building_econ_market_control_sul",
+		villager = "unit_villager_1_sul",
+		scout = "unit_scout_1_sul",
+		king = "unit_king_1_sul",
+		scar_dock = "building_unit_naval_sul",
+		palisade_wall = "building_defense_palisade_sul",
+		palisade_gate = "building_defense_palisade_gate_sul",
+		monk = "unit_monk_2_sul",
+		monastery = "building_unit_religious_control_sul",
+		barracks = "building_unit_infantry_control_sul",
+		stable = "building_unit_cavalry_control_sul",
+		archery_range = "building_unit_ranged_control_sul",
+		siege_workshop = "building_unit_siege_control_sul",
+		scar_dock = "building_unit_naval_sul",	
+		house = "building_house_control_sul",	
+		blacksmith = "building_tech_unit_infantry_control_sul",
+		wonder_imperial_age = "building_wonder_age4_agra_fort_control_sul",
+		crossbow = "unit_crossbowman_3_sul",
+		stone_wall = "building_defense_wall_sul",
+		mining_camp = "building_econ_mining_camp_control_sul",
+		lumber_camp = "building_econ_wood_control_sul",
+		mill = "building_econ_food_control_sul",
+		arsenal = "building_tech_unit_ranged_control_sul"
+	},
+	malian = {
+		castle = "building_defense_keep_mal",
+		town_center_capital = "building_town_center_capital_mal",
+		town_center = "building_town_center_mal",
+		market = "building_econ_market_mal",
+		villager = "unit_villager_1_mal",
+		scout = "unit_scout_1_mal",
+		king = "unit_king_1_mal",
+		palisade_wall = "building_defense_palisade_mal",
+		palisade_gate = "building_defense_palisade_gate_mal",
+		monk = "unit_monk_3_mal",
+		monastery = "building_unit_religious_mal",
+		barracks = "building_unit_infantry_mal",
+		stable = "building_unit_cavalry_mal",
+		archery_range = "building_unit_ranged_mal",
+		siege_workshop = "building_unit_siege_mal",
+		scar_dock = "building_unit_naval_mal",	
+		house = "building_house_mal",	
+		blacksmith = "building_tech_unit_infantry_mal",
+		wonder_imperial_age = "building_wonder_age4_great_mosque_control_mal",
+		stone_wall = "building_defense_wall_mal",
+		mining_camp = "building_econ_mining_camp_mal",
+		lumber_camp = "building_econ_wood_mal",
+		mill = "building_econ_food_mal",
+		arsenal = "building_tech_unit_ranged_control_nrm"
+	},
+	ottoman = {
+		castle = "building_defense_keep_ott",
+		town_center_capital = "building_town_center_capital_ott",
+		town_center = "building_town_center_ott",
+		market = "building_econ_market_ott",
+		villager = "unit_villager_1_ott",
+		scout = "unit_scout_1_ott",
+		king = "unit_king_1_ott",
+		palisade_wall = "building_defense_palisade_ott",
+		palisade_gate = "building_defense_palisade_gate_ott",
+		monk = "unit_monk_3_ott",
+		monastery = "building_unit_religious_ott",
+		barracks = "building_unit_infantry_ott",
+		stable = "building_unit_cavalry_ott",
+		archery_range = "building_unit_ranged_ott",
+		siege_workshop = "building_unit_siege_ott",
+		scar_dock = "building_unit_naval_ott",	
+		house = "building_house_ott",	
+		blacksmith = "building_tech_unit_infantry_ott",
+		wonder_imperial_age = "building_wonder_age4_blue_mosque_ott",
+		stone_wall = "building_defense_wall_ott",
+		mining_camp = "building_econ_mining_camp_ott",
+		lumber_camp = "building_econ_wood_ott",
+		mill = "building_econ_food_ott",
+		arsenal = "building_tech_unit_ranged_control_lith"
+	},
+	byzantine = {
+		castle = "building_defense_keep_byz",
+		town_center_capital = "building_town_center_capital_byz",
+		town_center = "building_town_center_byz",
+		market = "building_econ_market_control_byz",
+		villager = "unit_villager_1_byz",
+		scout = "unit_scout_1_byz",
+		king = "unit_king_1_byz",	
+		scar_dock = "building_unit_naval_byz",	
+		palisade_wall = "building_defense_palisade_byz",
+		palisade_gate = "building_defense_palisade_gate_byz",
+		monk = "unit_monk_3_byz",
+		monastery = "building_unit_religious_control_byz",
+		barracks = "building_unit_infantry_control_byz",
+		stable = "building_unit_cavalry_control_byz",
+		archery_range = "building_unit_ranged_control_byz",
+		siege_workshop = "building_unit_siege_control_byz",
+		house = "building_house_control_byz",	
+		blacksmith = "building_tech_unit_infantry_control_byz",	
+		wonder_imperial_age = "building_wonder_age4_forbidden_control_byz",
+		crossbow = "unit_crossbowman_3_byz",
+		stone_wall = "building_defense_wall_byz",
+		mining_camp = "building_econ_mining_camp_control_byz",
+		lumber_camp = "building_econ_wood_control_byz",
+		mill = "building_econ_food_control_byz",
+		arsenal = "building_tech_unit_ranged_control_abb"
+	},
+	japanese = {
+		castle = "building_defense_keep_jpn",
+		town_center_capital = "building_town_center_capital_jpn",
+		town_center = "building_town_center_jpn",
+		market = "building_econ_market_jpn",
+		villager = "unit_villager_1_jpn",
+		scout = "unit_scout_1_jpn",
+		king = "unit_king_1_jpn",
+		palisade_wall = "building_defense_palisade_jpn",
+		palisade_gate = "building_defense_palisade_gate_jpn",
+		monk = "unit_monk_3_jpn",
+		monastery = "building_unit_religious_jpn",
+		barracks = "building_unit_infantry_jpn",
+		stable = "building_unit_cavalry_jpn",
+		archery_range = "building_unit_ranged_jpn",
+		siege_workshop = "building_unit_siege_jpn",
+		scar_dock = "building_unit_naval_jpn",
+		house = "building_house_jpn",
+		blacksmith = "building_tech_unit_infantry_jpn",
+		wonder_imperial_age = "building_wonder_age4_great_mosque_control_jpn",
+		stone_wall = "building_defense_wall_jpn",
+		mining_camp = "building_econ_mining_camp_jpn",
+		lumber_camp = "building_econ_wood_jpn",
+		mill = "building_house_jpn",
+		arsenal = "building_tech_unit_ranged_control_nrm"
+	},
+	jin_dynasty = {
+		castle = "building_keep_3_jin",
+		town_center_capital = "building_town_center_capital_jin",
+		town_center = "building_town_center_2_jin",
+		market = "building_market_2_jin",
+		villager = "unit_mounted_villager_1_jin",
+		scout = "unit_scout_1_jin",
+		king = "unit_king_1_jin",
+		scar_dock = "building_dock_1_jin",
+		palisade_wall = "building_palisade_wall_jin",
+		palisade_gate = "building_palisade_gate_jin",
+		monk = "unit_monk_3_jin",
+		monastery = "building_monastery_3_jin",
+		barracks = "building_barracks_1_jin",
+		stable = "building_stable_2_jin",
+		archery_range = false,
+		siege_workshop = "building_machine_workshop_2_jin",
+		house = "building_house_1_jin",
+		blacksmith = "building_blacksmith_2_jin",
+		wonder_imperial_age = "building_wonder_4_jin",
+		crossbow = "unit_crossbowman_3_jin",
+		stone_wall = "building_stone_wall_jin",
+		mining_camp = "building_mining_camp_1_jin",
+		lumber_camp = "building_lumbercamp_1_jin",
+		mill = "building_mill_1_jin",
+		arsenal = false,
+	},
+}
+
+
+
+function Mission_SetupPlayers()
+
+	-- get player IDs for each player
+	player1 = World_GetPlayerAt(1) -- Player Melee
+	player2 = World_GetPlayerAt(2) -- Player Ranged
+	player3 = World_GetPlayerAt(3) -- Enemey AI
+	-- Allies
+	Player_SetMaximumAge(player1, AGE_CASTLE)
+	Player_SetMaximumAge(player2, AGE_CASTLE)
+	-- Enemey
+	Player_SetCurrentAge(player3, AGE_CASTLE) 
+	Player_SetMaximumAge(player3, AGE_CASTLE)
+	
+end
+-- Creates any extra sgroups, egroups, and mission variables
+function Mission_SetupVariables()	
+	
+	AI_Difficulty = GetAIDifficulty(player3)
+	Difficulty_Init()
+	-- DLC civ validation and composition map generation
+	Validator_CivRegistry()
+	GenerateCompositionMaps()
+	-- Starter Unit spawner
+	sg_player1_start = SGroup_CreateIfNotFound("sg_player1_start") -- Player 1, Spearman,Horseman
+	sg_player2_start = SGroup_CreateIfNotFound("sg_player2_start") -- Player 2, Spearman,Archers
+	sg_start_camp01 = SGroup_CreateIfNotFound("sg_start_camp01") 
+	sg_start_patrol01 = SGroup_CreateIfNotFound("sg_start_patrol01")
+	sg_start_mining_def = SGroup_CreateIfNotFound("sg_start_mining_def")
+	sg_start_gate01 = SGroup_CreateIfNotFound("sg_start_gate01")
+	sg_start_gate02 = SGroup_CreateIfNotFound("sg_start_gate02") 
+	
+	-- Delayed attack waves
+	sg_wave0a_city01a = SGroup_CreateIfNotFound("sg_wave0a_city01a") -- Light
+	sg_wave0a_city01b = SGroup_CreateIfNotFound("sg_wave0a_city01b") -- Light, flank
+	sg_wave0a_city01c = SGroup_CreateIfNotFound("sg_wave0a_city01c") -- Light
+	sg_wave0a_city01d = SGroup_CreateIfNotFound("sg_wave0a_city01d") -- flank
+	sg_wave0a_city02 = SGroup_CreateIfNotFound("sg_wave0a_city02") -- Siege
+	sg_wave0a_city03 = SGroup_CreateIfNotFound("sg_wave0a_city03") -- Armored Cav
+	sg_wave0a_city04 = SGroup_CreateIfNotFound("sg_wave0a_city04")
+	sg_wave0a_city05 = SGroup_CreateIfNotFound("sg_wave0a_city05")
+	sg_wave0a_city06 = SGroup_CreateIfNotFound("sg_wave0a_city06")
+	sg_wave0a_city07 = SGroup_CreateIfNotFound("sg_wave0a_city07")
+	sg_wave0a_city08 = SGroup_CreateIfNotFound("sg_wave0a_city08")
+	
+	-- Upgraded attack waves
+	sg_wave0b_city01a = SGroup_CreateIfNotFound("sg_wave0b_city01a") -- Light
+	sg_wave0b_city01b = SGroup_CreateIfNotFound("sg_wave0b_city01b") -- Cav flank
+	
+	-- CaptureMine_Reinforcements 
+	sg_wave1_mining01 = SGroup_CreateIfNotFound("sg_wave1_mining01") -- Counter-Attacks start after taking town
+	sg_wave1_mining02 = SGroup_CreateIfNotFound("sg_wave1_mining02") -- Flanking group 
+	sg_player1_town = SGroup_CreateIfNotFound("sg_player1_town") -- Player 1 receive villagers & melee inf
+	sg_player2_town = SGroup_CreateIfNotFound("sg_player2_town") -- Player 2 receive villagers & ranged inf
+	
+	-- Add additional patrols
+	sg_siege_gaurds = SGroup_CreateIfNotFound("sg_siege_gaurds") -- Siege security
+	sg_village_patrol01 = SGroup_CreateIfNotFound("sg_village_patrol01") -- Patrol #1
+	sg_village_patrol02 = SGroup_CreateIfNotFound("sg_village_patrol02") -- Patrol #2
+	sg_village_patrol03 = SGroup_CreateIfNotFound("sg_village_patrol03") -- Patrol #3
+	sg_village_patrol = SGroup_CreateIfNotFound("sg_village_patrol") -- Add groups for alive check
+	SGroup_AddGroup(sg_village_patrol, sg_village_patrol01) 
+	SGroup_AddGroup(sg_village_patrol, sg_village_patrol02) 
+	SGroup_AddGroup(sg_village_patrol, sg_village_patrol03) 
+	count_village_patrol = SGroup_Count(sg_village_patrol)  -- Save total count 
+	
+	-- DestroyCheckpoint_Waves 
+	sg_wave2_city01 = SGroup_CreateIfNotFound("sg_wave2_city01") -- Counter-Attacks start after taking checkpoint
+	sg_wave2_city02 = SGroup_CreateIfNotFound("sg_wave2_city02") -- Extra attackers with siege depending on objective condition
+	
+	-- Objective UI Variables
+	i_destroyedCheckpoint = 0 
+	i_destroyedSiege = 0 
+	i_destroyedKeep = 0 
+	
+	-- Reinforcements
+	sg_player1_reinforcements = SGroup_CreateIfNotFound("sg_player1_reinforcements")
+	sg_player2_reinforcements = SGroup_CreateIfNotFound("sg_player2_reinforcements")
+	sg_player1_siege = SGroup_CreateIfNotFound("sg_player1_siege")
+	sg_player2_siege = SGroup_CreateIfNotFound("sg_player2_siege")
+	
+	-- Siege Buildings
+	eg_siege_targets = EGroup_CreateIfNotFound("eg_siege_targets") -- used in Siege objective
+	EGroup_AddEGroup (eg_siege_targets, eg_siege_targets1) 
+	EGroup_AddEGroup (eg_siege_targets, eg_siege_targets2)
+	count_siege_player2 = EGroup_Count(eg_siege_targets2)
+	
+	-- Last lines of Defence
+	sg_village_blockade01 = SGroup_CreateIfNotFound("sg_village_blockade01")
+	sg_village_blockade02 = SGroup_CreateIfNotFound("sg_village_blockade02")
+	sg_village_blockade03 = SGroup_CreateIfNotFound("sg_village_blockade03")
+	sg_village_blockade04 = SGroup_CreateIfNotFound("sg_village_blockade04")
+	sg_village_blockade05 = SGroup_CreateIfNotFound("sg_village_blockade05")
+	sg_village_blockade06 = SGroup_CreateIfNotFound("sg_village_blockade06")
+	sg_village_blockade07 = SGroup_CreateIfNotFound("sg_village_blockade07")
+	sg_village_blockade08 = SGroup_CreateIfNotFound("sg_village_blockade08")
+	sg_village_blockade09 = SGroup_CreateIfNotFound("sg_village_blockade09")
+	
+	-- Player units sg_player_team
+	sg_player_team = SGroup_CreateIfNotFound("sg_player_team")
+end
+-- Setup any restrictions (i.e. locking out units, etc)
+-- Profile-based: delegates to ApplyRestrictionProfile("starting") in data.scar
+-- All per-civ, per-difficulty logic is in Restriction_Profile.starting.apply()
+function Mission_SetRestrictions()	
+	for _, player in ipairs(PLAYERS) do
+		ApplyRestrictionProfile(player, "starting")
+	end
+end
+-- This function will be called before the intro cinematic
+function Mission_Preset()	-- any other setup to do before the mission starts (i.e. set up rules, spawn units, etc)
+	
+	AI_SetPersonality( player3, "default_campaign" )
+	-- Population 
+	Modifier_ApplyToPlayer(Modifier_Create(MAT_Player, "personnel_cap_player_modifier", MUT_Addition, false, 50, ""), player1, 0)
+	Modifier_ApplyToPlayer(Modifier_Create(MAT_Player, "personnel_cap_player_modifier", MUT_Addition, false, 50, ""), player2, 0)
+	-- Add professional scout upgrades
+	Player_CompleteUpgrade(player1, UPG.COMMON.UPGRADE_SCOUT_FORESTER)
+	Player_CompleteUpgrade(player2, UPG.COMMON.UPGRADE_SCOUT_FORESTER)
+	-- enable resource pickups
+	Player_SetStateModelBool(player2, "player_can_interact_with_resource_pickups", true)
+
+	--[[ Alternative Start 
+	Player_SetStateModelFloat(player1, "has_capital", 1.0)
+	Player_SetStateModelFloat(player2, "has_capital", 1.0)
+	]]
+
+	--Initialize objectives
+	SeizeCity_InitObjectives() -- Main
+	Capture_EnemiesTownInit()
+	DestroyTown_InitObjectives()
+	DestroySiege_InitObjectives()
+	DestroyKeep_InitObjectives() -- Main-secondary
+	
+	
+end
+-- This function will be called after the intro cinematic, before the player takes control
+function Mission_Start()	-- this is triggered after the intro, just as control is passed to the player
+	-- Set age here instead of Mission_SetupPlayers / FPS FIX
+	Player_SetCurrentAge(player1, AGE_FEUDAL) 
+	Player_SetCurrentAge(player2, AGE_FEUDAL)
+	
+	-- Disable condensed objectives UI for co-op objective clarity / Turn UI Cap off for first stage of mission
+	for _, player in ipairs(PLAYERS) do
+		UI_SetPlayerDataContext(player.id, {PopulationCapOn = false, hide_condensed_objectives_override = true})
+	end
+	
+	-- Disable annihilation defeat conditions (mission uses custom win/lose logic)
+	Rule_RemoveGlobalEvent(Annihilation_OnEntityKilled)
+	Rule_RemoveGlobalEvent(Annihilation_OnLandmarkDestroyed)
+	Rule_RemoveGlobalEvent(Annihilation_OnConstructionComplete)
+	
+	-- Initialize tribute system (requires DC + PLAYERS + player ages set)
+	Tribute_Init()
+	
+	-- Custom defeat monitor registered in CaptureMine_OnComplete (post-capture only)
+	
+	-- start the opening objectives (if you're using ObjectiveTable style objectives)
+	Objective_Start(OBJ_SeizeCity,true, false)
+	Objective_Start(OBJ_CaptureEnemiesTown,true, false)
+	Objective_Start(SOBJ_Warning,true, false)
+	Rule_AddOneShot(Start_Setup, 0) -- Delay to load models from age up
+	Rule_Add(CaptureMine_ForceComplete) -- Incase only player 2 has completed objective
+	-- Coop_2_Arabia_data.scar
+	Rule_AddInterval(SGroup_Tracker, 60, { player = player1 })
+	Rule_AddInterval(SGroup_Tracker, 60, { player = player2 })
+	
+	-- Player management: AI takeover prevention + disconnect transfer
+	ALL_PLAYER_SLOTS = { player1, player2, player3 }
+	g_original_player_types = {}
+	g_transferred_slots = {}
+	g_disconnected_slots = {}
+	-- Slots 1-2 are co-op human seats by design
+	-- (Player_IsHuman() only works for local player in multiplayer)
+	for i = 1, 2 do
+		g_original_player_types[i] = true
+	end
+	Rule_AddGlobalEvent(Reset_AI_OnMigrated, GE_AIPlayer_Migrated)
+	Rule_AddGlobalEvent(Reset_AI_OnTakeOver, GE_AITakeOver)
+	Rule_AddInterval(Reset_AI, 1)
+	
+
+end
+--The recipe can be used to create initial spawns, set up objectives or completion/failure states
+function GetRecipe()
+	
+
+	local recipe = {
+		
+		introNIS = EVENTS.TEMPLATEMISSION_Intro,
+
+		-- Defining Locations for reference in script
+		locations = {
+			{ 
+				descriptor = "settlementStart", 
+				marker = mkr_settlement_start, 
+				player = player3, 
+				sgroup_defenders = sg_start_mining_def, --when setting capture objectives
+ 			},	
+			{ 
+				descriptor = "siegeWorkshop", 
+				marker = mkr_siege_obj, 
+				player = player3, 
+				--egroup = eg_start_player1, 
+				sgroup_defenders = sg_siege_gaurds, 
+ 			},	
+		},
+		
+		
+		-- Modules
+		modules = {
+			
+		},
+
+		
+		-- Playbill
+		playbill = {
+		},
+		
+		-- Presentation aspects for the start or end of a mission
+		onStart = {
+			intelEvent = "",
+			expositionCamera = {},
+			titleCard = {
+				title = "$11207012",   -- Avignon
+				--	date =  "$ae948c95a8c5425d8de28e0c193e0be9:11",   -- 1754
+				icon = "icons/campaign/campaign_hundred_disorder"
+			},
+			actions = {
+			},
+		},
+		
+	}
+	
+	return recipe
+
+end
+
+-------------------------------------------
+-- Functions 
+-------------------------------------------
+-- From Advanced Game Settings by Woprock (extended for DLC support)
+---AGS_GetCivilizationEntity: DLC-aware blueprint lookup.
+-- Checks DLC_CIV_OVERRIDES first, then resolves to base civ via parent chain.
+function AGS_GetCivilizationEntity(player_civ, bp_type)
+	local raw = string.lower(player_civ)
+	-- Check DLC overrides first (variant-specific blueprints)
+	if DLC_CIV_OVERRIDES[raw] and DLC_CIV_OVERRIDES[raw][bp_type] then
+		return BP_GetEntityBlueprint(DLC_CIV_OVERRIDES[raw][bp_type])
+	end
+	-- Resolve to base civ via parent chain
+	local resolved = ResolveCivKey(raw)
+	if resolved == nil then
+		error("[DLC] AGS_GetCivilizationEntity: Cannot resolve civ '" .. tostring(player_civ) .. "'")
+	end
+	local entry = AGS_ENTITY_TABLE[resolved]
+	if entry == nil then
+		error("[DLC] AGS_GetCivilizationEntity: No AGS_ENTITY_TABLE entry for '" .. resolved .. "'")
+	end
+	local bp = entry[bp_type]
+	if bp == nil then
+		error("[DLC] AGS_GetCivilizationEntity: No blueprint '" .. bp_type .. "' for civ '" .. resolved .. "'")
+	end
+	if bp == false then return nil end
+	return BP_GetEntityBlueprint(bp)
+end
+
+---TryGetCivilizationEntity: Safe DLC-aware blueprint lookup.
+-- Same resolution as AGS_GetCivilizationEntity, but returns nil instead of
+-- erroring when the civ does not support the requested bp_type.
+-- Used for capability-gated restriction paths (e.g., wall/keep/workshop locks)
+-- where absence of a key means "civ doesn't have this building type".
+function TryGetCivilizationEntity(player_civ, bp_type)
+	local raw = string.lower(player_civ)
+	-- Check DLC overrides first (variant-specific blueprints)
+	if DLC_CIV_OVERRIDES[raw] and DLC_CIV_OVERRIDES[raw][bp_type] ~= nil then
+		-- false sentinel = civ intentionally lacks this building
+		if DLC_CIV_OVERRIDES[raw][bp_type] == false then return nil end
+		return BP_GetEntityBlueprint(DLC_CIV_OVERRIDES[raw][bp_type])
+	end
+	-- Resolve to base civ via parent chain
+	local resolved = ResolveCivKey(raw)
+	if resolved == nil then return nil end
+	local entry = AGS_ENTITY_TABLE[resolved]
+	if entry == nil then return nil end
+	local bp = entry[bp_type]
+	if bp == nil or bp == false then return nil end
+	return BP_GetEntityBlueprint(bp)
+end
+
+-- From Onslaught / DLC-aware siege EBP lookup via CBA_SIEGE_TABLE
+-- Checks exact civ entry first (for DLC variants with unique siege attribNames),
+-- then resolves through parent chain.
+function AGS_GetSiegeEntity(player_civ, bp_type)
+	local original_civ = string.lower(player_civ)
+	-- Check exact DLC variant entry first
+	if CBA_SIEGE_TABLE[original_civ] and CBA_SIEGE_TABLE[original_civ][bp_type] then
+		return BP_GetEntityBlueprint(CBA_SIEGE_TABLE[original_civ][bp_type])
+	end
+	-- Resolve through parent chain
+	local resolved = ResolveCivKey(original_civ)
+	if resolved == nil then
+		error("[DLC] AGS_GetSiegeEntity: Civ '" .. original_civ .. "' is not resolvable.")
+	end
+	local tbl = CBA_SIEGE_TABLE[resolved]
+	if tbl == nil then
+		error("[DLC] AGS_GetSiegeEntity: Resolved civ '" .. resolved .. "' has no CBA_SIEGE_TABLE entry.")
+	end
+	local attrib = tbl[bp_type]
+	if attrib == nil then
+		error("[DLC] AGS_GetSiegeEntity: Siege key '" .. tostring(bp_type)
+			.. "' missing for civ '" .. original_civ .. "' (resolved: '" .. resolved .. "').")
+	end
+	return BP_GetEntityBlueprint(attrib)
+end
+
+-- DLC-aware siege SBP lookup via CBA_SIEGE_TABLE
+-- Same resolution logic as AGS_GetSiegeEntity but returns BP_GetSquadBlueprint.
+function AGS_GetSiegeSquad(player_civ, bp_type)
+	local original_civ = string.lower(player_civ)
+	-- Check exact DLC variant entry first
+	if CBA_SIEGE_TABLE[original_civ] and CBA_SIEGE_TABLE[original_civ][bp_type] then
+		return BP_GetSquadBlueprint(CBA_SIEGE_TABLE[original_civ][bp_type])
+	end
+	-- Resolve through parent chain
+	local resolved = ResolveCivKey(original_civ)
+	if resolved == nil then
+		error("[DLC] AGS_GetSiegeSquad: Civ '" .. original_civ .. "' is not resolvable.")
+	end
+	local tbl = CBA_SIEGE_TABLE[resolved]
+	if tbl == nil then
+		error("[DLC] AGS_GetSiegeSquad: Resolved civ '" .. resolved .. "' has no CBA_SIEGE_TABLE entry.")
+	end
+	local attrib = tbl[bp_type]
+	if attrib == nil then
+		error("[DLC] AGS_GetSiegeSquad: Siege key '" .. tostring(bp_type)
+			.. "' missing for civ '" .. original_civ .. "' (resolved: '" .. resolved .. "').")
+	end
+	return BP_GetSquadBlueprint(attrib)
+end
+
+function Defeat_Function()
+	
+	Tribute_Cleanup()
+	Mission_Fail()
+	local victorTeam = TEAMS[2]
+	for i, team in pairs(TEAMS) do
+		if team ~= victorTeam then
+			Core_SetTeamDefeated(team, -1, 2)
+		end
+	end
+	Core_SetTeamVictorious(victorTeam, -1, 1)
+	
+end
+
+-- Monitor player defeat condition: trigger defeat when EITHER player has zero units and buildings (post-capture)
+function Monitor_PlayerDefeated()
+	-- Count units and buildings per player
+	Player_GetAll(player1)
+	local p1_squads = SGroup_CountSpawned(sg_allsquads)
+	Player_GetAll(player2)
+	local p2_squads = SGroup_CountSpawned(sg_allsquads)
+	
+	Player_GetAll(player1)
+	local p1_buildings = EGroup_CountSpawned(eg_allentities)
+	Player_GetAll(player2)
+	local p2_buildings = EGroup_CountSpawned(eg_allentities)
+	
+	-- Debug logging (periodic check)
+	Debug_OnDefeatCheck(p1_squads, p1_buildings, p2_squads, p2_buildings)
+	
+	-- Defeat condition: EITHER player has 0 units AND 0 buildings (including TC)
+	if (p1_squads == 0 and p1_buildings == 0) or (p2_squads == 0 and p2_buildings == 0) then
+		print("[DEFEAT] Player eliminated — triggering defeat condition")
+		Debug_OnDefeatTriggered(p1_squads, p1_buildings, p2_squads, p2_buildings)
+		Defeat_Function()
+		Rule_RemoveMe()
+	end
+end
+
+-------------------------------------------
+-- Player Management: AI Takeover Prevention & Disconnect Transfer
+-------------------------------------------
+
+-- Resource types for transfer
+RESOURCE_TYPES = { RT_Food, RT_Wood, RT_Gold, RT_Stone }
+
+-- ============================================================
+-- Core Module: disconnect callback (primary detection layer)
+-- ============================================================
+-- Relic's engine calls <Module>_OnPlayerAITakeover(context) on registered
+-- Core modules when a human player disconnects. Without this, GE_AITakeOver
+-- alone may not fire reliably for crashes/network drops.
+Core_RegisterModule("ArabiaDisconnect")
+
+function ArabiaDisconnect_OnPlayerAITakeover(context)
+	OnPlayerAITakeover_Hold()
+	if context ~= nil and context.player ~= nil then
+		for i = 1, 2 do
+			if ALL_PLAYER_SLOTS[i] == context.player then
+				if not g_disconnected_slots[i] then
+					g_disconnected_slots[i] = true
+					print(string.format("[DC] Core callback fired: player%d marked as disconnected", i))
+				end
+				break
+			end
+		end
+	end
+	CheckPlayerDisconnects()
+end
+
+-- Prevent AI personality drift (enforces 'default_campaign')
+-- Interval catches silent personality drift from Relic systems
+function Reset_AI(context)
+	-- Check for disconnected players first
+	CheckPlayerDisconnects()
+	
+	-- Then enforce AI personality on all AI-controlled slots and disconnected co-op slots
+	for i, pid in ipairs(ALL_PLAYER_SLOTS) do
+		local should_enforce = (i > 2) or g_disconnected_slots[i]
+		if should_enforce then
+			local current_personality = AI_GetPersonality(pid)
+			if current_personality ~= "default_campaign" then
+				print(string.format("[AI] Personality drift on player%d: '%s' -> 'default_campaign'", 
+					i, current_personality))
+				AI_SetPersonality(pid, "default_campaign")
+			end
+		end
+	end
+end
+
+-- Event handler for GE_AITakeOver: marks the disconnected slot and triggers transfer
+function Reset_AI_OnTakeOver(context)
+	if context ~= nil and context.player ~= nil then
+		for i = 1, 2 do
+			if ALL_PLAYER_SLOTS[i] == context.player then
+				if not g_disconnected_slots[i] then
+					g_disconnected_slots[i] = true
+					print(string.format("[DC] GE_AITakeOver fired: player%d marked as disconnected", i))
+				end
+				break
+			end
+		end
+	end
+	Reset_AI(context)
+end
+
+-- Event handler for GE_AIPlayer_Migrated: marks the disconnected slot (tertiary detection)
+function Reset_AI_OnMigrated(context)
+	if context ~= nil and context.player ~= nil then
+		for i = 1, 2 do
+			if ALL_PLAYER_SLOTS[i] == context.player then
+				if not g_disconnected_slots[i] then
+					g_disconnected_slots[i] = true
+					print(string.format("[DC] GE_AIPlayer_Migrated fired: player%d marked as disconnected", i))
+				end
+				break
+			end
+		end
+	end
+	Reset_AI(context)
+end
+
+-- Find the first remaining human player (excluding disconnected slot)
+function FindRecipientPlayer(exclude_pid)
+	for i = 1, 2 do
+		local pid = ALL_PLAYER_SLOTS[i]
+		if pid ~= exclude_pid and not g_disconnected_slots[i] and not g_transferred_slots[i] then
+			return pid, i
+		end
+	end
+	return nil, nil
+end
+
+-- Transfer all resources from one player to another
+function TransferResources(from_pid, to_pid, from_slot, to_slot)
+	for _, rt in ipairs(RESOURCE_TYPES) do
+		local amount = Player_GetResource(from_pid, rt)
+		if amount > 0 then
+			Player_AddResource(to_pid, rt, amount)
+			Player_SetResource(from_pid, rt, 0)
+		end
+	end
+	print(string.format("[DC] Resources transferred: player%d → player%d", from_slot, to_slot))
+end
+
+-- Transfer all squads from one player to another
+function TransferUnits(from_pid, to_pid, from_slot, to_slot)
+	Player_GetAll(from_pid)
+	local count = SGroup_CountSpawned(sg_allsquads)
+	if count > 0 then
+		SGroup_SetPlayerOwner(sg_allsquads, to_pid)
+		print(string.format("[DC] %d squad(s) transferred: player%d → player%d", count, from_slot, to_slot))
+	else
+		print(string.format("[DC] No squads to transfer from player%d", from_slot))
+	end
+end
+
+-- Transfer all entities (buildings) from one player to another
+function TransferBuildings(from_pid, to_pid, from_slot, to_slot)
+	Player_GetAll(from_pid)
+	local from_civ = string.lower(Player_GetRaceName(from_pid))
+	local count = EGroup_CountSpawned(eg_allentities)
+	if count > 0 then
+		local snapshot = {}
+		for idx = 1, count do
+			local entity = EGroup_GetEntityAt(eg_allentities, idx)
+			if entity ~= nil then
+				table.insert(snapshot, entity)
+			end
+		end
+
+		local transferred = 0
+		local destroyed_landmarks = 0
+		for _, entity in ipairs(snapshot) do
+			if Entity_IsAlive(entity) then
+				if Entity_IsOfType(entity, "landmark") then
+					local owner_civ = string.lower(Player_GetRaceName(Entity_GetPlayerOwner(entity)))
+					if owner_civ == from_civ then
+						Entity_SetPlayerOwner(entity, to_pid)
+						transferred = transferred + 1
+					else
+						Entity_Destroy(entity)
+						destroyed_landmarks = destroyed_landmarks + 1
+					end
+				else
+					Entity_SetPlayerOwner(entity, to_pid)
+					transferred = transferred + 1
+				end
+			end
+		end
+
+		print(string.format("[DC] Buildings processed: %d transferred, %d landmarks destroyed: player%d → player%d", transferred, destroyed_landmarks, from_slot, to_slot))
+	else
+		print(string.format("[DC] No buildings to transfer from player%d", from_slot))
+	end
+end
+
+-- Main disconnect handler: detect newly disconnected players and transfer
+-- Called by Reset_AI interval (1s) and Core callback
+function CheckPlayerDisconnects()
+	for i = 1, 2 do  -- 2-player co-op (player1, player2)
+		-- Only process slots marked disconnected that haven't been transferred yet
+		if g_disconnected_slots[i] and not g_transferred_slots[i] then
+			local pid = ALL_PLAYER_SLOTS[i]
+			-- Player disconnected — mark as transferred immediately
+			g_transferred_slots[i] = true
+			
+			local to_pid, to_slot = FindRecipientPlayer(pid)
+			if to_pid ~= nil then
+				print(string.format("[DC] Player%d disconnected — transferring to player%d", i, to_slot))
+				TransferResources(pid, to_pid, i, to_slot)
+				TransferUnits(pid, to_pid, i, to_slot)
+				TransferBuildings(pid, to_pid, i, to_slot)
+			else
+				print(string.format("[DC] Player%d disconnected — no human players remain", i))
+			end
+		end
+	end
+end
+
+
+
+
+
+
+

@@ -1,0 +1,106 @@
+---------------------------------------------------------------------------------------------------
+-- CBA AI Player — Debug: Console Commands
+-- Force-action and debug lock/verbosity console commands.
+-- Origin: cba_ai_player.scar lines 3991–4070, 4160–4195
+---------------------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------
+-- Console: CBA_AIPlayer_ForceAttack()
+-----------------------------------------------------------------------
+
+function CBA_AIPlayer_ForceAttack()
+	if _AI_IsExternallyLocked() then
+		print("[AI_PLAYER] ForceAttack ignored while external debug lock is active.")
+		return
+	end
+	for _, player in ipairs(_ai_players) do
+		if not _AI_IsEliminated(player) then
+			local staging_count = player.ai.staging_sg and SGroup_CountSpawned(player.ai.staging_sg) or 0
+			if staging_count > 0 then
+				local old_threshold = player.ai.squad_threshold
+				player.ai.squad_threshold = 1
+				_AI_ManageArmies(player)
+				player.ai.squad_threshold = old_threshold
+			else
+				print(string.format("[AI_PLAYER] %s has no staged units to dispatch.", player.ai.label or "P?"))
+			end
+		end
+	end
+end
+
+-----------------------------------------------------------------------
+-- Console: CBA_AIPlayer_ForceAllConstruction()
+-----------------------------------------------------------------------
+
+function CBA_AIPlayer_ForceAllConstruction()
+	if _ai_players == nil then
+		print("[AI_PLAYER] ForceAllConstruction: _ai_players not initialised.")
+		return
+	end
+	print("[AI_PLAYER] ====== ForceAllConstruction ======")
+	local total = 0
+	local forced = 0
+	local skipped = 0
+	for _, player in ipairs(_ai_players) do
+		local ai = player.ai
+		if ai ~= nil then
+			for _, entry in ipairs(ai.construction_queue) do
+				total = total + 1
+				local ok_alive, alive = pcall(Entity_IsAlive, entry.entity)
+				if ok_alive and alive then
+					local ok_fc, err = pcall(Entity_ForceConstruct, entry.entity)
+					if ok_fc then
+						forced = forced + 1
+						print(string.format("[AI_PLAYER] ForceConstruct -> %s %s id=%s ok",
+							(ai.label or "P?"), (entry.type_key or "?"),
+							tostring(pcall(Entity_GetID, entry.entity) and select(2, pcall(Entity_GetID, entry.entity)) or "?")))
+					else
+						skipped = skipped + 1
+						print(string.format("[AI_PLAYER] ForceConstruct -> %s %s FAILED: %s",
+							(ai.label or "P?"), (entry.type_key or "?"), tostring(err)))
+					end
+				else
+					skipped = skipped + 1
+					print(string.format("[AI_PLAYER] ForceConstruct -> %s %s SKIPPED (not alive)",
+						(ai.label or "P?"), (entry.type_key or "?")))
+				end
+			end
+		end
+	end
+	print(string.format("[AI_PLAYER] ForceAllConstruction done: total=%d forced=%d skipped=%d", total, forced, skipped))
+	print("[AI_PLAYER] ====== /ForceAllConstruction ======")
+end
+
+-----------------------------------------------------------------------
+-- Debug Lock Control
+-----------------------------------------------------------------------
+
+function CBA_AIPlayer_SetDebugExternalLock(enabled, reason)
+	_AI_DEBUG_EXTERNAL_LOCK = enabled == true
+	_AI_DEBUG_EXTERNAL_LOCK_REASON = _AI_DEBUG_EXTERNAL_LOCK and tostring(reason or "debug_harness") or ""
+	print(string.format("[AI_PLAYER] External lock %s%s",
+		_AI_DEBUG_EXTERNAL_LOCK and "ENABLED" or "DISABLED",
+		_AI_DEBUG_EXTERNAL_LOCK and (" reason=" .. _AI_DEBUG_EXTERNAL_LOCK_REASON) or ""))
+end
+
+function CBA_AIPlayer_GetDebugExternalLock()
+	return _AI_DEBUG_EXTERNAL_LOCK, _AI_DEBUG_EXTERNAL_LOCK_REASON
+end
+
+-----------------------------------------------------------------------
+-- Debug Verbosity Control
+-----------------------------------------------------------------------
+
+function CBA_AIPlayer_SetDebugVerbosity(level)
+	local n = tonumber(level) or 1
+	if n < 0 then n = 0 end
+	if n > 2 then n = 2 end
+	_AI_DEBUG_VERBOSITY = n
+	print(string.format("[AI_PLAYER] Debug verbosity set to %d (0=minimal,1=default,2=verbose).", _AI_DEBUG_VERBOSITY))
+end
+
+function CBA_AIPlayer_SetPatrolOwnershipCapture(enabled)
+	_AI_DEBUG_CAPTURE_PATROL_OWNERSHIP = enabled ~= false
+	print(string.format("[AI_PLAYER] Patrol ownership capture %s (default is OFF).",
+		_AI_DEBUG_CAPTURE_PATROL_OWNERSHIP and "ENABLED" or "DISABLED"))
+end

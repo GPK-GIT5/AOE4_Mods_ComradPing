@@ -1,0 +1,590 @@
+------------------------------------------- 
+-- Objective Capture Mine
+-------------------------------------------
+
+function Capture_EnemiesTownInit()
+
+	local location = LOCATION("settlementStart")
+	
+	OBJ_CaptureEnemiesTown = {
+		
+		Title = "$ae948c95a8c5425d8de28e0c193e0be9:54",  --Capture the mining area
+		Type = ObjectiveType_Battle,  --type of objective (ObjectiveType_Optional, ObjectiveType_Battle, ObjectiveType_Information)
+	--	Intel_Start = EVENTS.CaptureTown, --voice over start before objective
+	--	Intel_Complete = EVENTS.CaptureTown, --voice over start after objective completes
+
+		OnStart = function()
+			-- Monitor defenders: complete when mining camp guards eliminated
+			Rule_AddInterval(CaptureMine_ForceComplete, 1)
+			-- 3D world arrow + minimap ping on mine location
+			Objective_AddUIElements(OBJ_CaptureEnemiesTown, mkr_settlement_start, true, nil, true, 0)
+		end,
+
+		OnComplete = CaptureMine_OnComplete,
+	}
+	SOBJ_DefeatEnemey1 = {
+		
+		Title = "$ae948c95a8c5425d8de28e0c193e0be9:55",   -- "Defeat resistance around Mining Camp"
+		Type = ObjectiveType_Battle,
+		Parent = OBJ_CaptureEnemiesTown,
+	}
+	SOBJ_LocationTown = {
+		Title ="$11141897" , -- "Mining Camp"
+		Type = ObjectiveType_Battle,
+		Parent = OBJ_CaptureEnemiesTown,
+	}
+	SOBJ_Warning = {
+		
+		Title = "$11217965",   -- "Ensure you preserve your forces to avoid failing the mission!"
+		Type = ObjectiveType_Information,
+		Parent = OBJ_CaptureEnemiesTown,
+	}
+	
+	Objective_Register(OBJ_CaptureEnemiesTown)
+	Objective_Register(SOBJ_DefeatEnemey1)
+	Objective_Register(SOBJ_LocationTown)
+	Objective_Register(SOBJ_Warning)
+	
+	location.objectivePrimary = OBJ_CaptureEnemiesTown
+	location.objectiveSecondary = SOBJ_DefeatEnemey1
+	location.objectiveCapture = SOBJ_LocationTown
+	location.objectiveWarning = SOBJ_Warning
+	
+	
+end
+-- Complete if defenders have been eliminated
+function CaptureMine_ForceComplete()
+	if SGroup_Count(sg_start_mining_def) == 0 then
+		Objective_Complete (OBJ_CaptureEnemiesTown, true, false)
+		Rule_RemoveMe()
+	end
+end
+
+function CaptureMine_OnComplete()
+	-- Mark settlement captured to switch reinforcement spawn locations
+	Arabia_MarkSettlementCaptured()
+	Rule_AddOneShot(CaptureMine_Delay, 5)
+	CaptureMine_Reinforcements()
+	-- Transfer only outpost + walls to player1 (leave other structures as player3)
+	local eg_transfer = EGroup_CreateIfNotFound("eg_mineDefemse_transfer")
+	EGroup_AddEGroup(eg_transfer, eg_mineDefemse)
+	EGroup_Filter(eg_transfer, {"outpost", "wall", "stone_wall", "stone_wall_tower", "stone_gate"}, FILTER_KEEP)
+	EGroup_SetPlayerOwner(eg_transfer, player1)
+	-- Enable per-player defeat monitor (only active after mining camp capture)
+	Rule_AddInterval(Monitor_PlayerDefeated, 1)
+end
+
+function CaptureMine_Delay()
+	 Objective_Start(OBJ_DestroyCheckpoint)
+end
+
+-------------------------------------------
+-- Main: Seize City (+ Destroy keep) 
+-------------------------------------------
+function SeizeCity_InitObjectives()
+	OBJ_SeizeCity = {
+		Title = "$ae948c95a8c5425d8de28e0c193e0be9:56", -- Seize the Ottoman's City
+		Type = ObjectiveType_Information, 
+		SetupUI = SeizeCity_UI, -- seting up how objective is presented
+		OnStart = SeizeCity_Start, --when objective start call function
+	}
+	
+	Objective_Register(OBJ_SeizeCity)
+end
+
+function SeizeCity_UI()
+	
+	Objective_StartTimer(OBJ_SeizeCity, COUNT_DOWN, DC.seize_city_timer, 10)
+	
+end
+
+function SeizeCity_Start()
+	
+	Rule_AddOneShot(SeizeCity_End, DC.seize_city_timer)
+	
+end
+-- Set player team defeated
+function SeizeCity_End() 
+	
+	-- Eliminate players
+	--World_KillPlayer(player1, KPR_Lost)
+	Core_SetPlayerDefeated(player1, Elimination_LoserPresentation, WR_ELIMINATION)
+	--World_KillPlayer(player2, KPR_Lost)
+	Core_SetPlayerDefeated(player2, Elimination_LoserPresentation, WR_ELIMINATION)
+	Elimination_CheckVictory()
+	
+end 
+
+-------------------------------------------
+-- Objective City Gates    
+-------------------------------------------
+
+function DestroyTown_InitObjectives()
+	
+	OBJ_DestroyCheckpoint = {
+		Title =  "$ae948c95a8c5425d8de28e0c193e0be9:57",  -- "Seize the city gates"
+		Type = ObjectiveType_Battle, 
+		SetupUI = DestroyCheckpoint_UI, -- seting up how objective is presented
+		OnStart = DestroyCheckpoint_Start, --when objective start call function
+		OnComplete = DestroyCheckpoint_OnComplete, -- when objective completes, call function
+	}
+	
+	Objective_Register(OBJ_DestroyCheckpoint)
+	
+end
+
+function DestroyCheckpoint_UI()
+	
+	--count the number of buildings and put into a variable (set in main scar file)
+	i_destroyedCheckpoint = EGroup_CountSpawned(eg_checkpoint_targets)
+	
+	--Set the counter in the UI
+	-- Objective_SetCounter(OBJ_DestroyCheckpoint, 0, i_destroyedCheckpoint)	-- Not required for this 
+
+	
+end
+
+function DestroyCheckpoint_Start()
+	
+	--start a rule that will check when an entity is destroyed
+	Rule_AddEGroupEvent(DestroyCheckpoint_OnEntityKilled, eg_checkpoint_targets, GE_EntityKilled)
+	
+	-- Disable condensed objectives UI for co-op objective clarity
+	for _, player in ipairs(PLAYERS) do
+		UI_SetPlayerDataContext(player.id, {PopulationCapOn = true, hide_condensed_objectives_override = true})
+	end
+	
+end
+-- Set completed when destroying buildings near objective
+function DestroyCheckpoint_OnEntityKilled(context)
+	
+	if context.victimOwner == player3 then
+		
+		if Objective_IsComplete(OBJ_DestroyCheckpoint) == false then
+			if Objective_IsCounterSet(OBJ_DestroyCheckpoint) then
+				Objective_IncreaseCounter(OBJ_DestroyCheckpoint)
+
+				if Obj_GetCounterCount(OBJ_DestroyCheckpoint.ID) == Obj_GetCounterMax(OBJ_DestroyCheckpoint.ID) then 
+					Objective_Complete(OBJ_DestroyCheckpoint, true, true) 
+					Rule_RemoveMe()
+				end
+			end
+		else
+			Rule_RemoveMe()
+		end
+		
+	end	
+	
+end
+-- Set completed when moving past objective
+function DestroyCheckpoint_OnProximity()
+	Objective_Complete(OBJ_DestroyCheckpoint, true, false) 
+end
+
+-- Complete when any player unit enters the mining settlement (co-op compatible)
+function CaptureMine_OnProximity()
+	if Objective_IsComplete(OBJ_CaptureEnemiesTown) == false then
+		Objective_Complete(OBJ_CaptureEnemiesTown, true, false)
+		Rule_RemoveMe()
+	end
+end
+
+function DestroyCheckpoint_OnComplete()
+	-- Disable Wave 1
+	Rule_Remove(CaptureMine_Waves) 
+	-- Enable Wave 2
+	Rule_AddInterval(DestroyCheckpoint_Waves, DC.checkpoint_wave_interval)
+	-- Final Objective
+	Objective_Start(OBJ_DestroyKeep,true, false)
+	-- Optional
+	Objective_Start(OBJ_CaptureSiegeWorkshop,true, false)
+	Objective_Start(OBJ_DestroySiege,true, false)
+	-- Setup units/patrols for next area
+	DestroyCheckpoint_Spawner()
+	-- Enable AI Upgrades
+	DestroyCheckpoint_Upgrades()
+
+
+end
+
+-------------------------------------------
+-- Objective Capture Siege Workshop
+-------------------------------------------
+
+function DestroySiege_InitObjectives()
+
+	local location = LOCATION("siegeWorkshop")
+	
+	OBJ_CaptureSiegeWorkshop = {
+		
+		Title = "$ae948c95a8c5425d8de28e0c193e0be9:58",  -- "Capture enemey Siege Workshop"
+		Type = ObjectiveType_Battle,  --type of objective (ObjectiveType_Optional, ObjectiveType_Battle, ObjectiveType_Information)
+		OnStart = function()
+			-- Monitor siege workshop defenders: complete when all guards eliminated
+			Rule_AddInterval(CaptureSiege_GuardCheck, 1)
+			-- 3D world arrow + minimap ping on siege workshop location
+			Objective_AddUIElements(OBJ_CaptureSiegeWorkshop, mkr_siege_obj, true, nil, true, 0)
+		end,
+
+		OnComplete = DestroySiege_OnComplete,
+	}
+	SOBJ_DefeatEnemey2 = {
+		
+		Title ="$ae948c95a8c5425d8de28e0c193e0be9:59" ,   -- "Defeat resistance around Siege Workshop"
+		Type = ObjectiveType_Battle,
+		Parent = OBJ_CaptureSiegeWorkshop,
+	}
+	SOBJ_LocationSiege = {
+		Title = "$11119481", -- "Siege Workshop"
+		Type = ObjectiveType_Battle,
+		Parent = OBJ_CaptureSiegeWorkshop,
+	}
+	OBJ_DestroySiege = {
+		Title = "$ae948c95a8c5425d8de28e0c193e0be9:60", -- "avoid destroying Siege Workshop"
+		Type = ObjectiveType_Battle,
+		SetupUI = DestroySiege_UI, -- seting up how objective is presented
+		OnStart = DestroySiege_Start, 
+		Parent = OBJ_CaptureSiegeWorkshop,
+	}
+
+	
+	Objective_Register(OBJ_CaptureSiegeWorkshop)
+	Objective_Register(SOBJ_DefeatEnemey2)
+	Objective_Register(SOBJ_LocationSiege)
+	Objective_Register(OBJ_DestroySiege)
+	
+	
+	location.objectivePrimary = OBJ_CaptureSiegeWorkshop
+	location.objectiveSecondary = SOBJ_DefeatEnemey2
+	location.objectiveCapture = SOBJ_LocationSiege
+	location.objectiveDestroy = OBJ_DestroySiege
+	
+	
+	
+end
+
+function DestroySiege_UI()
+	
+	--count the number of buildings and put into a variable (set in main scar file)
+	i_destroyedSiege = EGroup_CountSpawned(eg_siege_targets)
+	
+	--Set the counter in the UI
+	Objective_SetCounter(OBJ_DestroySiege, 0, i_destroyedSiege)	
+
+	
+end
+
+function DestroySiege_Start()
+	
+	--start a rule that will check when an entity is destroyed
+	Rule_AddEGroupEvent(DestroySiege_OnEntityKilled, eg_siege_targets, GE_EntityKilled)
+	
+end
+
+function DestroySiege_OnEntityKilled(context)
+	
+	if context.victimOwner == player3 then
+		
+		if Objective_IsComplete(OBJ_DestroySiege) == false then
+			if Objective_IsCounterSet(OBJ_DestroySiege) then
+				Objective_IncreaseCounter(OBJ_DestroySiege)
+
+				if Obj_GetCounterCount(OBJ_DestroySiege.ID) == Obj_GetCounterMax(OBJ_DestroySiege.ID) then 
+					Objective_Fail(OBJ_CaptureSiegeWorkshop, true, false) 
+					Rule_RemoveMe()
+				end
+			end
+		else
+			Rule_RemoveMe()
+		end
+		
+	end	
+	
+end
+
+function DestroySiege_OnComplete()
+	-- Transfer 2nd workshop to player 2
+	EGroup_SetPlayerOwner(eg_siege_targets1, player1)
+	EGroup_SetPlayerOwner(eg_siege_targets2, player2)
+	-- Arabia rule: completing siege workshop objective lifts all siege-related restrictions.
+	for _, player in ipairs(PLAYERS) do
+		ApplyRestrictionProfile(player, "engineers_available")
+		ApplyRestrictionProfile(player, "workshop_available")
+	end
+end
+-- Complete if defenders have been eliminated
+function DestroySiege_ForceComplete()
+	if SGroup_Count(sg_siege_gaurds) == 0 then
+		Objective_Complete (OBJ_CaptureSiegeWorkshop, true, false)
+		Rule_RemoveMe()
+	end
+	
+end
+
+-- Complete when all siege workshop guards eliminated
+function CaptureSiege_GuardCheck()
+	if Objective_IsComplete(OBJ_CaptureSiegeWorkshop) == false then
+		if SGroup_Count(sg_siege_gaurds) == 0 then
+			Objective_Complete(OBJ_CaptureSiegeWorkshop, true, false)
+			Rule_RemoveMe()
+		end
+	end
+end
+
+-- Complete when any player unit enters the siege workshop (co-op compatible)
+function CaptureSiege_OnProximity()
+	if Objective_IsComplete(OBJ_CaptureSiegeWorkshop) == false then
+		Objective_Complete(OBJ_CaptureSiegeWorkshop, true, false)
+		Rule_RemoveMe()
+	end
+end
+
+-- Changes ownership after capture
+function DestroySiege_Delay()
+	EGroup_SetPlayerOwner(eg_siege_targets2,player2)
+end 
+
+-------------------------------------------
+--Objective Destroy Keep / parent:SeizeCity
+-------------------------------------------
+function DestroyKeep_InitObjectives()
+	
+	OBJ_DestroyKeep = {
+		
+		Title = "$11172043" ,  -- "Destroy the keep"
+		Type = ObjectiveType_Battle, 
+		SetupUI = DestroyKeep_UI, -- seting up how objective is presented
+		OnStart = DestroyKeep_Start, --when objective start call function
+		OnComplete = DestroyKeep_OnComplete, -- when objective completes, call function
+		Parent = OBJ_SeizeCity,
+	}
+	
+	
+	Objective_Register(OBJ_DestroyKeep)
+	
+end
+
+function DestroyKeep_UI()
+	
+	--count the number of buildings and put into a variable (set in main scar file)
+	i_destroyedKeep = EGroup_CountSpawned(eg_keep_targets)
+	
+	--Set the counter in the UI
+	Objective_SetCounter(OBJ_DestroyKeep, 0, i_destroyedKeep)	
+	
+end
+
+function DestroyKeep_Start()
+	
+	--start a rule that will check when an entity is destroyed
+	Rule_AddEGroupEvent(DestroyKeep_OnEntityKilled, eg_keep_targets, GE_EntityKilled)
+	-- 3D world arrow + minimap ping on keep location
+	Objective_AddUIElements(OBJ_DestroyKeep, mkr_city_keep, true, nil, true, 0)
+	
+end
+
+function DestroyKeep_OnEntityKilled(context)
+	
+	if context.victimOwner == player3 then
+		
+		if Objective_IsComplete(OBJ_DestroyKeep) == false then
+			if Objective_IsCounterSet(OBJ_DestroyKeep) then
+				Objective_IncreaseCounter(OBJ_DestroyKeep)
+
+				if Obj_GetCounterCount(OBJ_DestroyKeep.ID) == Obj_GetCounterMax(OBJ_DestroyKeep.ID) then 
+					Objective_Complete(OBJ_DestroyKeep, true, false) 
+					Rule_RemoveMe()
+				end
+			end
+		else
+			Rule_RemoveMe()
+		end
+		
+	end	
+	
+end
+-- Finish mission
+function DestroyKeep_OnComplete()
+	
+	-- Mission_Complete() 
+	World_KillPlayer(player3, KPR_Lost)
+	Core_SetPlayerDefeated(player3, Elimination_LoserPresentation, WR_ELIMINATION)
+	Core_SetPlayerVictorious(player1, Elimination_WinnerPresentation, WR_ELIMINATION)	
+	Core_SetPlayerVictorious(player2, Elimination_WinnerPresentation, WR_ELIMINATION)	
+	Elimination_CheckVictory()
+	
+end
+
+-------------------------------------------
+-- Functions 
+-------------------------------------------
+
+-- Begin building up main counter offensive
+function Main_Waves()
+	-- 05 min
+	Rule_AddOneShot(Units_Deploy, 300, { player = player3, sgroup = sg_wave0a_city01a, unit_type = Unit_Types.wave_city_10m, spawn_loc = mkr_city_reinforcements, path = city })
+	if DC.waves_5min_flank then
+	Rule_AddOneShot(Units_Deploy, 300, { player = player3, sgroup = sg_wave0a_city01b, unit_type = Unit_Types.wave_city_10m, spawn_loc = mkr_city_reinforcements, path = city_flank })
+	end -- DC.waves_5min_flank
+	-- 10 min
+	Rule_AddInterval(Units_Deploy, 610, { player = player3, sgroup = sg_wave0a_city01c, unit_type = Unit_Types.wave_city_10m, spawn_loc = mkr_city_reinforcements, path = city_mid })
+	Rule_AddInterval(Units_Deploy, 600, { player = player3, sgroup = sg_wave0a_city01d, unit_type = Unit_Types.wave_city_10m_flank, spawn_loc = mkr_city_reinforcements, path = city_flank })
+	-- ~15 min
+	Rule_AddInterval(Units_Deploy, 930, { player = player3, sgroup = sg_wave0a_city02, unit_type = Unit_Types.wave_city_15m, spawn_loc = mkr_city_reinforcements, path = city })
+	-- ~20 min
+	Rule_AddInterval(Units_Deploy, 1100, { player = player3, sgroup = sg_wave0a_city03, unit_type = Unit_Types.wave_city_20m, spawn_loc = mkr_city_reinforcements, path = city })
+	-- 25 min
+	Rule_AddInterval(Units_Deploy, 1500, { player = player3, sgroup = sg_wave0a_city04, unit_type = Unit_Types.wave_city_25m, spawn_loc = mkr_city_reinforcements, path = city })
+	-- 30 min / Obj Timer 50%
+	Rule_AddOneShot(Units_Deploy, 1800, { player = player3, sgroup = sg_wave0a_city05, unit_type = Unit_Types.wave_city_30m, spawn_loc = mkr_city_reinforcements, path = city })
+	if DC.waves_late_extra then
+	-- 40 min
+	Rule_AddOneShot(Units_Deploy, 2400, { player = player3, sgroup = sg_wave0a_city06, unit_type = Unit_Types.wave_city_40m, spawn_loc = mkr_city_reinforcements, path = city })
+	-- 45 min
+	Rule_AddOneShot(Units_Deploy, 2700, { player = player3, sgroup = sg_wave0a_city07, unit_type = Unit_Types.wave_city_45m, spawn_loc = mkr_city_reinforcements, path = city_flank })
+	end -- DC.waves_late_extra
+	if DC.waves_hardest_extra then
+		-- 3 min
+		Rule_AddOneShot(Units_Deploy, 180, { player = player3, sgroup = sg_wave0a_city08, unit_type = Unit_Types.wave_city_10m_flank, spawn_loc = mkr_start_spawn_enemey01, path = city_flank })
+		-- 15 min, -30s / Duplicate
+		Rule_AddOneShot(Units_Deploy, 870, { player = player3, sgroup = sg_wave0a_city02, unit_type = Unit_Types.wave_city_15m, spawn_loc = mkr_city_reinforcements, path = city_flank })
+		-- 30 min / 20 Duplicate, city_flank
+		Rule_AddOneShot(Units_Deploy, 1800, { player = player3, sgroup = sg_wave0a_city03, unit_type = Unit_Types.wave_city_20m, spawn_loc = mkr_city_reinforcements, path = city_flank })
+		-- 35 min / 40 > 35
+		Rule_AddOneShot(Units_Deploy, 2100, { player = player3, sgroup = sg_wave0a_city06, unit_type = Unit_Types.wave_city_40m, spawn_loc = mkr_city_reinforcements, path = city })
+		-- 40 min / 45 > 40
+		Rule_AddOneShot(Units_Deploy, 2400, { player = player3, sgroup = sg_wave0a_city07, unit_type = Unit_Types.wave_city_45m, spawn_loc = mkr_city_reinforcements, path = city_flank })
+		
+	end -- DC.waves_hardest_extra
+	
+end
+-- Setup next phase of scenario
+function CaptureMine_Reinforcements()
+	
+	-- Spawn Player 1 reinforcements / Villagers, melee (DLC-safe)
+	Deploy_MiningReward_CivAware(player1, Player_GetRaceName(player1), sg_player1_town, "melee", tc_spawn)
+	-- Only military units attack-move to mining camp; villagers stay at tc_spawn
+	local sg_p1_military = SGroup_CreateIfNotFound("sg_p1_town_military")
+	SGroup_AddGroup(sg_p1_military, sg_player1_town)
+	SGroup_Filter(sg_p1_military, "military", FILTER_KEEP)
+	Cmd_FormationAttackMove(sg_p1_military, mkr_start_mining1)
+	
+	-- Spawn Player 2 reinforcements / Villagers, ranged (DLC-safe)
+	Deploy_MiningReward_CivAware(player2, Player_GetRaceName(player2), sg_player2_town, "ranged", tc_spawn)
+	-- Only military units attack-move to mining camp; villagers stay at tc_spawn
+	local sg_p2_military = SGroup_CreateIfNotFound("sg_p2_town_military")
+	SGroup_AddGroup(sg_p2_military, sg_player2_town)
+	SGroup_Filter(sg_p2_military, "military", FILTER_KEEP)
+	Cmd_FormationAttackMove(sg_p2_military, mkr_start_mining2)
+	SendReinforceNotification(tc_spawn, "$42813") -- "Reinforcements have arrived"
+	
+
+	-- Difficulty: Select player resources (via DC config)
+	-- Player 1: Add Resources
+	Player_AddResource(player1, RT_Food, DC.starting_food)
+	Player_AddResource(player1, RT_Gold, DC.starting_gold)
+	Player_AddResource(player1, RT_Wood, DC.starting_wood)
+	-- Player 2: Add Resources
+	Player_AddResource(player2, RT_Food, DC.starting_food)
+	Player_AddResource(player2, RT_Gold, DC.starting_gold)
+	Player_AddResource(player2, RT_Wood, DC.starting_wood)
+	
+	-- Add upgrades to AI
+	if DC.ai_capture_spearman_upgrade then
+		Player_CompleteUpgrade(player3, UPG.COMMON.UPGRADE_UNIT_SPEARMAN_2) -- Spearman upgrade after taking Mining Camp
+	end 
+	
+	-- Enable marker proximity check, prevents players bypassing Checkpoint objective
+	Rule_EnterProximity(DestroyCheckpoint_OnProximity, ANY, sg_player_team, mkr_village_patrol1, 45, false, {})
+	
+	-- Enable wave attacks
+	Main_Waves() -- Coop_2_Arabia_data.scar
+	Rule_AddInterval (CaptureMine_Waves, 90) 
+	
+end	
+-- Light attack waves start at the City Gates 
+function CaptureMine_Waves() -- Seperated from Units_Deploy because it will be removed at checkpoint
+	-- Deploy units
+	UnitEntry_DeploySquads(player3, sg_wave1_mining01, Unit_Types.wave_light, mkr_start_spawn_enemey01)
+	Cmd_FormationAttackMove(sg_wave1_mining01, mkr_start_mining2)
+	Cmd_FormationAttackMove(sg_wave1_mining01, mkr_start_patrol1, true)
+	Cmd_FormationAttackMove(sg_wave1_mining01, mkr_player2_spawn01, true)
+	Cmd_FormationAttackMove(sg_wave1_mining01, mkr_start_patrol2, true)
+end
+-- Setup new patrols / units for Village area
+function DestroyCheckpoint_Spawner()
+	-- Spawn Siege Workshop guards
+	UnitEntry_DeploySquads(player3, sg_siege_gaurds, Unit_Types.units_cityguards, mkr_village_siege)
+	count_siege_gaurds = SGroup_Count(sg_siege_gaurds)
+	-- Spawn Blockade #1
+	UnitEntry_DeploySquads(player3, sg_village_blockade01, Unit_Types.units_ranged, mkr_village_spawn) -- #1
+	Cmd_FormationMove(sg_village_blockade01, mkr_village_blockade1a, false, false, mkr_village_blockade1c)
+	UnitEntry_DeploySquads(player3, sg_village_blockade02, Unit_Types.units_ranged, mkr_village_spawn) -- #2
+	Cmd_FormationMove(sg_village_blockade02, mkr_village_blockade1b, false, false, mkr_village_blockade1c)
+	if DC.checkpoint_blockade_melee then
+		UnitEntry_DeploySquads(player3, sg_village_blockade03, Unit_Types.units_cityguards_final, mkr_village_spawn) -- #3
+		Cmd_FormationMove(sg_village_blockade03, mkr_village_blockade1c, false, false, mkr_village_blockade1c)
+	end -- DC.checkpoint_blockade_melee
+	-- City last line of Defence 
+	UnitEntry_DeploySquads(player3, sg_village_blockade04, Unit_Types.units_ranged, mkr_city_keep) -- Keep #1
+	Cmd_FormationMove(sg_village_blockade04, mkr_city_position01, false, false, mkr_city_reinforcements)
+	UnitEntry_DeploySquads(player3, sg_village_blockade05, Unit_Types.units_ranged_final, mkr_city_keep) -- #1
+	Cmd_FormationMove(sg_village_blockade05, mkr_village_blockade2a, false, false, mkr_village_blockade1b)
+	UnitEntry_DeploySquads(player3, sg_village_blockade06, Unit_Types.units_ranged_final, mkr_city_keep) -- #2
+	Cmd_FormationMove(sg_village_blockade06, mkr_village_blockade2b, false, false, mkr_village_blockade1b)
+	UnitEntry_DeploySquads(player3, sg_village_blockade07, Unit_Types.units_cityguards_final, mkr_city_keep) -- #3
+	Cmd_FormationMove(sg_village_blockade07, mkr_village_patrol2, false, false, mkr_village_blockade1b)
+	UnitEntry_DeploySquads(player3, sg_village_blockade08, Unit_Types.units_cityguards_final, mkr_city_keep) -- Keep #2
+	Cmd_FormationMove(sg_village_blockade08, mkr_city_keep, false, false, mkr_city_reinforcements)
+	UnitEntry_DeploySquads(player3, sg_village_blockade09, Unit_Types.units_ranged, mkr_city_keep) -- #4
+	Cmd_FormationMove(sg_village_blockade09, mkr_village_blockade2d, false, false, mkr_village_blockade1b)
+	if DC.city_guard_strength == "easy" then
+		-- Spawn patrol #1
+		UnitEntry_DeploySquads(player3, sg_village_patrol01, Unit_Types.units_cityguards, mkr_city_reinforcements)
+		-- Spawn patrol #2
+		UnitEntry_DeploySquads(player3, sg_village_patrol02, Unit_Types.units_cityguards, mkr_village_spawn)
+		-- Spawn patrol #3
+		UnitEntry_DeploySquads(player3, sg_village_patrol03, Unit_Types.units_cityguards, mkr_village_spawn)
+	else
+		-- Spawn patrol #1
+		UnitEntry_DeploySquads(player3, sg_village_patrol01, Unit_Types.units_cityguards_hard, mkr_city_reinforcements)
+		-- Spawn patrol #2
+		UnitEntry_DeploySquads(player3, sg_village_patrol02, Unit_Types.units_cityguards_hard, mkr_village_spawn)
+		-- Spawn patrol #3
+		UnitEntry_DeploySquads(player3, sg_village_patrol03, Unit_Types.units_cityguards_hard, mkr_village_spawn)
+	end -- DC.city_guard_strength
+	Rule_AddInterval(Patrol_Cycle, 120, { sgroup = sg_village_patrol01, spawn_loc = mkr_village_patrol1, dest_loc = mkr_village_patrol2, sgroup_all = sg_village_patrol, count = count_village_patrol }) -- Count check only required once
+	Rule_AddInterval(Patrol_Cycle, 180, { sgroup = sg_village_patrol02, spawn_loc = mkr_village_patrol1, dest_loc = mkr_village_siege })
+	Rule_AddInterval(Patrol_Cycle, 90, { sgroup = sg_village_patrol03, spawn_loc = mkr_village_siege, dest_loc = mkr_village_patrol2 })
+	-- Spawn player's siege Reinforcements
+	if DC.siege_reinforcements then
+		Reinforcements_Siege() 
+	end -- DC.siege_reinforcements
+	
+end
+-- Setup AI upgrades for next phase
+function DestroyCheckpoint_Upgrades()
+	Player_CompleteUpgrade(player3, UPG.COMMON.UPGRADE_MELEE_ARMOR_III)
+	Player_CompleteUpgrade(player3, UPG.COMMON.UPGRADE_MELEE_DAMAGE_III)
+	Player_CompleteUpgrade(player3, UPG.COMMON.UPGRADE_RANGED_DAMAGE_III)
+	Player_CompleteUpgrade(player3, UPG.COMMON.UPGRADE_RANGED_ARMOR_III)
+	if DC.checkpoint_upgrades_extra then
+		Player_CompleteUpgrade(player3, UPG.COMMON.UPGRADE_UNIT_SPEARMAN_4)
+		Player_CompleteUpgrade(player3, UPG.COMMON.UPGRADE_UNIT_ARCHER_3)
+		Player_CompleteUpgrade(player3, UPG.COMMON.UPGRADE_UNIT_HORSEMAN_3)
+		Player_CompleteUpgrade(player3, UPG.COMMON.UPGRADE_TECH_UNIVERSITY_MURDER_HOLES_4)
+	end -- DC.checkpoint_upgrades_extra
+end
+-- Setup new Attack waves
+function DestroyCheckpoint_Waves()
+	Rule_AddOneShot(Units_Deploy, 1, { player = player3, sgroup = sg_wave2_city01, unit_type = Unit_Types.wave_checkpoint, spawn_loc = mkr_city_reinforcements, path = city })
+	-- Spawn delayed waves, deselect siege group when 'Siege Camp' is destroyed/captured
+	if Objective_IsComplete(OBJ_CaptureSiegeWorkshop) == true or Objective_IsFailed(OBJ_CaptureSiegeWorkshop) == true then
+		Rule_AddOneShot(Units_Deploy, 300, { player = player3, sgroup = sg_wave2_city02, unit_type = Unit_Types.wave_no_siege, spawn_loc = mkr_city_reinforcements, path = city_mid })
+	elseif Objective_IsComplete(OBJ_CaptureSiegeWorkshop) == false then
+		Rule_AddOneShot(Units_Deploy, 360, { player = player3, sgroup = sg_wave2_city02, unit_type = Unit_Types.wave_siege, spawn_loc = mkr_city_reinforcements, path = city_mid })
+	end
+	
+end
+
+

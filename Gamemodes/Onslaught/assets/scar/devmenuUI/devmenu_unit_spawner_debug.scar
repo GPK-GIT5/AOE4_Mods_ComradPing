@@ -1,0 +1,958 @@
+-----------------------------------------------------------------------
+-- DevMenu Debugger — Unit Spawner Debug Runner
+--
+-- Iterates every entry in _devmenu_unit_spawner_dispatch, attempts to
+-- spawn each SBP via pcall, and logs pass/fail lines to ScarLog with
+-- the prefix [SPAWNER-DEBUG].
+--
+-- Usage
+-- -----
+--   Via DevMenu → Devmenu Debugger → "Dump Table"  (prints dispatch table with types)
+--   Via DevMenu → Devmenu Debugger → "Run Debug"   (runs all SBP tests)
+--   Or directly from the SCAR console:
+--       DevMenu_UnitSpawner_Dump()
+--       DevMenu_UnitSpawner_RunDebug()
+--
+-- Architecture
+-- ------------
+--   Tests run one per Rule_AddInterval tick (0.1 s) so the sim is not
+--   flooded with hundreds of spawns in a single tick. A summary line is
+--   printed once all entries are processed.
+--   Naval units (unit_type == "naval") are SKIPPED on land maps — they
+--   have valid BPs but cannot spawn on a land surface. These are counted
+--   separately as skip_naval so they don't inflate the fail count.
+--
+-- Output format
+-- -------------
+--   [SPAWNER-DEBUG] === STARTING: testing N SBPs (spawn-and-kill verification) ===
+--   [SPAWNER-DEBUG] OK   idx=1 sbp="unit_spearman_1_eng"
+--   [SPAWNER-DEBUG] SKIP idx=x sbp="..." (naval — skipped on land map)
+--   [SPAWNER-DEBUG] FAIL idx=x sbp="..." err="BP_RESOLVE_FAILED"  (SBP name wrong or not in attrib)
+--   [SPAWNER-DEBUG] FAIL idx=x sbp="..." err="NO_ENTITY_BP"
+--   [SPAWNER-DEBUG] FAIL idx=x sbp="..." err="POP_CAP_FULL (cur=N cost=N max=N)"
+--   [SPAWNER-DEBUG] FAIL idx=x sbp="..." err="SPAWN_RETURNED_NIL"
+--   [SPAWNER-DEBUG] === COMPLETE: pass=N skip_naval=N fail_catalog=N fail_spawn=N total=N ===
+--   [SPAWNER-DEBUG] [CATALOG] FAIL idx=... (BP_RESOLVE_FAILED = catalog error, fix SBP name)
+--   [SPAWNER-DEBUG] [SPAWN]   FAIL idx=... (spawn threw/returned nil = runtime error)
+--
+-- BP_RESOLVE_FAILED means the SBP name does not resolve to any blueprint handle.
+-- This is a catalog error: verify the attrib token against game_data/extracted/aoe4/data/units/.
+-----------------------------------------------------------------------
+
+-- Internal state for the rule-driven test loop.
+local _spawner_debug_queue   = nil
+local _spawner_debug_results = nil
+local _spawner_debug_running = false
+
+-- ---------------------------------------------------------------
+-- DevMenu_UnitSpawner_Dump
+-- Prints the full dispatch table to ScarLog. No spawning.
+-- ---------------------------------------------------------------
+-- DevMenu_UnitSpawner_ValidateAgeSelectors
+-- Validates every tier-group entry in the dispatch table:
+--   1. All tier SBPs resolve to a BP handle (BP_RESOLVE check).
+--   2. TierSel globals (DevMenu_UnitSpawner_TierSel_<idx>_<t>)
+--      are registered and callable.
+--   3. DC binding keys (tact_<idx>_<t>, label_<idx>, state_<idx>)
+--      exist in the live spawner data-context.
+--   4. Fires each TierSel closure and confirms dispatch slot + DC
+--      state key update to the expected age label.
+--
+-- Output prefix: [SPAWNER-AGE-VALIDATE]
+--   PASS  idx=x  tiers=N  sbp=...  (all tiers resolve, globals wired, DC coherent)
+--   WARN  idx=x  missing_meta=true (BP resolves but state_/label_ DC keys absent)
+--   FAIL  idx=x  reason=...        (tier BP missing, global absent, DC not updated)
+--
+-- Call from SCAR console: DevMenu_UnitSpawner_ValidateAgeSelectors()
+-- ---------------------------------------------------------------
+function DevMenu_UnitSpawner_ValidateAgeSelectors()
+	if type(_devmenu_unit_spawner_dispatch) ~= "table" then
+		print("[SPAWNER-AGE-VALIDATE] dispatch table nil — run DevMenu_UnitSpawner_Init() first")
+		return
+	end
+
+	-- Walk dispatch indices; detect tier groups by checking for TierSel_<idx>_1.
+	local indices = {}
+	for idx in pairs(_devmenu_unit_spawner_dispatch) do
+		table.insert(indices, idx)
+	end
+	table.sort(indices)
+
+	local pass = 0; local warn = 0; local fail = 0; local groups = 0
+
+	for _, idx in ipairs(indices) do
+		-- Only process tier-group entries (have TierSel_<idx>_1 registered).
+		local fn1 = "DevMenu_UnitSpawner_TierSel_" .. idx .. "_1"
+		if type(_G[fn1]) ~= "function" then goto continue end
+
+		groups = groups + 1
+
+		-- Determine tier count: walk until TierSel_<idx>_t is absent.
+		local n_tiers = 0
+		for t = 1, 8 do
+			if type(_G["DevMenu_UnitSpawner_TierSel_" .. idx .. "_" .. t]) == "function" then
+				n_tiers = t
+			else break end
+		end
+
+		-- Collect tier SBPs from dispatch at fire time (TierSel updates dispatch).
+		-- Save the original SBP so we can restore after the probe.
+		local orig_sbp  = _devmenu_unit_spawner_dispatch[idx]
+		local orig_name = _devmenu_unit_spawner_dispatch_name
+			and _devmenu_unit_spawner_dispatch_name[idx]
+
+		local dc = _devmenu and _devmenu.dev_submenu_data_contexts
+			and _devmenu.dev_submenu_data_contexts["unit_spawner"]
+
+		-- Snapshot all plain state_N keys so we can detect which one changed after
+		-- each TierSel fire (dc_idx_ref.val is the entry-list position, not idx).
+		local function _snap_states()
+			local snap = {}
+			if dc then
+				for k, v in pairs(dc) do
+					if k:match("^state_%d+$") then snap[k] = v end
+				end
+			end
+			return snap
+		end
+
+		local entry_pass = true
+		local entry_warn = false
+		local entry_reasons = {}
+
+		for t = 1, n_tiers do
+			local fn = "DevMenu_UnitSpawner_TierSel_" .. idx .. "_" .. t
+			if type(_G[fn]) ~= "function" then
+				table.insert(entry_reasons, "missing_global_t" .. t)
+				entry_pass = false
+			else
+				local before = _snap_states()
+				-- Fire the TierSel closure to update dispatch + DC.
+				local ok_fire, fire_err = pcall(_G[fn])
+				if not ok_fire then
+					table.insert(entry_reasons, "fire_error_t" .. t .. ":" .. tostring(fire_err))
+					entry_pass = false
+				else
+					-- Verify dispatch slot updated to a non-empty string.
+					local cur_sbp = _devmenu_unit_spawner_dispatch[idx]
+					if type(cur_sbp) ~= "string" or cur_sbp == "" then
+						table.insert(entry_reasons, "dispatch_empty_after_t" .. t)
+						entry_pass = false
+					end
+					-- Verify BP resolves (catalog check).
+					if type(BP_GetSquadBlueprint) == "function" and cur_sbp ~= nil then
+						local ok_bp, _ = pcall(BP_GetSquadBlueprint, cur_sbp)
+						if not ok_bp then
+							table.insert(entry_reasons, "BP_RESOLVE_FAILED_t" .. t .. ":" .. tostring(cur_sbp))
+							entry_pass = false
+						end
+					end
+					-- Verify a state_N key was written (green label row).
+					-- Use snapshot diff to find the changed key regardless of dc_idx_ref value.
+					if dc ~= nil then
+						local state_written = false
+						for k, v in pairs(dc) do
+							if k:match("^state_%d+$") and before[k] ~= v then
+								state_written = true
+								break
+							end
+						end
+						if not state_written then
+							table.insert(entry_reasons, "dc_state_absent_t" .. t)
+							entry_warn = true
+						end
+					end
+				end
+			end
+		end
+
+		-- Restore original dispatch slot so the spawner is unchanged after probe.
+		_devmenu_unit_spawner_dispatch[idx] = orig_sbp
+		if _devmenu_unit_spawner_dispatch_name then
+			_devmenu_unit_spawner_dispatch_name[idx] = orig_name
+		end
+
+		local base_sbp = _devmenu_unit_spawner_dispatch[idx] or "?"
+		if entry_pass and not entry_warn then
+			print(string.format("[SPAWNER-AGE-VALIDATE] PASS  idx=%-4d tiers=%d  sbp=%s",
+				idx, n_tiers, tostring(base_sbp)))
+			pass = pass + 1
+		elseif entry_pass and entry_warn then
+			print(string.format("[SPAWNER-AGE-VALIDATE] WARN  idx=%-4d tiers=%d  sbp=%s  (%s)",
+				idx, n_tiers, tostring(base_sbp), table.concat(entry_reasons, ", ")))
+			warn = warn + 1
+		else
+			print(string.format("[SPAWNER-AGE-VALIDATE] FAIL  idx=%-4d tiers=%d  sbp=%s  reason=%s",
+				idx, n_tiers, tostring(base_sbp), table.concat(entry_reasons, ", ")))
+			fail = fail + 1
+		end
+
+		::continue::
+	end
+
+	print(string.format("[SPAWNER-AGE-VALIDATE] === COMPLETE: groups=%d  pass=%d  warn=%d  fail=%d ===",
+		groups, pass, warn, fail))
+end
+
+-- ---------------------------------------------------------------
+-- DevMenu_UnitSpawner_FullDiag
+-- Comprehensive 4-phase validator for the Unit Spawner Menu.
+--
+-- Phase 1 — Structure
+--   • Dispatch table, dispatch_name/type tables non-nil/non-empty.
+--   • DevMenu_UnitSpawner_Click_<N> globals wired for every dispatch slot.
+--   • DevMenu_UnitSpawner_TierSel_<N>_1 globals wired for tier groups.
+--
+-- Phase 2 — DC binding completeness  (requires open submenu panel)
+--   • Every entry-list position (vis_N key in DC) has all flat keys:
+--     cmd_, icon_, label_, desc_, hint_, state_, vis_.
+--   • At least one tvis_N=true, tact_, tlbl_, tcmd_ key present when
+--     tier groups exist.
+--   • Every tlbl_ label is non-empty and non-"?" (roman numeral check).
+--   • Every tact_ value is "" or "active" (no stale/invalid values).
+--
+-- Phase 3 — Tier selector behavioral  (requires open submenu panel)
+--   For every tier group, fires each TierSel_<N>_<T> closure and
+--   verifies via before/after DC snapshot:
+--   • dispatch[idx] updated to a non-empty SBP string.
+--   • Exactly one card's state_ key changed (card ownership: cross-card
+--     contamination from the dc_idx_ref bug is detected here).
+--   • The state_ value contains "AGE ".
+--   • All tact_ changes belong to the same card (no cross-card tact write).
+--   • Exactly 1 tact_ change is "active"; prior active clears to "".
+--   • state_ card position and tact_ card position agree.
+--   • Card position (di) is consistent across all tiers of the same group.
+--   Dispatch and DC are restored to tier-1 state after each group.
+--
+-- Phase 4 — BP resolve  (always runs)
+--   • BP_GetSquadBlueprint resolves for every SBP in the dispatch table
+--     (flat entries) and for every tier SBP discovered via TierSel probes
+--     (tier groups). SBPs are deduplicated before checking.
+--
+-- Output prefix: [SPAWNER-FULL-DIAG]
+--   PASS / FAIL / WARN per phase + individual check lines.
+--   === COMPLETE: p1_ok=... p2_fail=N p3_fail=N p4_fail=N overall=PASS/FAIL ===
+--
+-- Call: DevMenu_UnitSpawner_FullDiag()
+-- ---------------------------------------------------------------
+function DevMenu_UnitSpawner_FullDiag()
+	local P, F, W = "PASS", "FAIL", "WARN"
+	local function _log(level, phase, msg)
+		print(string.format("[SPAWNER-FULL-DIAG] %-4s  p%d  %s", level, phase, msg))
+	end
+	local function _logr(msg)
+		print("[SPAWNER-FULL-DIAG] " .. msg)
+	end
+
+	_logr("=== STARTING: Unit Spawner Full Diagnostic ===")
+	local p1_ok = true
+	local p2_fail, p3_fail, p4_fail = 0, 0, 0
+
+	-- ---- Phase 1: Structure ----
+	_logr("--- Phase 1: Structure ---")
+
+	if type(_devmenu_unit_spawner_dispatch) ~= "table" then
+		_logr("FAIL  p1  dispatch table nil — run DevMenu_UnitSpawner_Init() first")
+		_logr("=== ABORTED ===")
+		return
+	end
+	if type(_devmenu_unit_spawner_dispatch_name) ~= "table" then
+		_log(F, 1, "dispatch_name table nil")
+		p1_ok = false
+	end
+	if type(_devmenu_unit_spawner_dispatch_type) ~= "table" then
+		_log(F, 1, "dispatch_type table nil")
+		p1_ok = false
+	end
+
+	-- Sorted list of all dispatch indices.
+	local dispatch_indices = {}
+	for idx in pairs(_devmenu_unit_spawner_dispatch) do
+		table.insert(dispatch_indices, idx)
+	end
+	table.sort(dispatch_indices)
+	local n_dispatch = #dispatch_indices
+
+	if n_dispatch == 0 then
+		_logr("FAIL  p1  dispatch table empty — run DevMenu_UnitSpawner_BuildCategory()")
+		_logr("=== ABORTED ===")
+		return
+	end
+
+	-- 1.1 Click_ globals.
+	local missing_click = 0
+	for _, idx in ipairs(dispatch_indices) do
+		if type(_G["DevMenu_UnitSpawner_Click_" .. idx]) ~= "function" then
+			_log(F, 1, "missing_Click_" .. idx)
+			p1_ok = false
+			missing_click = missing_click + 1
+			if missing_click >= 5 then
+				_log(F, 1, "... (further missing Click_ entries suppressed)")
+				break
+			end
+		end
+	end
+
+	-- 1.2 Tier groups: collect dispatch indices with TierSel_N_1.
+	local tier_groups = {}
+	for _, idx in ipairs(dispatch_indices) do
+		local n_tiers = 0
+		for t = 1, 8 do
+			if type(_G["DevMenu_UnitSpawner_TierSel_" .. idx .. "_" .. t]) == "function" then
+				n_tiers = t
+			else break end
+		end
+		if n_tiers >= 2 then
+			table.insert(tier_groups, { idx = idx, n_tiers = n_tiers })
+		end
+	end
+
+	local logp1 = string.format("%s  p1  dispatch=%d  tier_groups=%d  flat=%d  missing_click=%d",
+		(p1_ok and missing_click == 0) and P or F,
+		n_dispatch, #tier_groups, n_dispatch - #tier_groups, missing_click)
+	_logr(logp1)
+
+	-- ---- Acquire DC (needed for Phases 2 + 3) ----
+	local dc = _devmenu and _devmenu.dev_submenu_data_contexts
+		and _devmenu.dev_submenu_data_contexts["unit_spawner"]
+	local skip_dc = (dc == nil)
+	if skip_dc then
+		_logr("WARN  p2+p3  DC nil — open Unit Spawner submenu first (Phases 2+3 skipped)")
+	end
+
+	-- ---- Phase 2: DC binding completeness ----
+	if not skip_dc then
+		_logr("--- Phase 2: DC bindings ---")
+
+		-- Discover all entry-list positions present in DC via plain vis_N keys.
+		local dc_positions = {}
+		for k in pairs(dc) do
+			local n = k:match("^vis_(%d+)$")
+			if n then dc_positions[#dc_positions + 1] = tonumber(n) end
+		end
+		table.sort(dc_positions)
+
+		-- 2a. Per-position flat key check.
+		local flat_pfx = { "cmd_", "label_", "desc_", "hint_", "state_", "icon_", "vis_" }
+		local missing_flat = 0
+		for _, pos in ipairs(dc_positions) do
+			local ps = tostring(pos)
+			for _, pfx in ipairs(flat_pfx) do
+				if dc[pfx .. ps] == nil then
+					_log(F, 2, "missing_flat_key  dc_pos=" .. ps .. "  key=" .. pfx .. ps)
+					p2_fail = p2_fail + 1
+					missing_flat = missing_flat + 1
+				end
+			end
+		end
+
+		-- 2b. Tier aggregate checks (only when tier groups exist).
+		local tact_invalid, tlbl_empty = 0, 0
+		local has_tvis, has_tact, has_tlbl, has_tcmd = false, false, false, false
+		for k, v in pairs(dc) do
+			if k:match("^tvis_%d+$")    and v == true  then has_tvis = true end
+			if k:match("^tact_%d+_%d+$")               then has_tact = true end
+			if k:match("^tlbl_%d+_%d+$")               then has_tlbl = true end
+			if k:match("^tcmd_%d+_%d+$")               then has_tcmd = true end
+			-- tact_ values must be "active" or "" only.
+			if k:match("^tact_%d+_%d+$") and v ~= "" and v ~= "active" then
+				_log(W, 2, "tact_invalid_value  key=" .. k .. "  val=" .. tostring(v))
+				tact_invalid = tact_invalid + 1
+			end
+			-- tlbl_ labels must be non-empty and not "?" (means _SBP_TIER_ROMAN lookup failed).
+			if k:match("^tlbl_%d+_%d+$") and (v == nil or v == "" or v == "?") then
+				_log(F, 2, "tlbl_empty_or_unknown  key=" .. k .. "  val=" .. tostring(v))
+				p2_fail = p2_fail + 1
+				tlbl_empty = tlbl_empty + 1
+			end
+		end
+
+		if #tier_groups > 0 then
+			if #dc_positions == 0 then
+				-- Submenu was never opened this session — tier DC keys haven't been seeded yet.
+				-- Treat as a warning (not a failure) so repeated runs before opening the panel
+				-- don't inflate the failure count.
+				_log(W, 2, "dc_positions=0 — open Unit Spawner submenu first; tier-key checks skipped")
+			else
+				if not has_tvis then
+					_log(F, 2, "no_tvis_true  (expected tvis_N=true for at least one tier group)")
+					p2_fail = p2_fail + 1
+				end
+				if not has_tact then
+					_log(F, 2, "no_tact_keys  (expected tact_N_T age-tab active state keys)")
+					p2_fail = p2_fail + 1
+				end
+				if not has_tlbl then
+					_log(F, 2, "no_tlbl_keys  (expected tlbl_N_T age-tab label keys)")
+					p2_fail = p2_fail + 1
+				end
+				if not has_tcmd then
+					_log(F, 2, "no_tcmd_keys  (expected tcmd_N_T age-tab command keys)")
+					p2_fail = p2_fail + 1
+				end
+			end
+		end
+
+		local p2_lv = (p2_fail > 0) and F or (tact_invalid > 0 and W or P)
+		_logr(string.format("%s  p2  dc_positions=%d  missing_flat=%d  tact_invalid=%d  tlbl_empty=%d  fail=%d",
+			p2_lv, #dc_positions, missing_flat, tact_invalid, tlbl_empty, p2_fail))
+	end
+
+	-- ---- Phase 3: Tier selector behavioral ----
+	if not skip_dc then
+		_logr("--- Phase 3: Selector behavior ---")
+		local grp_pass, grp_fail = 0, 0
+
+		for _, grp in ipairs(tier_groups) do
+			local idx     = grp.idx
+			local n_tiers = grp.n_tiers
+
+			-- Save original dispatch state so we can restore after probing.
+			local orig_sbp  = _devmenu_unit_spawner_dispatch[idx]
+			local orig_name = _devmenu_unit_spawner_dispatch_name
+				and _devmenu_unit_spawner_dispatch_name[idx]
+
+			-- Setup: fire the LAST tier so the initial tact_ state is "last active"
+			-- (not "tier 1 active").  This ensures TierSel_N_1 always produces a
+			-- measurable change, preventing false "no_tact_update" on the first tier.
+			local fn_setup = _G["DevMenu_UnitSpawner_TierSel_" .. idx .. "_" .. n_tiers]
+			if type(fn_setup) == "function" then pcall(fn_setup) end
+
+			local grp_ok  = true
+			local reasons = {}
+			local detected_di = nil   -- entry-list position discovered from state_ key change
+
+			-- Snapshot helper: shallow-copy all plain state_N and tact_N_T keys from DC.
+			local snap = {}
+			local function _snapshot()
+				for k, v in pairs(dc) do
+					if k:match("^state_%d+$") or k:match("^tact_%d+_%d+$") then
+						snap[k] = v
+					end
+				end
+			end
+
+			for t = 1, n_tiers do
+				local fn = _G["DevMenu_UnitSpawner_TierSel_" .. idx .. "_" .. t]
+				if type(fn) ~= "function" then
+					table.insert(reasons, "missing_global_t" .. t)
+					grp_ok = false
+				else
+					_snapshot()
+					local ok_fire, fire_err = pcall(fn)
+					if not ok_fire then
+						table.insert(reasons, "fire_error_t" .. t .. ": " .. tostring(fire_err))
+						grp_ok = false
+					else
+						-- 3a. Dispatch slot must be a non-empty string after fire.
+						local cur_sbp = _devmenu_unit_spawner_dispatch[idx]
+						if type(cur_sbp) ~= "string" or cur_sbp == "" then
+							table.insert(reasons, "dispatch_empty_t" .. t)
+							grp_ok = false
+						end
+
+						-- 3b. Detect changed state_ keys (plain ^state_%d+$ only).
+						local changed_states = {}
+						for k, v in pairs(dc) do
+							if k:match("^state_%d+$") and snap[k] ~= v then
+								table.insert(changed_states, { k = k, v = v })
+							end
+						end
+
+						if #changed_states == 0 then
+							table.insert(reasons, "no_state_update_t" .. t)
+							grp_ok = false
+						elseif #changed_states > 1 then
+							local ks = {}
+							for _, cs in ipairs(changed_states) do
+								table.insert(ks, cs.k)
+							end
+							table.insert(reasons, "multi_card_state_t" .. t
+								.. " keys=[" .. table.concat(ks, ",") .. "]")
+							grp_ok = false
+						else
+							-- 3c. Extract entry-list position (di) from the changed state_ key.
+							local di = tonumber(changed_states[1].k:match("^state_(%d+)$"))
+							local sv = changed_states[1].v
+
+							-- 3d. Card position must be stable across tiers of the same group.
+							if detected_di == nil then
+								detected_di = di
+							elseif detected_di ~= di then
+								table.insert(reasons, "card_drift_t" .. t
+									.. " expected=" .. tostring(detected_di)
+									.. " got=" .. tostring(di))
+								grp_ok = false
+							end
+
+							-- 3e. state_ value must contain "AGE ".
+							if type(sv) ~= "string" or not sv:find("AGE ", 1, true) then
+								table.insert(reasons, "state_no_age_t" .. t
+									.. " val=" .. tostring(sv))
+								grp_ok = false
+							end
+						end
+
+						-- 3f. Detect changed tact_ keys (plain ^tact_%d+_%d+$ only).
+						local changed_tacts = {}
+						for k, v in pairs(dc) do
+							if k:match("^tact_%d+_%d+$") and snap[k] ~= v then
+								table.insert(changed_tacts, { k = k, v = v })
+							end
+						end
+
+						if #changed_tacts == 0 then
+							table.insert(reasons, "no_tact_update_t" .. t)
+							grp_ok = false
+						else
+							-- 3g. Exactly 1 tact_ change must be "active".
+							local active_count = 0
+							local tact_di_set  = {}
+							for _, ct in ipairs(changed_tacts) do
+								if ct.v == "active" then active_count = active_count + 1 end
+								local tdi = tonumber(ct.k:match("^tact_(%d+)_%d+$"))
+								if tdi then tact_di_set[tdi] = true end
+							end
+
+							if active_count ~= 1 then
+								table.insert(reasons, "tact_active_count_t" .. t
+									.. " expected=1  got=" .. tostring(active_count))
+								grp_ok = false
+							end
+
+							-- 3h. All tact changes must belong to one card.
+							local tact_dis = {}
+							for tdi in pairs(tact_di_set) do table.insert(tact_dis, tdi) end
+							if #tact_dis > 1 then
+								table.insert(reasons, "tact_cross_card_t" .. t
+									.. " cards=[" .. table.concat(tact_dis, ",") .. "]")
+								grp_ok = false
+							end
+
+							-- 3i. tact card position must match state_ card position.
+							if detected_di ~= nil and #tact_dis == 1 and tact_dis[1] ~= detected_di then
+								table.insert(reasons, "di_mismatch_t" .. t
+									.. " state_di=" .. tostring(detected_di)
+									.. " tact_di=" .. tostring(tact_dis[1]))
+								grp_ok = false
+							end
+						end
+					end -- ok_fire
+				end -- fn is function
+			end -- for t
+
+			-- Restore dispatch to original SBP + re-fire tier 1 to restore DC state.
+			_devmenu_unit_spawner_dispatch[idx] = orig_sbp
+			if _devmenu_unit_spawner_dispatch_name then
+				_devmenu_unit_spawner_dispatch_name[idx] = orig_name
+			end
+			local fn1 = _G["DevMenu_UnitSpawner_TierSel_" .. idx .. "_1"]
+			if type(fn1) == "function" then pcall(fn1) end
+
+			if grp_ok then
+				grp_pass = grp_pass + 1
+			else
+				grp_fail = grp_fail + 1
+				p3_fail  = p3_fail + 1
+				_log(F, 3, string.format("idx=%-4d tiers=%d  di=%s  %s",
+					idx, n_tiers, tostring(detected_di),
+					table.concat(reasons, " | ")))
+			end
+		end -- for grp
+
+		local p3_lv = (p3_fail > 0) and F or P
+		_logr(string.format("%s  p3  groups=%d  pass=%d  fail=%d",
+			p3_lv, #tier_groups, grp_pass, grp_fail))
+	end
+
+	-- ---- Phase 4: BP resolve ----
+	_logr("--- Phase 4: BP resolve ---")
+
+	if type(BP_GetSquadBlueprint) ~= "function" then
+		_logr("WARN  p4  API:BP_GetSquadBlueprint missing — skipping")
+	else
+		-- Collect all unique SBPs: flat dispatch entries + all tier SBPs via TierSel probes.
+		local all_sbps = {}  -- { sbp, idx, tier }
+		local seen = {}
+
+		-- Flat entries (current dispatch slot = their only SBP).
+		for _, idx in ipairs(dispatch_indices) do
+			local sbp = _devmenu_unit_spawner_dispatch[idx]
+			if type(sbp) == "string" and sbp ~= "" and not seen[sbp] then
+				seen[sbp] = true
+				table.insert(all_sbps, { sbp = sbp, idx = idx, tier = nil })
+			end
+		end
+
+		-- Tier entries: collect all per-tier SBPs by probing.
+		for _, grp in ipairs(tier_groups) do
+			local idx = grp.idx
+			local orig = _devmenu_unit_spawner_dispatch[idx]
+			local orig_name = _devmenu_unit_spawner_dispatch_name
+				and _devmenu_unit_spawner_dispatch_name[idx]
+
+			for t = 1, grp.n_tiers do
+				local fn = _G["DevMenu_UnitSpawner_TierSel_" .. idx .. "_" .. t]
+				if type(fn) == "function" then
+					local ok, _ = pcall(fn)
+					if ok then
+						local ts = _devmenu_unit_spawner_dispatch[idx]
+						if type(ts) == "string" and ts ~= "" and not seen[ts] then
+							seen[ts] = true
+							table.insert(all_sbps, { sbp = ts, idx = idx, tier = t })
+						end
+					end
+				end
+			end
+
+			-- Restore.
+			_devmenu_unit_spawner_dispatch[idx] = orig
+			if _devmenu_unit_spawner_dispatch_name then
+				_devmenu_unit_spawner_dispatch_name[idx] = orig_name
+			end
+			local fn1 = _G["DevMenu_UnitSpawner_TierSel_" .. idx .. "_1"]
+			if type(fn1) == "function" then pcall(fn1) end
+		end
+
+		local bp_pass, bp_fail = 0, 0
+		for _, e in ipairs(all_sbps) do
+			-- Mirror _spawner_debug_test_spawn 3-branch guard so SBP_Exists=false does not
+			-- produce a false-positive FAIL (BP_GetSquadBlueprint throws on absent SBPs).
+			local bp_resolved = false
+			local sbp_loaded = type(SBP_Exists) == "function"
+				and (select(2, pcall(SBP_Exists, e.sbp)) == true)
+			if sbp_loaded then
+				-- Branch 1: SBP is in the attrib cache — BP_GetSquadBlueprint safe to call.
+				local ok_bp, bp = pcall(BP_GetSquadBlueprint, e.sbp)
+				bp_resolved = ok_bp and bp ~= nil
+			else
+				-- Branch 2: not in attrib cache — try Cardinal_ConvertTypeToSquadBlueprint.
+				if type(Cardinal_ConvertTypeToSquadBlueprint) == "function" then
+					local ok_c, bp_c = pcall(Cardinal_ConvertTypeToSquadBlueprint, e.sbp)
+					if ok_c and bp_c ~= nil then
+						bp_resolved = true
+					else
+						-- Branch 3: last-ditch BP_GetSquadBlueprint even with SBP_Exists=false.
+						local ok_bp2, bp2 = pcall(BP_GetSquadBlueprint, e.sbp)
+						bp_resolved = ok_bp2 and bp2 ~= nil
+					end
+				else
+					-- No Cardinal fallback available: last-ditch.
+					local ok_bp2, bp2 = pcall(BP_GetSquadBlueprint, e.sbp)
+					bp_resolved = ok_bp2 and bp2 ~= nil
+				end
+			end
+			if bp_resolved then
+				bp_pass = bp_pass + 1
+			else
+				bp_fail = bp_fail + 1
+				p4_fail = p4_fail + 1
+				local tier_str = e.tier and ("  tier=" .. tostring(e.tier)) or "  (flat)"
+				_log(F, 4, string.format("BP_RESOLVE_FAILED  idx=%d%s  sbp=%s",
+					e.idx, tier_str, e.sbp))
+			end
+		end
+
+		local p4_lv = (p4_fail > 0) and F or P
+		_logr(string.format("%s  p4  unique_sbps=%d  pass=%d  fail=%d",
+			p4_lv, #all_sbps, bp_pass, bp_fail))
+	end
+
+	-- ---- Summary ----
+	local overall = (p1_ok and p2_fail == 0 and p3_fail == 0 and p4_fail == 0) and "PASS" or "FAIL"
+	_logr(string.format("=== COMPLETE: p1_ok=%s  p2_fail=%d  p3_fail=%d  p4_fail=%d  overall=%s ===",
+		tostring(p1_ok), p2_fail, p3_fail, p4_fail, overall))
+end
+
+-- ---------------------------------------------------------------
+function DevMenu_UnitSpawner_Dump()
+	if type(_devmenu_unit_spawner_dispatch) ~= "table" then
+		print("[SPAWNER-DEBUG] DUMP: dispatch table is nil — run DevMenu_UnitSpawner_Init() first")
+		return
+	end
+	local entries = {}
+	for idx, sbp in pairs(_devmenu_unit_spawner_dispatch) do
+		table.insert(entries, { idx = idx, sbp = sbp })
+	end
+	table.sort(entries, function(a, b) return a.idx < b.idx end)
+	print("[SPAWNER-DEBUG] === DUMP: " .. tostring(#entries) .. " entries ===")
+	for _, e in ipairs(entries) do
+		local unit_type = (_devmenu_unit_spawner_dispatch_type ~= nil)
+			and _devmenu_unit_spawner_dispatch_type[e.idx] or "?"
+		print("[SPAWNER-DEBUG] idx=" .. tostring(e.idx) .. " type=" .. tostring(unit_type)
+			.. " sbp=\"" .. tostring(e.sbp) .. "\"")
+	end
+	print("[SPAWNER-DEBUG] === DUMP END ===")
+end
+
+-- ---------------------------------------------------------------
+-- Internal: attempt one spawn and return (ok, reason_or_nil)
+--
+-- Why not pcall(SpawnUnitBPForPlayer, ...)?
+--   SpawnUnitBPForPlayer has THREE silent no-op return paths that do NOT
+--   throw a Lua error:
+--     (a) SBP_Exists is false AND Cardinal_ConvertTypeToSquadBlueprint
+--         returns nil → foundSBP == nil → early return
+--     (b) SBP_GetFirstEBP returns nil             → early return
+--     (c) (currentPop + unitPopCost) > maxPopCap  → spawn skipped
+--   In all three cases pcall reports ok=true because no exception is
+--   raised, giving a false-positive "OK" even though no unit spawned.
+--
+-- This function:
+--   1. Resolves to an SBP handle, mirroring SpawnUnitBPForPlayer exactly:
+--        • SBP_Exists=true  → BP_GetSquadBlueprint
+--        • SBP_Exists=false → Cardinal_ConvertTypeToSquadBlueprint (on-demand)
+--      Both returning nil  → FAIL: BP_RESOLVE_FAILED
+--      (Cannot distinguish "bad name" from "valid but not precached" using
+--       SCAR APIs alone — Squad_SlowLoadResources requires an SBP handle,
+--       not a string. Treat all resolution failures as catalog errors: fix
+--       the SBP name and verify against game_data/extracted/aoe4/data/units/ attrib data.)
+--   2. Loads resources on demand (Squad_SlowLoadResources) so unloaded
+--      SBPs behave identically to SpawnUnitBPForPlayer(needsLoad=true).
+--   3. Checks SBP_GetFirstEBP                → FAIL: NO_ENTITY_BP
+--   4. Checks pop headroom                   → FAIL: POP_CAP_FULL (labelled)
+--   5. Calls Squad_CreateAndSpawnToward and checks the returned handle
+--                                            → FAIL: SPAWN_RETURNED_NIL
+--   6. Immediately kills the spawned unit so population never accumulates
+--      across the 378-entry sweep (preventing a cascade of false POP_CAP
+--      failures for later high-cost units like elephants).
+-- ---------------------------------------------------------------
+local function _spawner_debug_test_spawn(sbp_name)
+	-- Guard shared prerequisites.
+	if type(Game_GetLocalPlayer) ~= "function" then
+		return false, "API:Game_GetLocalPlayer missing"
+	end
+	local player = Game_GetLocalPlayer()
+	if player == nil then
+		return false, "Game_GetLocalPlayer returned nil"
+	end
+	if type(GetTownCentrePosition) ~= "function" then
+		return false, "API:GetTownCentrePosition missing"
+	end
+	local pos = GetTownCentrePosition(player)
+	if pos == nil then
+		return false, "GetTownCentrePosition returned nil (no keep?)"
+	end
+
+	-- (1) Resolve to an SBP handle using the same two-branch logic as
+	--     SpawnUnitBPForPlayer: prefer BP_GetSquadBlueprint when the SBP
+	--     is already loaded; fall back to Cardinal_ConvertTypeToSquadBlueprint
+	--     for SBPs that are valid but not yet resident in this map session.
+	--     Only fail when BOTH paths return nil.
+	if type(BP_GetSquadBlueprint) ~= "function" then
+		return false, "API:BP_GetSquadBlueprint missing"
+	end
+	local sbp = nil
+	local sbp_loaded = type(SBP_Exists) == "function"
+		and (select(2, pcall(SBP_Exists, sbp_name)) == true)
+	if sbp_loaded then
+		local ok_bp, bp = pcall(BP_GetSquadBlueprint, sbp_name)
+		if ok_bp then sbp = bp end
+	end
+	if sbp == nil and type(Cardinal_ConvertTypeToSquadBlueprint) == "function" then
+		local ok_cc, cc = pcall(Cardinal_ConvertTypeToSquadBlueprint, sbp_name, player)
+		if ok_cc then sbp = cc end
+	end
+	-- Last-ditch: try BP_GetSquadBlueprint even when SBP_Exists=false —
+	-- some engine builds make blueprints available before SBP_Exists sees them.
+	if sbp == nil then
+		local ok_bp2, bp2 = pcall(BP_GetSquadBlueprint, sbp_name)
+		if ok_bp2 then sbp = bp2 end
+	end
+	if sbp == nil then
+		-- Blueprint not resident in this map session. Cannot distinguish a bad
+		-- SBP name from a valid-but-not-precached one with SCAR APIs alone.
+		-- Blueprint could not be resolved — wrong SBP name or not in attrib data.
+		return false, "BP_RESOLVE_FAILED"
+	end
+
+	-- (2) Load resources on demand (mirrors needsLoad=true in SpawnUnitBPForPlayer).
+	if type(Squad_SlowLoadResources) == "function" then
+		pcall(Squad_SlowLoadResources, sbp, player)
+	end
+
+	-- (3) EBP check — blueprints that resolve but have no entity definition.
+	if type(SBP_GetFirstEBP) == "function" then
+		local ok_ebp, ebp = pcall(SBP_GetFirstEBP, sbp)
+		if not ok_ebp or ebp == nil then
+			return false, "NO_ENTITY_BP"
+		end
+
+		-- (4) Population headroom — labelled so the cause is visible in ScarLog,
+		--     unlike SpawnUnitBPForPlayer which silently returns without spawning.
+		if type(Player_GetCurrentPopulation) == "function"
+			and type(Player_GetMaxPopulationCap) == "function"
+			and type(EBP_PopulationCost) == "function" then
+			local ok_cost, cost = pcall(EBP_PopulationCost, ebp, player, CT_Personnel)
+			cost = (ok_cost and cost) or 0
+			local cur_pop = Player_GetCurrentPopulation(player, CT_Personnel) or 0
+			local max_pop = Player_GetMaxPopulationCap(player, CT_Personnel) or 0
+			if cost > 0 and (cur_pop + cost) > max_pop then
+				return false, "POP_CAP_FULL (cur=" .. tostring(cur_pop)
+					.. " cost=" .. tostring(cost)
+					.. " max=" .. tostring(max_pop) .. ")"
+			end
+		end
+	end
+
+	-- (5) Actual spawn — Squad_CreateAndSpawnToward returns a squad handle;
+	--     a nil handle means the engine rejected the spawn without throwing.
+	if type(Squad_CreateAndSpawnToward) ~= "function" then
+		-- Rare fallback: engine build without Squad_CreateAndSpawnToward exposed.
+		local ok2, err2 = pcall(SpawnUnitBPForPlayer, sbp_name, player, pos, false)
+		return ok2, err2 and tostring(err2)
+	end
+	local ok_spawn, squad = pcall(Squad_CreateAndSpawnToward, sbp, player, 0, pos, pos)
+	if not ok_spawn then
+		return false, "SPAWN_THREW: " .. tostring(squad)
+	end
+	if squad == nil then
+		return false, "SPAWN_RETURNED_NIL"
+	end
+
+	-- (6) Immediate cleanup: kill the spawned unit so population does NOT
+	--     accumulate across the sweep. Without this, high pop-cost units
+	--     (e.g. Tower Elephant at pop 4) silently fail once the cap fills.
+	if type(Squad_GetFirstEntity) == "function" and type(Entity_Kill) == "function" then
+		local ok_ent, ent = pcall(Squad_GetFirstEntity, squad)
+		if ok_ent and ent ~= nil then
+			pcall(Entity_Kill, ent)
+		end
+	end
+
+	return true, nil
+end
+
+-- ---------------------------------------------------------------
+-- Internal: Rule callback — processes one queue entry per tick
+-- Must be a named global; Rule_AddInterval rejects local/anonymous
+-- function references ("Adding unnamed function as rule").
+-- ---------------------------------------------------------------
+function _spawner_debug_step()
+	if _spawner_debug_queue == nil or #_spawner_debug_queue == 0 then
+		-- All entries processed — print summary.
+		local pass_count       = 0
+		local skip_naval_count = 0
+		local fail_bp_count    = 0
+		local fail_spawn_count = 0
+		local failures         = {}
+		if _spawner_debug_results ~= nil then
+			for _, r in ipairs(_spawner_debug_results) do
+				if r.ok then
+					pass_count = pass_count + 1
+				elseif r.skip_naval then
+					skip_naval_count = skip_naval_count + 1
+				elseif r.err and r.err:find("BP_RESOLVE_FAILED", 1, true) then
+					fail_bp_count = fail_bp_count + 1
+					table.insert(failures, r)
+				else
+					fail_spawn_count = fail_spawn_count + 1
+					table.insert(failures, r)
+				end
+			end
+		end
+		local total = pass_count + skip_naval_count + fail_bp_count + fail_spawn_count
+		print("[SPAWNER-DEBUG] === COMPLETE: pass=" .. tostring(pass_count)
+			.. " skip_naval=" .. tostring(skip_naval_count)
+			.. " fail_catalog=" .. tostring(fail_bp_count)
+			.. " fail_spawn=" .. tostring(fail_spawn_count)
+			.. " total=" .. tostring(total) .. " ===")
+		for _, r in ipairs(failures) do
+			local prefix = (r.err and r.err:find("BP_RESOLVE_FAILED", 1, true)) and "[CATALOG]" or "[SPAWN]"
+			print("[SPAWNER-DEBUG] " .. prefix .. " FAIL idx=" .. tostring(r.idx)
+				.. " sbp=\"" .. tostring(r.sbp) .. "\""
+				.. " err=" .. tostring(r.err))
+		end
+		-- Clean up.
+		_spawner_debug_running = false
+		_spawner_debug_queue   = nil
+		_spawner_debug_results = nil
+		pcall(Rule_Remove, _spawner_debug_step)
+		return
+	end
+
+	local item = table.remove(_spawner_debug_queue, 1)
+
+	-- Naval units cannot spawn on land maps — skip them to avoid noise.
+	if item.unit_type == "naval" then
+		print("[SPAWNER-DEBUG] SKIP idx=" .. tostring(item.idx)
+			.. " sbp=\"" .. tostring(item.sbp) .. "\" (naval — skipped on land map)")
+		table.insert(_spawner_debug_results, { idx = item.idx, sbp = item.sbp, ok = false, skip_naval = true })
+		return
+	end
+
+	local ok, err = _spawner_debug_test_spawn(item.sbp)
+	-- ok==true → pass, ok==false → fail
+	local status = ok and "OK  " or "FAIL"
+	local log_suffix = ok and "" or (" err=" .. tostring(err))
+	print("[SPAWNER-DEBUG] " .. status .. " idx=" .. tostring(item.idx)
+		.. " sbp=\"" .. tostring(item.sbp) .. "\"" .. log_suffix)
+	table.insert(_spawner_debug_results, { idx = item.idx, sbp = item.sbp, ok = ok, err = err })
+end
+
+-- ---------------------------------------------------------------
+-- DevMenu_UnitSpawner_RunDebug
+-- Starts the rule-driven debug sweep. Tests one SBP per 0.1 s tick.
+--
+-- Each entry is validated with _spawner_debug_test_spawn which:
+--   • Resolves SBP handle (FAIL: BP_RESOLVE_FAILED if name not in attrib data)
+--   • Checks SBP_GetFirstEBP (FAIL: NO_ENTITY_BP)
+--   • Pre-checks pop headroom (FAIL: POP_CAP_FULL with cur/cost/max)
+--   • Calls Squad_CreateAndSpawnToward and checks the handle
+--                          (FAIL: SPAWN_RETURNED_NIL)
+--   • Kills the spawned unit immediately so population never
+--     accumulates, preventing false POP_CAP_FULL failures for
+--     later high-cost units (e.g. Tower Elephant).
+-- ---------------------------------------------------------------
+function DevMenu_UnitSpawner_RunDebug()
+	if type(_devmenu_unit_spawner_dispatch) ~= "table" then
+		print("[SPAWNER-DEBUG] dispatch table not initialised — run DevMenu_UnitSpawner_Init() first")
+		return
+	end
+	if _spawner_debug_running then
+		print("[SPAWNER-DEBUG] already running — wait for completion or restart the session")
+		return
+	end
+
+	-- Build sorted queue (includes unit_type for naval-skip logic).
+	local queue = {}
+	for idx, sbp in pairs(_devmenu_unit_spawner_dispatch) do
+		local unit_type = (_devmenu_unit_spawner_dispatch_type ~= nil)
+			and _devmenu_unit_spawner_dispatch_type[idx] or nil
+		table.insert(queue, { idx = idx, sbp = sbp, unit_type = unit_type })
+	end
+	table.sort(queue, function(a, b) return a.idx < b.idx end)
+
+	if #queue == 0 then
+		print("[SPAWNER-DEBUG] dispatch table is empty — rebuild via DevMenu_UnitSpawner_BuildCategory()")
+		return
+	end
+
+	print("[SPAWNER-DEBUG] === STARTING: testing " .. tostring(#queue)
+		.. " SBPs (0.1s/entry, spawn-and-kill verification) ===")
+	_spawner_debug_queue   = queue
+	_spawner_debug_results = {}
+	_spawner_debug_running = true
+
+	-- Remove any stale rule before adding a fresh one.
+	pcall(Rule_Remove, _spawner_debug_step)
+	Rule_AddInterval(_spawner_debug_step, 0.1)
+end
+
+-- ---------------------------------------------------------------
+-- DevMenu_UnitSpawner_CancelDebug
+-- Abort an in-progress debug run.
+-- ---------------------------------------------------------------
+function DevMenu_UnitSpawner_CancelDebug()
+	if not _spawner_debug_running then
+		print("[SPAWNER-DEBUG] no debug run in progress")
+		return
+	end
+	pcall(Rule_Remove, _spawner_debug_step)
+	local done = _spawner_debug_results and #_spawner_debug_results or 0
+	local left = _spawner_debug_queue  and #_spawner_debug_queue  or 0
+	print("[SPAWNER-DEBUG] CANCELLED: completed=" .. tostring(done) .. " remaining=" .. tostring(left))
+	_spawner_debug_running = false
+	_spawner_debug_queue   = nil
+	_spawner_debug_results = nil
+end

@@ -1,0 +1,258 @@
+-----------------------------------------------------------------------
+-- PlayerUI Rule System
+-- Data gathering engine that iterates only visible players (local + allies).
+-- Adapted from ObserverUiRuleSystem with AI exclusion and visibility filter.
+-----------------------------------------------------------------------
+
+PlayerUiRuleSystem = {
+	RulesForPlayer = {},
+}
+
+PlayerUiInitialization:AddInitializable(PlayerUiRuleSystem)
+
+local _playerui_rulesystem_print = print
+local function print(...)
+	local message = tostring(select(1, ...))
+	if type(PlayerUI_ShouldPrintMessage) ~= "function" or PlayerUI_ShouldPrintMessage(message) then
+		_playerui_rulesystem_print(...)
+	end
+end
+
+function PlayerUiRuleSystem:Initialize()
+	if self.UpdateUiDataContexts == nil then
+		self.UpdateUiDataContexts = _PlayerUI_DefaultFuncTable
+	end
+	if self.ApplyUiDataContexts == nil then
+		self.ApplyUiDataContexts = _PlayerUI_DefaultFuncTable
+	end
+
+	local visiblePlayers = _PlayerUI_VisiblePlayers
+	if visiblePlayers == nil then
+		return
+	end
+	for i = 1, #visiblePlayers do
+		self:_InitializeDataStructure(visiblePlayers[i].id.PlayerID)
+	end
+
+	-- PERF: 8s reduces entity iteration frequency by ~60% at 1600+ squads (was 3.0)
+	Rule_AddInterval(_PlayerUI_RingRule, 8.0)
+
+	-- 1.0s lightweight refresh: timer display + score/reward-bar animation targets.
+	-- Decoupled from expensive entity iteration so timer ticks every second and
+	-- score deltas stay small enough for smooth +1 animation.
+	Rule_AddInterval(_PlayerUI_FastRefreshRule, 1.0)
+end
+
+function PlayerUiRuleSystem:Reset()
+	if Rule_Exists(_PlayerUI_RingRule) then
+		Rule_Remove(_PlayerUI_RingRule)
+	end
+	if Rule_Exists(_PlayerUI_FastRefreshRule) then
+		Rule_Remove(_PlayerUI_FastRefreshRule)
+	end
+
+	PlayerUI_Animate_Reset()
+	if PlayerUI_ResetEliminationPresentationState ~= nil then
+		PlayerUI_ResetEliminationPresentationState()
+	end
+
+	-- Ranking system cleanup
+	if PlayerUI_Ranking_Reset ~= nil then
+		PlayerUI_Ranking_Reset()
+	end
+
+	self.RulesForPlayer = {}
+	self.UpdateUiDataContexts = _PlayerUI_DefaultFuncTable
+	self.ApplyUiDataContexts = _PlayerUI_DefaultFuncTable
+end
+
+function PlayerUiRuleSystem:Stop()
+	if Rule_Exists(_PlayerUI_RingRule) then
+		Rule_Pause(_PlayerUI_RingRule)
+	end
+	if Rule_Exists(_PlayerUI_FastRefreshRule) then
+		Rule_Pause(_PlayerUI_FastRefreshRule)
+	end
+end
+
+function PlayerUiRuleSystem:Resume()
+	if Rule_Exists(_PlayerUI_RingRule) then
+		Rule_Unpause(_PlayerUI_RingRule)
+	end
+	if Rule_Exists(_PlayerUI_FastRefreshRule) then
+		Rule_Unpause(_PlayerUI_FastRefreshRule)
+	end
+end
+
+function PlayerUiRuleSystem:AddSquadDataGatheringRule(playerId, squadType, rule)
+	self:_AddRule(playerId, rule, "RulesForPlayer", playerId, "ForSquads", squadType)
+end
+
+function PlayerUiRuleSystem:AddEntityDataGatheringRule(playerId, entityType, rule)
+	self:_AddRule(playerId, rule, "RulesForPlayer", playerId, "ForEntities", entityType)
+end
+
+function PlayerUiRuleSystem:AddDataGatheringPreparationRule(playerId, rule)
+	self:_AddRule(playerId, rule, "RulesForPlayer", playerId, "ForPreparation")
+end
+
+function PlayerUiRuleSystem:AddDataProcessingRule(playerId, rule)
+	self:_AddRule(playerId, rule, "RulesForPlayer", playerId, "ForProcessing")
+end
+
+function PlayerUiRuleSystem:AddUpdateUiDataContextForPlayerRule(playerId, rule)
+	self:_AddRule(playerId, rule, "RulesForPlayer", playerId, "UpdateUiDataContextsForPlayer")
+end
+
+function PlayerUiRuleSystem:AddUpdateUiDataContextRule(rule)
+	self:_AddRule(nil, rule, "UpdateUiDataContexts")
+end
+
+function PlayerUiRuleSystem:AddApplyUiDataContextRule(rule)
+	self:_AddRule(nil, rule, "ApplyUiDataContexts")
+end
+
+-----------------------------------------------------------------------
+-- Internal: default no-op and metatables for rule chaining
+-----------------------------------------------------------------------
+
+function _PlayerUI_NoOp() end
+_PlayerUI_DefaultFuncTable = { Func = _PlayerUI_NoOp }
+_PlayerUI_DefaultFuncMt = { __index = function() return _PlayerUI_DefaultFuncTable end }
+
+-----------------------------------------------------------------------
+-- Named global rule callback (Rule_AddInterval requires named function)
+-----------------------------------------------------------------------
+
+-- Set true after the first complete Ring Rule cycle.  AutoShow waits on
+-- this flag so per-slot fields (workerPopulation, score, allMilitary, etc.)
+-- and tResources are fully populated before the HUD becomes Visible.
+_PlayerUI_FirstRingRuleCompleted = false
+
+function _PlayerUI_RingRule()
+	local self = PlayerUiRuleSystem
+	local visiblePlayers = _PlayerUI_VisiblePlayers
+	if visiblePlayers == nil then
+		return
+	end
+
+	for i = 1, #visiblePlayers do
+		local player = visiblePlayers[i].id
+		local rulesForPlayer = self.RulesForPlayer[player.PlayerID]
+		if rulesForPlayer then
+			rulesForPlayer.ForPreparation.Func()
+			SGroup_ForEach(Player_GetSquads(player), rulesForPlayer.RouterForSquads)
+			EGroup_ForEach(Player_GetEntities(player), rulesForPlayer.RouterForEntities)
+			rulesForPlayer.ForProcessing.Func()
+			rulesForPlayer.UpdateUiDataContextsForPlayer.Func()
+		end
+	end
+
+	self.UpdateUiDataContexts.Func()
+	self.ApplyUiDataContexts.Func()
+
+	-- Mark first-cycle complete so AutoShow can proceed safely.
+	if not _PlayerUI_FirstRingRuleCompleted then
+		_PlayerUI_FirstRingRuleCompleted = true
+		print("[PLAYERUI] RingRule: first cycle complete — DataContext fully populated")
+	end
+end
+
+-----------------------------------------------------------------------
+-- Fast-refresh callback (1.0s): timer + score targets only.
+-- No entity/squad iteration — just PLAYERS table lookups and
+-- animation target updates.  Keeps timer accurate and score deltas
+-- small enough for smooth +1 animation on the 0.1s animate tick.
+-----------------------------------------------------------------------
+
+function _PlayerUI_FastRefreshRule()
+	PlayerUI_FastRefresh()
+end
+
+-----------------------------------------------------------------------
+-- Per-player data structure initialization
+-----------------------------------------------------------------------
+
+function PlayerUiRuleSystem:_InitializeDataStructure(playerId)
+	if self.RulesForPlayer[playerId] then
+		return
+	end
+
+	local forSquads = {}
+	setmetatable(forSquads, _PlayerUI_DefaultFuncMt)
+	local forEntities = {}
+	setmetatable(forEntities, _PlayerUI_DefaultFuncMt)
+
+	local squad_IsOfType = Squad_IsOfType
+	local routerForSquads = function(group, index, squad)
+		forSquads[""].Func(squad)
+		if squad_IsOfType(squad, "worker") then
+			forSquads.worker.Func(squad)
+		else
+			forSquads.NonWorker.Func(squad)
+		end
+	end
+
+	local entity_IsOfType = Entity_IsOfType
+	local entity_IsProductionQueueAvailable = Entity_IsProductionQueueAvailable
+	local routerForEntities = function(group, index, entity)
+		if entity_IsOfType(entity, "building") then
+			forEntities.building.Func(entity)
+			if entity_IsProductionQueueAvailable(entity) then
+				forEntities.BuildingWithQueue.Func(entity)
+			end
+		end
+	end
+
+	self.RulesForPlayer[playerId] = {
+		ForSquads = forSquads,
+		ForEntities = forEntities,
+		RouterForSquads = routerForSquads,
+		RouterForEntities = routerForEntities,
+		ForPreparation = _PlayerUI_DefaultFuncTable,
+		ForProcessing = _PlayerUI_DefaultFuncTable,
+		UpdateUiDataContextsForPlayer = _PlayerUI_DefaultFuncTable,
+	}
+end
+
+-----------------------------------------------------------------------
+-- Multi-rule chaining helper
+-----------------------------------------------------------------------
+
+function PlayerUiRuleSystem:_AddRule(playerId, rule, ...)
+	if playerId then
+		self:_InitializeDataStructure(playerId)
+	end
+
+	local args = { ... }
+	local argsSize = #args
+	local targetParent = self
+	for index = 1, argsSize - 1 do
+		local key = args[index]
+		if targetParent[key] == nil then
+			targetParent[key] = {}
+		end
+		targetParent = targetParent[key]
+	end
+
+	local finalKey = args[argsSize]
+	if targetParent[finalKey] == nil then
+		targetParent[finalKey] = _PlayerUI_DefaultFuncTable
+	end
+
+	if targetParent[finalKey].Func == _PlayerUI_NoOp then
+		targetParent[finalKey] = { Func = rule }
+		return
+	end
+	if not targetParent[finalKey].Funcs then
+		local funcs = { targetParent[finalKey].Func, rule }
+		targetParent[finalKey].Funcs = funcs
+		targetParent[finalKey].Func =
+			function(p)
+				for i = 1, #funcs do funcs[i](p) end
+			end
+		return
+	end
+
+	table.insert(targetParent[finalKey].Funcs, rule)
+end

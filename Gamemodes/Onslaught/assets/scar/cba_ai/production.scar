@@ -1,0 +1,200 @@
+---------------------------------------------------------------------------------------------------
+-- CBA AI Player — Unit Production
+-- Building production queue management, unit gathering into staging.
+-- Origin: cba_ai_player.scar lines 1571–1690
+---------------------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------
+-- RULE: Manage Building Production Queues
+-----------------------------------------------------------------------
+
+function _AI_Rule_ProduceUnits()
+	if _AI_IsExternallyLocked() then return end
+	for _, player in ipairs(_ai_players) do
+		if not _AI_IsEliminated(player) then
+			_AI_ManageBuildingQueues(player)
+		end
+	end
+end
+
+function _AI_CollectProductionQueueStats(player, building_types)
+	if player == nil or player.ai == nil then
+		return 0, 0, 0, 0
+	end
+	local ai = player.ai
+	local completed_total = 0
+	local queue_available = 0
+	local queue_sum = 0
+	local staging_count = ai.staging_sg ~= nil and SGroup_CountSpawned(ai.staging_sg) or 0
+	for _, building_type in ipairs(building_types or {}) do
+		local all_buildings = _AI_FindAllCompletedBuildings(player, building_type)
+		for _, bld in ipairs(all_buildings) do
+			local entity = bld.entity
+			if entity ~= nil then
+				local ok_alive, alive = pcall(Entity_IsAlive, entity)
+				if ok_alive and alive then
+					completed_total = completed_total + 1
+					local ok_avail, avail = pcall(Entity_IsProductionQueueAvailable, entity)
+					if ok_avail and avail then
+						queue_available = queue_available + 1
+						local ok_size, qsize = pcall(Entity_GetProductionQueueSize, entity)
+						if ok_size and type(qsize) == "number" then
+							queue_sum = queue_sum + qsize
+						end
+					end
+				end
+			end
+		end
+	end
+	return completed_total, queue_available, queue_sum, staging_count
+end
+
+function _AI_ManageBuildingQueues(player)
+	local ai = player.ai
+	local current_age = Player_GetCurrentAge(player.id)
+	local queued_total = 0
+	local per_building_cap = _AI_PRODUCTION_QUEUE_PER_BUILDING_CAP or _AI_PRODUCTION_QUEUE_TARGET
+	local cycle_cap = _AI_PRODUCTION_QUEUE_CYCLE_CAP or 0
+	local staging_count = ai.staging_sg ~= nil and SGroup_CountSpawned(ai.staging_sg) or 0
+	local cycle_skipped_staging = false
+	if staging_count >= (_AI_STAGING_QUEUE_SUPPRESS_THRESHOLD or 9999) then
+		cycle_skipped_staging = true
+		local completed_total, queue_available, queue_sum, staging_now = _AI_CollectProductionQueueStats(player, ai.ordered_building_type_keys)
+		if type(_AI_DebugOOSLog) == "function" then
+			_AI_DebugOOSLog("prod_cycle",
+				string.format("player=%s skipped=true reason=staging_guard age=%d staging=%d suppress=%d completed=%d avail=%d qsum=%d cap=%d per_cap=%d",
+					ai.label or "P?", current_age, staging_now, (_AI_STAGING_QUEUE_SUPPRESS_THRESHOLD or -1),
+					completed_total, queue_available, queue_sum, cycle_cap, per_building_cap))
+		end
+		return
+	end
+	local cycle_exhausted = false
+
+	-- Use per-player resolved building_unit_map (includes civ variants), fall back to standard map
+	local bld_unit_map = ai.building_unit_map or _AI_BUILDING_UNIT_MAP
+	local building_types = _AI_GetOrderedBuildingTypeKeys(player, bld_unit_map)
+	for _, building_type in ipairs(building_types) do
+		local unit_tag = bld_unit_map[building_type]
+		if cycle_exhausted then
+			break
+		end
+		-- Skip siege-role types until age 3
+		if building_type == "siege_workshop" and current_age < 3 then
+			goto next_type
+		end
+
+		local all_buildings = _AI_FindAllCompletedBuildings(player, building_type)
+		if #all_buildings > 0 then
+			local sbp = Cardinal_ConvertTypeToSquadBlueprint(unit_tag, player.id)
+			if sbp ~= nil then
+				for _, bld in ipairs(all_buildings) do
+					if cycle_exhausted then
+						break
+					end
+					local entity = bld.entity
+					if entity ~= nil then
+						local ok_alive, alive = pcall(Entity_IsAlive, entity)
+						if not (ok_alive and alive) then
+							ai.telemetry.production_dead_skips = (ai.telemetry.production_dead_skips or 0) + 1
+							goto next_building
+						end
+						local ok_avail, avail = pcall(Entity_IsProductionQueueAvailable, entity)
+						if ok_avail and avail then
+							local ok_size, qsize = pcall(Entity_GetProductionQueueSize, entity)
+							if ok_size and qsize < _AI_PRODUCTION_QUEUE_TARGET then
+								local to_add = math.min(_AI_PRODUCTION_QUEUE_TARGET - qsize, per_building_cap)
+								if cycle_cap > 0 then
+									local cap_left = cycle_cap - queued_total
+									if cap_left <= 0 then
+										cycle_exhausted = true
+										goto next_building
+									end
+									to_add = math.min(to_add, cap_left)
+								end
+								for i = 1, to_add do
+									local ok_alive2, alive2 = pcall(Entity_IsAlive, entity)
+									if not (ok_alive2 and alive2) then
+										ai.telemetry.production_dead_skips = (ai.telemetry.production_dead_skips or 0) + 1
+										break
+									end
+									local ok_q = pcall(Entity_QueueProductionItemByPBG, entity, PITEM_Spawn, sbp)
+									if ok_q then
+										queued_total = queued_total + 1
+										if cycle_cap > 0 and queued_total >= cycle_cap then
+											cycle_exhausted = true
+											break
+										end
+									end
+								end
+							end
+						end
+					end
+					::next_building::
+				end
+			end
+		end
+		::next_type::
+	end
+
+	if queued_total > 0 then
+		ai.telemetry.units_produced = ai.telemetry.units_produced + queued_total
+		print(string.format("[AI_PLAYER] %s queued %d production items across buildings.",
+			ai.label or "P?", queued_total))
+	end
+
+	local completed_total, queue_available, queue_sum, staging_now = _AI_CollectProductionQueueStats(player, building_types)
+	if type(_AI_DebugOOSLog) == "function" then
+		_AI_DebugOOSLog("prod_cycle",
+			string.format("player=%s skipped=%s age=%d queued=%d exhausted=%s staging=%d completed=%d avail=%d qsum=%d cap=%d per_cap=%d claim=%s seed=%s",
+				ai.label or "P?", tostring(cycle_skipped_staging), current_age, queued_total, tostring(cycle_exhausted),
+				staging_now, completed_total, queue_available, queue_sum, cycle_cap, per_building_cap,
+				tostring(ai.villager_claim_done == true), tostring(ai.startup_seed_done == true)))
+	end
+end
+
+-----------------------------------------------------------------------
+-- Gather Produced Units Into Staging
+-----------------------------------------------------------------------
+
+function _AI_GatherProducedUnits(player)
+	local ai = player.ai
+	if ai.staging_sg == nil then return end
+
+	-- Build set of already-assigned squads
+	local assigned = {}
+	local function mark_sg(sg)
+		if sg == nil then return end
+		local count = SGroup_CountSpawned(sg)
+		for i = 1, count do
+			local s = SGroup_GetSpawnedSquadAt(sg, i)
+			if s then assigned[s] = true end
+		end
+	end
+
+	mark_sg(ai.villager_sg)
+	mark_sg(ai.staging_sg)
+	mark_sg(ai.patrol_sg)
+	for _, army in ipairs(ai.armies) do mark_sg(army.sg) end
+
+	-- Scan all player squads
+	local sg_all = Player_GetSquads(player.id)
+	local added = 0
+	local count = SGroup_CountSpawned(sg_all)
+
+	for i = 1, count do
+		local squad = SGroup_GetSpawnedSquadAt(sg_all, i)
+		if squad and not assigned[squad] then
+			local ok_w, is_worker = pcall(Squad_IsOfType, squad, "worker")
+			local ok_s, is_scout = pcall(Squad_IsOfType, squad, "scout")
+			if not (ok_w and is_worker) and not (ok_s and is_scout) then
+				SGroup_Add(ai.staging_sg, squad)
+				added = added + 1
+			end
+		end
+	end
+
+	if added > 0 then
+		print(string.format("[AI_PLAYER] %s gathered %d produced units to staging (staging=%d).",
+			ai.label or "P?", added, SGroup_CountSpawned(ai.staging_sg)))
+	end
+end

@@ -1,0 +1,362 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — Structured Civ Overview
+-- Builds a machine-parseable civ blueprint/upgrade overview for gap detection and consistency checks.
+--
+-- Console commands:
+--   Debug_CivOverview_Build()
+--   Debug_CivOverview_Summary()
+--   Debug_CivOverview_Civ("lancaster")
+--   Debug_CivOverview_Audit()
+--   Debug_CivOverview_DumpStructured(true)
+---------------------------------------------------------------------------------------------------
+
+_CBA_DEBUG_CIV_OVERVIEW = nil
+
+local _CIV_OVERVIEW_REQUIRED_ENTITY_KEYS = {
+	"castle", "town_center_capital", "town_center", "market", "villager", "scout", "king",
+	"palisade_wall", "palisade_gate", "monk", "monastery", "barracks", "stable",
+	"archery_range", "siege_workshop", "scar_dock", "house", "blacksmith", "university",
+	"wonder_imperial_age", "stone_wall",
+}
+
+local _CIV_OVERVIEW_AGE_KEYS = {
+	AGE_DARK = true,
+	AGE_FEUDAL = true,
+	AGE_CASTLE = true,
+	AGE_IMPERIAL = true,
+}
+
+-- Pseudo-civs that exist in data tables but are not playable races.
+-- Excluded from MISSING/REQUIRED_KEY issues to keep the audit actionable.
+local _CIV_OVERVIEW_EXEMPT_CIVS = {
+	neutral = true,  -- gaia/resource entries; not a playable race
+	common  = true,  -- shared upgrade pool; not a playable race
+	special = true,  -- special upgrade pool; not a playable race
+}
+
+function _CivOverview_SortedKeys(tbl)
+	local keys = {}
+	for k, _ in pairs(tbl or {}) do table.insert(keys, k) end
+	table.sort(keys)
+	return keys
+end
+
+function _CivOverview_BPExists(bp_name)
+	if type(bp_name) ~= "string" or bp_name == "" then return false end
+	if string.sub(bp_name, 1, 9) == "building_" then
+		local ok, exists = pcall(EBP_Exists, bp_name)
+		return ok and exists == true
+	end
+	if string.sub(bp_name, 1, 5) == "unit_" then
+		local ok, exists = pcall(SBP_Exists, bp_name)
+		return ok and exists == true
+	end
+	if string.sub(bp_name, 1, 8) == "upgrade_" then
+		local ok, up = pcall(BP_GetUpgradeBlueprint, bp_name)
+		return ok and up ~= nil
+	end
+
+	local ok_e, ex_e = pcall(EBP_Exists, bp_name)
+	if ok_e and ex_e then return true end
+	local ok_s, ex_s = pcall(SBP_Exists, bp_name)
+	if ok_s and ex_s then return true end
+	local ok_u, up = pcall(BP_GetUpgradeBlueprint, bp_name)
+	return ok_u and up ~= nil
+end
+
+function _CivOverview_GetSource(table_ref, civ, parent_map)
+	local own = table_ref and table_ref[civ]
+	if own ~= nil then
+		return own, "own", nil
+	end
+	if parent_map and parent_map[civ] ~= nil and table_ref and table_ref[parent_map[civ]] ~= nil then
+		return table_ref[parent_map[civ]], "parent", parent_map[civ]
+	end
+	return nil, "missing", nil
+end
+
+function _CivOverview_BuildCivSet()
+	local civ_set = {}
+	for civ, _ in pairs(AGS_ENTITY_TABLE or {}) do civ_set[civ] = true end
+	for civ, _ in pairs(CBA_SIEGE_TABLE or {}) do civ_set[civ] = true end
+	for civ, _ in pairs(AGS_UPGRADE_TABLE or {}) do civ_set[civ] = true end
+	for civ, _ in pairs(AGS_CIV_PARENT_MAP or {}) do civ_set[civ] = true end
+	return civ_set
+end
+
+function Debug_CivOverview_Build()
+	local overview = {
+		meta = {
+			civ_count = 0,
+			entity_missing = 0,
+			siege_missing = 0,
+			upgrade_missing = 0,
+			issues = {},
+		},
+		civs = {},
+		matrix = {
+			entity = {},
+			siege = {},
+			upgrade = {},
+		},
+	}
+
+	local civ_set = _CivOverview_BuildCivSet()
+	local civs = _CivOverview_SortedKeys(civ_set)
+	overview.meta.civ_count = #civs
+
+	for _, civ in ipairs(civs) do
+		local civ_data = {
+			parent = AGS_CIV_PARENT_MAP and AGS_CIV_PARENT_MAP[civ] or nil,
+			entity = { source = "missing", source_civ = nil, ok = 0, missing = 0, disabled = 0, keys = {}, missing_required = {} },
+			siege = { source = "missing", source_civ = nil, ok = 0, missing = 0, disabled = 0, keys = {} },
+			upgrade = { source = "missing", source_civ = nil, ok = 0, missing = 0, age_counts = {}, named_count = 0 },
+		}
+
+		local et, et_src, et_src_civ = _CivOverview_GetSource(AGS_ENTITY_TABLE, civ, AGS_CIV_PARENT_MAP)
+		civ_data.entity.source = et_src
+		civ_data.entity.source_civ = et_src_civ
+		if et ~= nil then
+			for key, bp in pairs(et) do
+				local status = "disabled"
+				if bp == false then
+					civ_data.entity.disabled = civ_data.entity.disabled + 1
+				elseif type(bp) == "string" then
+					if _CivOverview_BPExists(bp) then
+						status = "ok"
+						civ_data.entity.ok = civ_data.entity.ok + 1
+					else
+						status = "missing"
+						civ_data.entity.missing = civ_data.entity.missing + 1
+						overview.meta.entity_missing = overview.meta.entity_missing + 1
+						table.insert(overview.meta.issues, string.format("ENTITY_MISSING civ=%s key=%s bp=%s", civ, key, bp))
+					end
+				else
+					status = "missing"
+					civ_data.entity.missing = civ_data.entity.missing + 1
+					overview.meta.entity_missing = overview.meta.entity_missing + 1
+					table.insert(overview.meta.issues, string.format("ENTITY_INVALID civ=%s key=%s", civ, key))
+				end
+
+				civ_data.entity.keys[key] = { bp = bp, status = status }
+				overview.matrix.entity[key] = overview.matrix.entity[key] or {}
+				overview.matrix.entity[key][civ] = status
+			end
+
+			if not _CIV_OVERVIEW_EXEMPT_CIVS[civ] then
+				for _, req_key in ipairs(_CIV_OVERVIEW_REQUIRED_ENTITY_KEYS) do
+					if civ_data.entity.keys[req_key] == nil then
+						table.insert(civ_data.entity.missing_required, req_key)
+						table.insert(overview.meta.issues, string.format("ENTITY_REQUIRED_KEY_MISSING civ=%s key=%s", civ, req_key))
+					end
+				end
+			end
+		else
+			if not _CIV_OVERVIEW_EXEMPT_CIVS[civ] then
+				table.insert(overview.meta.issues, string.format("ENTITY_TABLE_MISSING civ=%s", civ))
+			end
+		end
+
+		local st, st_src, st_src_civ = _CivOverview_GetSource(CBA_SIEGE_TABLE, civ, AGS_CIV_PARENT_MAP)
+		civ_data.siege.source = st_src
+		civ_data.siege.source_civ = st_src_civ
+		if st ~= nil then
+			for key, bp in pairs(st) do
+				local status = "disabled"
+				if bp == false then
+					civ_data.siege.disabled = civ_data.siege.disabled + 1
+				elseif type(bp) == "string" then
+					if _CivOverview_BPExists(bp) then
+						status = "ok"
+						civ_data.siege.ok = civ_data.siege.ok + 1
+					else
+						status = "missing"
+						civ_data.siege.missing = civ_data.siege.missing + 1
+						overview.meta.siege_missing = overview.meta.siege_missing + 1
+						table.insert(overview.meta.issues, string.format("SIEGE_MISSING civ=%s key=%s bp=%s", civ, key, bp))
+					end
+				else
+					status = "missing"
+					civ_data.siege.missing = civ_data.siege.missing + 1
+					overview.meta.siege_missing = overview.meta.siege_missing + 1
+					table.insert(overview.meta.issues, string.format("SIEGE_INVALID civ=%s key=%s", civ, key))
+				end
+
+				civ_data.siege.keys[key] = { bp = bp, status = status }
+				overview.matrix.siege[key] = overview.matrix.siege[key] or {}
+				overview.matrix.siege[key][civ] = status
+			end
+		else
+			if not _CIV_OVERVIEW_EXEMPT_CIVS[civ] then
+				table.insert(overview.meta.issues, string.format("SIEGE_TABLE_MISSING civ=%s", civ))
+			end
+		end
+
+		local ut, ut_src, ut_src_civ = _CivOverview_GetSource(AGS_UPGRADE_TABLE, civ, AGS_CIV_PARENT_MAP)
+		civ_data.upgrade.source = ut_src
+		civ_data.upgrade.source_civ = ut_src_civ
+		if ut ~= nil then
+			for key, value in pairs(ut) do
+				if _CIV_OVERVIEW_AGE_KEYS[key] and type(value) == "table" then
+					local age_ok = 0
+					local age_missing = 0
+					for _, up_bp in ipairs(value) do
+						if type(up_bp) == "string" and _CivOverview_BPExists(up_bp) then
+							age_ok = age_ok + 1
+							civ_data.upgrade.ok = civ_data.upgrade.ok + 1
+						else
+							age_missing = age_missing + 1
+							civ_data.upgrade.missing = civ_data.upgrade.missing + 1
+							overview.meta.upgrade_missing = overview.meta.upgrade_missing + 1
+							table.insert(overview.meta.issues, string.format("UPGRADE_MISSING civ=%s age=%s bp=%s", civ, key, tostring(up_bp)))
+						end
+					end
+					civ_data.upgrade.age_counts[key] = { ok = age_ok, missing = age_missing, total = #value }
+				elseif type(value) == "string" then
+					civ_data.upgrade.named_count = civ_data.upgrade.named_count + 1
+					local status = _CivOverview_BPExists(value) and "ok" or "missing"
+					if status == "ok" then
+						civ_data.upgrade.ok = civ_data.upgrade.ok + 1
+					else
+						civ_data.upgrade.missing = civ_data.upgrade.missing + 1
+						overview.meta.upgrade_missing = overview.meta.upgrade_missing + 1
+						table.insert(overview.meta.issues, string.format("UPGRADE_NAMED_MISSING civ=%s key=%s bp=%s", civ, key, value))
+					end
+					overview.matrix.upgrade[key] = overview.matrix.upgrade[key] or {}
+					overview.matrix.upgrade[key][civ] = status
+				end
+			end
+		else
+			if not _CIV_OVERVIEW_EXEMPT_CIVS[civ] then
+				table.insert(overview.meta.issues, string.format("UPGRADE_TABLE_MISSING civ=%s", civ))
+			end
+		end
+
+		overview.civs[civ] = civ_data
+	end
+
+	_CBA_DEBUG_CIV_OVERVIEW = overview
+
+	print("")
+	print(string.format("[CIV_OVERVIEW] Built for %d civs", overview.meta.civ_count))
+	print(string.format("[CIV_OVERVIEW] Missing: entity=%d siege=%d upgrade=%d | issues=%d",
+		overview.meta.entity_missing,
+		overview.meta.siege_missing,
+		overview.meta.upgrade_missing,
+		#overview.meta.issues))
+	print("[CIV_OVERVIEW] Commands: Debug_CivOverview_Summary(), Debug_CivOverview_Civ(\"civ\"), Debug_CivOverview_Audit(), Debug_CivOverview_DumpStructured(true)")
+end
+
+function _CivOverview_RequireBuild()
+	if _CBA_DEBUG_CIV_OVERVIEW == nil then
+		Debug_CivOverview_Build()
+	end
+	return _CBA_DEBUG_CIV_OVERVIEW
+end
+
+function Debug_CivOverview_Summary()
+	local overview = _CivOverview_RequireBuild()
+	print("")
+	print("[CIV_OVERVIEW] Per-civ summary")
+	for _, civ in ipairs(_CivOverview_SortedKeys(overview.civs)) do
+		local c = overview.civs[civ]
+		print(string.format("  %s | entity ok=%d miss=%d dis=%d src=%s | siege ok=%d miss=%d dis=%d src=%s | up ok=%d miss=%d src=%s",
+			civ,
+			c.entity.ok, c.entity.missing, c.entity.disabled, c.entity.source,
+			c.siege.ok, c.siege.missing, c.siege.disabled, c.siege.source,
+			c.upgrade.ok, c.upgrade.missing, c.upgrade.source))
+	end
+end
+
+function Debug_CivOverview_Civ(civ)
+	local overview = _CivOverview_RequireBuild()
+	local c = overview.civs[civ]
+	if c == nil then
+		print(string.format("[CIV_OVERVIEW] Unknown civ: %s", tostring(civ)))
+		return
+	end
+
+	print("")
+	print(string.format("[CIV_OVERVIEW] civ=%s parent=%s", civ, tostring(c.parent)))
+	print(string.format("  entity source=%s source_civ=%s ok=%d miss=%d dis=%d",
+		c.entity.source, tostring(c.entity.source_civ), c.entity.ok, c.entity.missing, c.entity.disabled))
+	print(string.format("  siege  source=%s source_civ=%s ok=%d miss=%d dis=%d",
+		c.siege.source, tostring(c.siege.source_civ), c.siege.ok, c.siege.missing, c.siege.disabled))
+	print(string.format("  upg    source=%s source_civ=%s ok=%d miss=%d named=%d",
+		c.upgrade.source, tostring(c.upgrade.source_civ), c.upgrade.ok, c.upgrade.missing, c.upgrade.named_count))
+
+	if #c.entity.missing_required > 0 then
+		table.sort(c.entity.missing_required)
+		print("  missing_required_entity_keys=" .. table.concat(c.entity.missing_required, ", "))
+	end
+end
+
+function Debug_CivOverview_Audit()
+	local overview = _CivOverview_RequireBuild()
+	print("")
+	print(string.format("[CIV_OVERVIEW_AUDIT] civs=%d entity_missing=%d siege_missing=%d upgrade_missing=%d issues=%d",
+		overview.meta.civ_count,
+		overview.meta.entity_missing,
+		overview.meta.siege_missing,
+		overview.meta.upgrade_missing,
+		#overview.meta.issues))
+	for _, issue in ipairs(overview.meta.issues) do
+		print("  [ISSUE] " .. issue)
+	end
+	if #overview.meta.issues == 0 then
+		print("  [ISSUE] none")
+	end
+end
+
+function Debug_CivOverview_DumpStructured(include_entries)
+	local overview = _CivOverview_RequireBuild()
+	print("")
+	print(string.format("[CIV_OVERVIEW_META] civ_count=%d entity_missing=%d siege_missing=%d upgrade_missing=%d issues=%d",
+		overview.meta.civ_count,
+		overview.meta.entity_missing,
+		overview.meta.siege_missing,
+		overview.meta.upgrade_missing,
+		#overview.meta.issues))
+
+	for _, civ in ipairs(_CivOverview_SortedKeys(overview.civs)) do
+		local c = overview.civs[civ]
+		print(string.format("[CIV_OVERVIEW_CIV] civ=%s parent=%s entity_source=%s siege_source=%s upgrade_source=%s",
+			civ, tostring(c.parent), c.entity.source, c.siege.source, c.upgrade.source))
+		print(string.format("[CIV_OVERVIEW_COUNTS] civ=%s entity_ok=%d entity_missing=%d entity_disabled=%d siege_ok=%d siege_missing=%d siege_disabled=%d upgrade_ok=%d upgrade_missing=%d",
+			civ,
+			c.entity.ok, c.entity.missing, c.entity.disabled,
+			c.siege.ok, c.siege.missing, c.siege.disabled,
+			c.upgrade.ok, c.upgrade.missing))
+
+		if include_entries == true then
+			for _, key in ipairs(_CivOverview_SortedKeys(c.entity.keys)) do
+				local e = c.entity.keys[key]
+				print(string.format("[CIV_OVERVIEW_ENTITY] civ=%s key=%s status=%s bp=%s", civ, key, e.status, tostring(e.bp)))
+			end
+			for _, key in ipairs(_CivOverview_SortedKeys(c.siege.keys)) do
+				local s = c.siege.keys[key]
+				print(string.format("[CIV_OVERVIEW_SIEGE] civ=%s key=%s status=%s bp=%s", civ, key, s.status, tostring(s.bp)))
+			end
+			for _, age in ipairs({"AGE_DARK", "AGE_FEUDAL", "AGE_CASTLE", "AGE_IMPERIAL"}) do
+				local a = c.upgrade.age_counts[age]
+				if a ~= nil then
+					print(string.format("[CIV_OVERVIEW_UPGRADE_AGE] civ=%s age=%s ok=%d missing=%d total=%d", civ, age, a.ok, a.missing, a.total))
+				end
+			end
+		end
+	end
+
+	for _, issue in ipairs(overview.meta.issues) do
+		print("[CIV_OVERVIEW_ISSUE] " .. issue)
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Namespace Registration
+---------------------------------------------------------------------------------------------------
+if debug then
+	debug.data.civs       = Debug_CivOverview_Build
+	debug.data.civSummary = Debug_CivOverview_Summary
+	debug.data.civAudit   = Debug_CivOverview_Audit
+	debug.data.civDump    = Debug_CivOverview_DumpStructured
+end

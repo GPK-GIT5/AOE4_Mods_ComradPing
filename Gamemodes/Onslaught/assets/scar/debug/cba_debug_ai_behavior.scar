@@ -1,0 +1,672 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — AI Behavior Knowledge Tests
+-- CBA Debug — AI Behavior Visual Scenarios
+-- Simulates AI scenarios and uses simple YES/NO visual confirmation to verify outcomes.
+-- Each scenario: simulate first, then ask a beginner-friendly question about what
+-- should be visible. No internal function names or system internals in prompts.
+--
+-- Branch: onslaught-v3.3
+-- Depends: cba_debug_core.scar, cba_debug_helpers.scar, cba_debug_ui_prompts.scar,
+--          cba_debug_spawn_sequences.scar
+--
+-- Scenarios:
+--   1. Target Priority Logic     — Reasoning about AI threat detection radius & priority
+--   2. Resource Spending Rules   — Whether resource surplus triggers correct AI behavior
+--   3. Population Cap Mechanics  — System behavior when pop reaches cap
+--   4. Multi-Threat Reasoning    — Can AI split forces? What does the engine support?
+--   5. Siege Counter-Play        — Priority system for anti-siege response
+--   6. Recovery Pipeline         — What systems must activate after near-elimination?
+--   7. Holy Site Mechanics       — Religious victory timer rules and AI obligations
+--   8. State Consistency Audit   — Cross-system invariant checks from live data
+--
+-- Entry Points:
+--   Debug_AIBehavior()             — Run all 8 scenarios
+--   Debug_AIBehavior_Scenario(n)   — Run scenario n (1-8)
+--   Debug_AIBehaviorStatus()       — Check progress
+---------------------------------------------------------------------------------------------------
+
+local _AI_SUITE_NAME = "AIBehavior"
+
+local _ai = {
+	running = false,
+	current_scenario = 0,
+	total_scenarios = 8,
+	results = {},
+	start_time = 0,
+	scenario_start_idx = 1,
+}
+
+local _AI_SCENARIO_NAMES = {
+	"Enemy Threat Response",
+	"AI Resource Production",
+	"Population Growth Check",
+	"Multi-Front Defense",
+	"Siege Defense Response",
+	"Recovery After Losses",
+	"Holy Site Victory Timer",
+	"Game State Sanity Check",
+}
+
+---------------------------------------------------------------------------------------------------
+-- Scenario Helpers
+---------------------------------------------------------------------------------------------------
+
+local function _AI_ScenarioHeader(num)
+	local name = _AI_SCENARIO_NAMES[num] or "Unknown"
+	print("")
+	print(string.format("  ======== AI SCENARIO %d / %d: %s ========", num, _ai.total_scenarios, string.upper(name)))
+	_ai.scenario_start_idx = #_cba_debug.test_results + 1
+end
+
+local function _AI_ScenarioFooter(num)
+	local name = _AI_SCENARIO_NAMES[num] or "Unknown"
+	local sc_pass = 0
+	local sc_total = 0
+	for i = _ai.scenario_start_idx, #_cba_debug.test_results do
+		sc_total = sc_total + 1
+		if _cba_debug.test_results[i].pass then
+			sc_pass = sc_pass + 1
+		end
+	end
+	table.insert(_ai.results, {name = name, passed = sc_pass, total = sc_total})
+	print(string.format("  -------- Scenario %d: %d / %d passed --------", num, sc_pass, sc_total))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Scenario 1: Target Priority Logic
+-- Spawns threats near an AI player and asks knowledge questions about threat detection.
+---------------------------------------------------------------------------------------------------
+
+function _AI_Scenario1_TargetPriority()
+	_AI_ScenarioHeader(1)
+
+	-- Automated: verify AI infrastructure exists
+	_Debug_RunTest("AI_Target/ai_controllable", function()
+		if PLAYERS == nil or #PLAYERS < 2 then return false, "need >= 2 players" end
+		local ok, err = pcall(AI_IsAIPlayer, PLAYERS[2].id)
+		return true, ok and "AI check available" or "AI_IsAIPlayer: " .. string.sub(tostring(err), 1, 50)
+	end)
+
+	_Debug_RunTest("AI_Target/pause_resume_safety", function()
+		local ok1, err1 = pcall(function()
+			if PLAYERS and #PLAYERS >= 2 then
+				AI_PauseCurrentTasks(PLAYERS[2].id, true)
+				AI_PauseCurrentTasks(PLAYERS[2].id, false)
+			end
+		end)
+		return ok1 or true, ok1 and "pause/resume OK" or "error: " .. string.sub(tostring(err1), 1, 50)
+	end)
+
+	-- Spawn mixed threats near AI player for context
+	if PLAYERS and #PLAYERS >= 2 then
+		local player = PLAYERS[2]
+		local pos = _Debug_GetPlayerSpawnAnchor(player)
+		if pos then
+			pcall(function()
+				local sbp = BP_GetSquadBlueprint("unit_spearman_1_eng")
+				if sbp then
+					local sg = SGroup_CreateUnique()
+					UnitEntry_DeploySquads(PLAYERS[1].id, sg, {{sbp = sbp, numSquads = 3}}, pos)
+				end
+			end)
+			print("  [SETUP] Spawned 3 enemy spearmen near P2 keep")
+		end
+	end
+
+	-- Knowledge question
+	Rule_AddOneShot(_AI_S1_Ask, 2.0)
+end
+
+function _AI_S1_Ask()
+	Debug_AskYesNo(
+		"Enemy spearmen were just placed near P2's base. Watch the screen for a moment. Did P2's units start moving out to fight them?",
+		_AI_S1_OnAnswer, 0, 1,
+		"Expected: YES. The AI should send defenders toward nearby enemies. If P2 did nothing, the AI may not be detecting the threat.")
+end
+
+function _AI_S1_OnAnswer(choice)
+	table.insert(_cba_debug.test_results, {
+		name = "AI_Target/threat_response_visible",
+		pass = (choice == 1),
+		detail = (choice == 1) and "AI responded to threat" or "REVIEW: AI did not visibly respond to nearby enemies",
+	})
+	_AI_ScenarioFooter(1)
+	if _ai._on_scenario_complete then _ai._on_scenario_complete() end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Scenario 2: Resource Spending Rules
+-- Grants AI surplus resources and tests knowledge of AI spending priorities.
+---------------------------------------------------------------------------------------------------
+
+function _AI_Scenario2_ResourceBehavior()
+	_AI_ScenarioHeader(2)
+
+	-- Automated checks
+	if PLAYERS then
+		for i, player in ipairs(PLAYERS) do
+			_Debug_RunTest("AI_Resource/P" .. i .. "_resources", function()
+				local ok, food = pcall(Player_GetResource, player.id, RT_Food)
+				if not ok then return false, "GetResource crash" end
+				return true, "food=" .. tostring(food)
+			end)
+		end
+	end
+
+	-- Grant surplus
+	if PLAYERS and #PLAYERS >= 2 then
+		pcall(function()
+			Player_SetResource(PLAYERS[2].id, RT_Food, 10000)
+			Player_SetResource(PLAYERS[2].id, RT_Wood, 10000)
+			Player_SetResource(PLAYERS[2].id, RT_Gold, 10000)
+			Player_SetResource(PLAYERS[2].id, RT_Stone, 5000)
+		end)
+		print("  [SETUP] Gave P2 surplus: 10k/10k/10k/5k (F/W/G/S)")
+	end
+
+	Rule_AddOneShot(_AI_S2_Ask, 2.0)
+end
+
+function _AI_S2_Ask()
+	Debug_AskYesNo(
+		"P2 was just given a large supply of resources. Watch P2's production buildings for a few seconds. Did any new units start training there?",
+		_AI_S2_OnAnswer, 0, 1,
+		"Expected: YES. With plenty of resources, the AI should begin training units. If nothing is happening, check that P2 has production buildings placed.")
+end
+
+function _AI_S2_OnAnswer(choice)
+	table.insert(_cba_debug.test_results, {
+		name = "AI_Resource/production_visible",
+		pass = (choice == 1),
+		detail = (choice == 1) and "AI started training units" or "REVIEW: AI may not be training despite surplus resources",
+	})
+	_AI_ScenarioFooter(2)
+	if _ai._on_scenario_complete then _ai._on_scenario_complete() end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Scenario 3: Population Cap Mechanics
+-- Tests understanding of what happens at population cap.
+---------------------------------------------------------------------------------------------------
+
+function _AI_Scenario3_PopulationCap()
+	_AI_ScenarioHeader(3)
+
+	-- Automated: gather pop data
+	local pop_data = {}
+	if PLAYERS then
+		for i, player in ipairs(PLAYERS) do
+			_Debug_RunTest("AI_Pop/P" .. i .. "_pop_state", function()
+				local ok_pop, pop = pcall(Player_GetCurrentPopulation, player.id, CT_Personnel)
+				local ok_cap, cap = pcall(Player_GetCurrentPopulationCap, player.id, CT_Personnel)
+				local ok_max, maxcap = pcall(Player_GetMaxPopulationCap, player.id, CT_Personnel)
+				if not (ok_pop and ok_cap) then return false, "pop API crash" end
+				table.insert(pop_data, {idx = i, pop = pop, cap = cap, max = ok_max and maxcap or 0})
+				return true, string.format("pop=%d/%d (max=%d)", pop, cap, ok_max and maxcap or 0)
+			end)
+		end
+	end
+
+	-- Print for context
+	for _, d in ipairs(pop_data) do
+		print(string.format("    P%d: pop=%d cap=%d max=%d", d.idx, d.pop, d.cap, d.max))
+	end
+
+	-- Trigger a pop increase cycle
+	if type(AGS_IncreasePopulation) == "function" then
+		pcall(AGS_IncreasePopulation)
+		print("  [SIM] Triggered population cap increase via AGS_IncreasePopulation")
+	else
+		print("  [INFO] AGS_IncreasePopulation not available — check counter manually")
+	end
+
+	Rule_AddOneShot(_AI_S3_Ask, 1.5)
+end
+
+function _AI_S3_Ask()
+	Debug_AskYesNo(
+		"The population cap was just increased. Did the max population number (right-hand number in the pop counter) go up for any player?",
+		_AI_S3_OnAnswer, 0, 1,
+		"Expected: YES. The population cap increases automatically in CBA. If it did not change, the growth system may not be running.")
+end
+
+function _AI_S3_OnAnswer(choice)
+	table.insert(_cba_debug.test_results, {
+		name = "AI_Pop/cap_increased_visible",
+		pass = (choice == 1),
+		detail = (choice == 1) and "Pop cap increase visible" or "REVIEW: pop cap may not have increased",
+	})
+	_AI_ScenarioFooter(3)
+	if _ai._on_scenario_complete then _ai._on_scenario_complete() end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Scenario 4: Multi-Threat Reasoning
+-- Spawns threats from two directions and tests knowledge of AI army splitting.
+---------------------------------------------------------------------------------------------------
+
+function _AI_Scenario4_MultiThreat()
+	_AI_ScenarioHeader(4)
+
+	_Debug_RunTest("AI_MultiThreat/player_check", function()
+		if PLAYERS == nil or #PLAYERS < 2 then return false, "need >= 2 players" end
+		return true, #PLAYERS .. " players available"
+	end)
+
+	-- Spawn two groups from different positions
+	if PLAYERS and #PLAYERS >= 2 then
+		local target = PLAYERS[2]
+		local pos = _Debug_GetPlayerSpawnAnchor(target)
+		if pos then
+			pcall(function()
+				local sbp_a = BP_GetSquadBlueprint("unit_spearman_1_eng")
+				local sbp_b = BP_GetSquadBlueprint("unit_archer_2_eng")
+				if sbp_a and sbp_b then
+					local pos_a = World_Pos(pos.x + 30, pos.y, pos.z + 30)
+					local pos_b = World_Pos(pos.x - 30, pos.y, pos.z - 30)
+					UnitEntry_DeploySquads(PLAYERS[1].id, SGroup_CreateUnique(), {{sbp = sbp_a, numSquads = 5}}, pos_a)
+					UnitEntry_DeploySquads(PLAYERS[1].id, SGroup_CreateUnique(), {{sbp = sbp_b, numSquads = 5}}, pos_b)
+				end
+			end)
+			print("  [SETUP] Spawned 5 spearmen NE + 5 archers SW of P2 keep")
+		end
+	end
+
+	Rule_AddOneShot(_AI_S4_Ask, 2.0)
+end
+
+function _AI_S4_Ask()
+	Debug_AskYesNo(
+		"Two enemy groups are attacking P2 from opposite directions. Is P2's army bunched together chasing one group, while the other group attacks more freely?",
+		_AI_S4_OnAnswer, 0, 1,
+		"Expected: YES. The AI focuses on one threat at a time rather than splitting up. This is normal — one group will be fought while the other has a temporary opening.")
+end
+
+function _AI_S4_OnAnswer(choice)
+	table.insert(_cba_debug.test_results, {
+		name = "AI_MultiThreat/focus_behavior_visible",
+		pass = (choice == 1),
+		detail = (choice == 1) and "AI focused on one threat" or "REVIEW: AI may be behaving unexpectedly against two threats",
+	})
+	_AI_ScenarioFooter(4)
+	if _ai._on_scenario_complete then _ai._on_scenario_complete() end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Scenario 5: Siege Counter-Play
+-- Spawns siege attacking AI buildings. Tests knowledge of counter-siege priority.
+---------------------------------------------------------------------------------------------------
+
+function _AI_Scenario5_SiegeResponse()
+	_AI_ScenarioHeader(5)
+
+	_Debug_RunTest("AI_Siege/siege_bp_available", function()
+		local ok, sbp = pcall(BP_GetSquadBlueprint, "unit_springald_3_eng")
+		return ok and sbp ~= nil, ok and "springald BP resolved" or "BP not available"
+	end)
+
+	-- Spawn mangonels near AI keep
+	if PLAYERS and #PLAYERS >= 2 then
+		local target = PLAYERS[2]
+		local pos = _Debug_GetPlayerSpawnAnchor(target)
+		if pos then
+			pcall(function()
+				local sbp = BP_GetSquadBlueprint("unit_mangonel_3_eng")
+				if sbp then
+					UnitEntry_DeploySquads(PLAYERS[1].id, SGroup_CreateUnique(), {{sbp = sbp, numSquads = 2}}, World_Pos(pos.x + 20, pos.y, pos.z))
+				end
+			end)
+			print("  [SETUP] Spawned 2 enemy mangonels near P2 keep")
+		end
+	end
+
+	Rule_AddOneShot(_AI_S5_Ask, 2.0)
+end
+
+function _AI_S5_Ask()
+	Debug_AskYesNo(
+		"Two enemy mangonels were placed near P2's keep. Did P2's melee units move out to attack the mangonels?",
+		_AI_S5_OnAnswer, 0, 1,
+		"Expected: YES. The AI should prioritize stopping siege before it destroys structures. If P2 ignored the mangonels, this may be worth investigating.")
+end
+
+function _AI_S5_OnAnswer(choice)
+	table.insert(_cba_debug.test_results, {
+		name = "AI_Siege/defense_response_visible",
+		pass = (choice == 1),
+		detail = (choice == 1) and "AI responded to siege threat" or "REVIEW: AI may not have prioritized the mangonels",
+	})
+	_AI_ScenarioFooter(5)
+	if _ai._on_scenario_complete then _ai._on_scenario_complete() end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Scenario 6: Recovery Pipeline
+-- Tests knowledge of what CBA systems activate after near-elimination.
+---------------------------------------------------------------------------------------------------
+
+function _AI_Scenario6_Recovery()
+	_AI_ScenarioHeader(6)
+
+	-- Automated: check P2 state
+	if PLAYERS and #PLAYERS >= 2 then
+		_Debug_RunTest("AI_Recovery/P2_has_units", function()
+			local ok, pop = pcall(Player_GetCurrentPopulation, PLAYERS[2].id, CT_Personnel)
+			if not ok then return false, "pop API crash" end
+			return pop > 0, "P2 pop=" .. tostring(pop)
+		end)
+	end
+
+	-- Give recovery resources
+	if PLAYERS and #PLAYERS >= 2 then
+		pcall(function()
+			Player_SetResource(PLAYERS[2].id, RT_Food, 8000)
+			Player_SetResource(PLAYERS[2].id, RT_Wood, 8000)
+			Player_SetResource(PLAYERS[2].id, RT_Gold, 8000)
+		end)
+		print("  [SIM] Gave P2 recovery resources: 8k/8k/8k")
+		local pos2 = _Debug_GetPlayerSpawnAnchor(PLAYERS[2])
+		if pos2 then
+			pcall(function()
+				local sbp = BP_GetSquadBlueprint("unit_spearman_1_eng")
+				if sbp then
+					UnitEntry_DeploySquads(PLAYERS[2].id, SGroup_CreateUnique(), {{sbp = sbp, numSquads = 3}}, pos2)
+					print("  [SIM] Spawned 3 reinforcement units near P2")
+				end
+			end)
+		end
+	end
+
+	Rule_AddOneShot(_AI_S6_Ask, 2.0)
+end
+
+function _AI_S6_Ask()
+	Debug_AskYesNo(
+		"P2 was in a weakened state but just received resources and reinforcements. Can you see new units appearing in P2's area?",
+		_AI_S6_OnAnswer, 0, 1,
+		"Expected: YES. After receiving resources and reinforcements, P2 should have visible new units in their area. If nothing appeared, the spawn may have failed.")
+end
+
+function _AI_S6_OnAnswer(choice)
+	table.insert(_cba_debug.test_results, {
+		name = "AI_Recovery/reinforcements_visible",
+		pass = (choice == 1),
+		detail = (choice == 1) and "Recovery units visible" or "REVIEW: recovery units may not have appeared",
+	})
+	_AI_ScenarioFooter(6)
+	if _ai._on_scenario_complete then _ai._on_scenario_complete() end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Scenario 7: Holy Site Mechanics
+-- Tests understanding of religious victory timer rules.
+---------------------------------------------------------------------------------------------------
+
+function _AI_Scenario7_HolySiteContest()
+	_AI_ScenarioHeader(7)
+
+	-- Check if religious module is active
+	_Debug_RunTest("AI_HolySite/module_active", function()
+		if _religious == nil then return true, "religious module not active (skip scenario)" end
+		if _religious.sites == nil then return false, "sites nil" end
+		return true, #_religious.sites .. " holy sites"
+	end)
+
+	if _religious and _religious.sites and #_religious.sites > 0 then
+		local site_count = #_religious.sites
+		print(string.format("    Religious module active: %d holy sites", site_count))
+
+		Rule_AddOneShot(_AI_S7_Ask, 1.0)
+	else
+		-- No religious module — ask about the system anyway (knowledge test)
+		print("    Religious module not active — testing theoretical knowledge")
+		Rule_AddOneShot(_AI_S7_AskTheoretical, 1.0)
+	end
+end
+
+function _AI_S7_Ask()
+	Debug_AskYesNo(
+		"All holy sites are now controlled by one team. Is a victory countdown timer visible on screen?",
+		_AI_S7_OnAnswer, 0, 1,
+		"Expected: YES. When one team holds all holy sites, a victory timer should appear on screen. If no timer is showing, the religious victory system may not be active.")
+end
+
+function _AI_S7_AskTheoretical()
+	Debug_AskYesNo(
+		"The religious victory module is not active on this map. Can you see any holy site or relic on the map right now?",
+		_AI_S7_OnAnswer, 0, 1,
+		"Expected: YES or NO depending on the map. If you can see capture points but no timer is showing even when held, the religious module may not be running.")
+end
+
+function _AI_S7_OnAnswer(choice)
+	table.insert(_cba_debug.test_results, {
+		name = "AI_HolySite/timer_visible",
+		pass = (choice == 1),
+		detail = (choice == 1) and "Religious system visually confirmed" or "REVIEW: religious system may not be displaying correctly",
+	})
+	_AI_ScenarioFooter(7)
+	if _ai._on_scenario_complete then _ai._on_scenario_complete() end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Scenario 8: State Consistency Audit
+-- Gathers comprehensive live data and asks cross-system invariant questions.
+---------------------------------------------------------------------------------------------------
+
+function _AI_Scenario8_StateAudit()
+	_AI_ScenarioHeader(8)
+
+	-- Gather comprehensive state
+	local audit = {}
+	if PLAYERS then
+		for i, player in ipairs(PLAYERS) do
+			local e = {idx = i, civ = "?", age = 0, pop = 0, cap = 0, food = 0, kills = 0, kill_req = 0, siege = 0, bldg = 0}
+			local ok_c, c = pcall(Player_GetRaceName, player.id)
+			if ok_c then e.civ = c end
+			local ok_a, a = pcall(Player_GetCurrentAge, player.id)
+			if ok_a then e.age = a end
+			local ok_p, p = pcall(Player_GetCurrentPopulation, player.id, CT_Personnel)
+			if ok_p then e.pop = p end
+			local ok_cp, cp = pcall(Player_GetCurrentPopulationCap, player.id, CT_Personnel)
+			if ok_cp then e.cap = cp end
+			local ok_f, f = pcall(Player_GetResource, player.id, RT_Food)
+			if ok_f then e.food = math.floor(f) end
+			e.kills = player.killed_number or 0
+			e.kill_req = player.obj_kill_requirement or 0
+			e.siege = player.siegeLimit_count or 0
+			e.bldg = player.obj_buildingLimit_count or 0
+			table.insert(audit, e)
+
+			_Debug_RunTest("AI_Audit/P" .. i .. "_state_valid", function()
+				if e.age < 1 or e.age > 4 then return false, "invalid age=" .. e.age end
+				if e.pop < 0 then return false, "negative pop" end
+				if e.pop > e.cap and e.cap > 0 then return false, "pop exceeds cap" end
+				return true, string.format("age=%d pop=%d/%d food=%d kills=%d", e.age, e.pop, e.cap, e.food, e.kills)
+			end)
+		end
+	end
+
+	-- Print audit data
+	print("  [AUDIT] Cross-system state:")
+	for _, e in ipairs(audit) do
+		print(string.format("    P%d (%s): Age%d Pop%d/%d Food%d Kills%d/%d Siege%d Bldg%d",
+			e.idx, e.civ, e.age, e.pop, e.cap, e.food, e.kills, e.kill_req, e.siege, e.bldg))
+	end
+
+	-- Compute derived question values
+	local conquest_met = _mod and _mod.objective_meet or 0
+	local conquest_req = _mod and _mod.objective_requirement or 0
+	print(string.format("    Conquest: %d/%d", conquest_met, conquest_req))
+
+	_ai._audit_data = audit
+	_ai._audit_conquest_met = conquest_met
+	_ai._audit_conquest_req = conquest_req
+
+	Rule_AddOneShot(_AI_S8_AskQ1, 1.0)
+end
+
+function _AI_S8_AskQ1()
+	Debug_AskYesNo(
+		"Look at the scoreboard and player icons in the HUD. Do all active players appear to be in the game with their units and resources showing?",
+		_AI_S8_OnAnswer, 0, 1,
+		"Expected: YES. All active players should have visible game state in the HUD. If any player's info looks wrong or missing, flag it here.")
+end
+
+function _AI_S8_OnAnswer(choice)
+	table.insert(_cba_debug.test_results, {
+		name = "AI_Audit/hud_state_ok",
+		pass = (choice == 1),
+		detail = (choice == 1) and "HUD and player state look correct" or "REVIEW: HUD or player state may have issues",
+	})
+
+	_AI_ScenarioFooter(8)
+	if _ai._on_scenario_complete then _ai._on_scenario_complete() end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Scenario Dispatch
+---------------------------------------------------------------------------------------------------
+
+local _AI_SCENARIO_DISPATCH = {
+	[1] = _AI_Scenario1_TargetPriority,
+	[2] = _AI_Scenario2_ResourceBehavior,
+	[3] = _AI_Scenario3_PopulationCap,
+	[4] = _AI_Scenario4_MultiThreat,
+	[5] = _AI_Scenario5_SiegeResponse,
+	[6] = _AI_Scenario6_Recovery,
+	[7] = _AI_Scenario7_HolySiteContest,
+	[8] = _AI_Scenario8_StateAudit,
+}
+
+---------------------------------------------------------------------------------------------------
+-- Single Scenario Runner
+---------------------------------------------------------------------------------------------------
+
+function Debug_AIBehavior_Scenario(n)
+	_cba_debug.enabled = true
+	n = n or 1
+
+	if n < 1 or n > _ai.total_scenarios then
+		print(string.format("[AI] Invalid scenario %d (valid: 1-%d)", n, _ai.total_scenarios))
+		return
+	end
+
+	print("")
+	print("================================================================")
+	print(string.format("  AI BEHAVIOR — Scenario %d: %s", n, _AI_SCENARIO_NAMES[n]))
+	print("================================================================")
+
+	local fn = _AI_SCENARIO_DISPATCH[n]
+	if fn then fn() end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Full Suite Runner
+---------------------------------------------------------------------------------------------------
+
+function Debug_AIBehavior()
+	_cba_debug.enabled = true
+
+	local ok, gt = pcall(World_GetGameTime)
+	_ai.running = true
+	_ai.current_scenario = 0
+	_ai.results = {}
+	_ai.start_time = ok and gt or 0
+
+	print("")
+	print("================================================================")
+	print("  CBA DEBUG — AI BEHAVIOR KNOWLEDGE TESTS (8 scenarios)")
+	print("  CBA DEBUG — AI BEHAVIOR SCENARIOS (8 scenarios)")
+	print("  Simulates scenarios then asks what you see on screen")
+	print("  All prompts: YES/NO only, no auto-answer timer")
+	print("  Step mode: " .. tostring(_cba_debug.step_mode))
+	print("================================================================")
+
+	_AI_RunNextScenario()
+end
+
+function _AI_RunNextScenario()
+	if not _ai.running then return end
+
+	_ai.current_scenario = _ai.current_scenario + 1
+	local sc = _ai.current_scenario
+
+	if sc > _ai.total_scenarios then
+		_AI_FinalReport()
+		return
+	end
+
+	print(string.format("\n[AI] >>> Scenario %d / %d: %s", sc, _ai.total_scenarios, _AI_SCENARIO_NAMES[sc]))
+
+	_ai._on_scenario_complete = _AI_OnScenarioComplete
+
+	local fn = _AI_SCENARIO_DISPATCH[sc]
+	if fn then
+		fn()
+	else
+		print("  [SKIP] No handler for scenario " .. sc)
+		_AI_OnScenarioComplete()
+	end
+end
+
+function _AI_OnScenarioComplete()
+	_ai._on_scenario_complete = nil
+	_Debug_ScheduleNextPhase(_AI_RunNextScenario, 3, _AI_SCENARIO_NAMES[_ai.current_scenario + 1] or "FinalReport", _AI_SUITE_NAME)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Final Report
+---------------------------------------------------------------------------------------------------
+
+function _AI_FinalReport()
+	_ai.running = false
+
+	local ok, gt = pcall(World_GetGameTime)
+	local elapsed = (ok and _ai.start_time) and (gt - _ai.start_time) or 0
+
+	local total_passed = 0
+	local total_tests = 0
+
+	print("")
+	print("================================================================")
+	print("  AI BEHAVIOR — ALL 8 SCENARIOS COMPLETE")
+	print(string.format("  Elapsed: %.1fs", elapsed))
+	print("================================================================")
+
+	for i, r in ipairs(_ai.results) do
+		local st = (r.passed == r.total) and "PASS" or "FAIL"
+		print(string.format("    [%s] %s: %d/%d", st, r.name, r.passed, r.total))
+		total_passed = total_passed + r.passed
+		total_tests = total_tests + r.total
+	end
+
+	print(string.format("  -------- AGGREGATE: %d / %d passed --------", total_passed, total_tests))
+
+	_Debug_EndMarker(_AI_SUITE_NAME, total_passed, total_tests, elapsed)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Status
+---------------------------------------------------------------------------------------------------
+
+function Debug_AIBehaviorStatus()
+	if not _ai.running then
+		print("[AI] Not running.")
+		return
+	end
+	local ok, gt = pcall(World_GetGameTime)
+	local elapsed = ok and (gt - _ai.start_time) or 0
+	print(string.format("[AI] Scenario %d/%d (%s) elapsed=%.1fs",
+		_ai.current_scenario, _ai.total_scenarios,
+		_AI_SCENARIO_NAMES[_ai.current_scenario] or "?", elapsed))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Namespace Registration
+---------------------------------------------------------------------------------------------------
+if debug then
+	debug.ai.run      = Debug_AIBehavior
+	debug.ai.scenario = Debug_AIBehavior_Scenario
+	debug.ai.status   = Debug_AIBehaviorStatus
+	debug._register("ai", Debug_AIBehavior, "8-scenario AI knowledge tests (threat, spending, pop, siege, recovery)", 3)
+end

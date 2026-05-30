@@ -1,0 +1,1408 @@
+-----------------------------------------------------------------------
+-- DevMenu XAML
+--
+-- Multiple presenters:
+--   1. CHEAT Button — "CHEAT" toggle button at Margin="0,0,389,0" (left of HUD)
+--   2. DEV Button — "DEV" toggle button at Margin="0,0,453,0" (left of CHEAT)
+--   3. Panel builders — Dynamic cheat and debugger panel presenters
+--
+-- Both buttons hidden when cheats disabled via DataContext binding.
+-- Panels built from entry tables dynamically by devmenu.scar.
+--
+-- Standalone: no resource imports beyond XAML namespaces.
+-----------------------------------------------------------------------
+
+-- HUD toggle button is at Margin="0,0,325,0", Width=56.
+-- CHEAT button sits ~8px to its left -> right margin = 325 + 56 + 8 = 389
+-- DEV button sits ~8px to CHEAT's left -> right margin = 389 + 56 + 8 = 453
+
+function _DEVMENU_BUILD_BTN_XAML(menu_type, right_margin)
+	-- menu_type: "CHEAT" or "DEV"
+	-- right_margin: pixel distance from right edge (e.g., 389, 453)
+	-- Returns XAML string for a toggle button
+	local title = string.upper(menu_type)
+	local margin_str = "0,0," .. tostring(right_margin) .. ",0"
+	local cmd_key = "cmd_" .. string.lower(menu_type)
+	
+	return 
+[[<ToggleButton
+		xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+		xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+
+		HorizontalAlignment="Right"
+		VerticalAlignment="Bottom"
+		Margin="]] .. margin_str .. [["
+
+		Height="40"
+		Width="56"
+
+		Style="{StaticResource SecondaryRaisedContentToggleButton}"
+
+		Command="{Binding []] .. cmd_key .. [[]}">
+	<TextBlock
+			TextAlignment="Center"
+			Style="{StaticResource HUDTitleAltTextBlockStyle}"
+			Text="]] .. title .. [[" />
+</ToggleButton>
+]]
+end
+
+-- Pre-built button XAML for both menus
+_DEVMENU_BTN_CHEAT_XAML = _DEVMENU_BUILD_BTN_XAML("CHEAT", 389)
+_DEVMENU_BTN_DEV_XAML   = _DEVMENU_BUILD_BTN_XAML("DEV", 453)
+
+local function _DEVMENU_XML_ESCAPE(value)
+	local s = tostring(value or "")
+	-- Escape '&' first so subsequent replacements are not re-escaped.
+	s = string.gsub(s, "&", "&amp;")
+	s = string.gsub(s, "\"", "&quot;")
+	s = string.gsub(s, "<", "&lt;")
+	s = string.gsub(s, ">", "&gt;")
+	s = string.gsub(s, "'", "&apos;")
+	return s
+end
+
+-----------------------------------------------------------------------
+-- Panel builder
+--
+-- Returns a complete XAML document string. The caller injects the
+-- pre-built entry-card markup (rows of cheat cards) into the panel
+-- body. This keeps the XAML purely structural and avoids any binding
+-- to dynamic-length collections.
+-----------------------------------------------------------------------
+function _DEVMENU_BUILD_PANEL_XAML(cards_xaml)
+	return
+[[<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+		xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+		xmlns:esUtility="clr-namespace:WPFGUI.Shared.Utility;assembly=EngineUI"
+		HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+		Visibility="{Binding [panel_visible], Converter={StaticResource BoolToVis}}">
+
+	<Grid.Resources>
+		<Style x:Key="DevMenuCardButtonStyle" TargetType="Button">
+			<Setter Property="SnapsToDevicePixels" Value="true" />
+			<Setter Property="OverridesDefaultStyle" Value="true" />
+			<Setter Property="Cursor" Value="Hand" />
+			<Setter Property="esUtility:AudioAttachedProperty.PreviewMouseLeftButtonUpSound"
+				Value="sfx_ui_hud_inGame_button_play" />
+			<Setter Property="Template">
+				<Setter.Value>
+					<ControlTemplate TargetType="Button">
+						<Border Name="CardBorder" Background="#CC1A2332" CornerRadius="6"
+							BorderBrush="#44668899" BorderThickness="1.5"
+							Padding="10,8,10,10" MinWidth="190" MaxWidth="210"
+							MinHeight="108">
+							<ContentPresenter />
+						</Border>
+						<ControlTemplate.Triggers>
+							<Trigger Property="Tag" Value="menu">
+								<Setter TargetName="CardBorder" Property="Background" Value="#CC253148" />
+								<Setter TargetName="CardBorder" Property="BorderBrush" Value="#5D89B8E6" />
+							</Trigger>
+							<Trigger Property="Tag" Value="toggle_on">
+								<Setter TargetName="CardBorder" Property="Background" Value="#CC1C3A2A" />
+								<Setter TargetName="CardBorder" Property="BorderBrush" Value="#5FB7F0A6" />
+							</Trigger>
+							<Trigger Property="Tag" Value="toggle_off">
+								<Setter TargetName="CardBorder" Property="Background" Value="#CC3A2020" />
+								<Setter TargetName="CardBorder" Property="BorderBrush" Value="#E0A06A6A" />
+							</Trigger>
+							<Trigger Property="IsMouseOver" Value="true">
+								<Setter TargetName="CardBorder" Property="Background" Value="#CC243A52" />
+								<Setter TargetName="CardBorder" Property="BorderBrush" Value="#8899BBDD" />
+							</Trigger>
+							<Trigger Property="IsPressed" Value="true">
+								<Setter TargetName="CardBorder" Property="Background" Value="#CC2E4A66" />
+								<Setter TargetName="CardBorder" Property="BorderBrush" Value="#BBCCEEFF" />
+							</Trigger>								<Trigger Property="Tag" Value="locked">
+									<Setter TargetName="CardBorder" Property="Background" Value="#CC1A1A1F" />
+									<Setter TargetName="CardBorder" Property="BorderBrush" Value="#33445566" />
+									<Setter TargetName="CardBorder" Property="Opacity" Value="0.6" />									</Trigger>
+									<Trigger Property="Tag" Value="mp_locked">
+										<Setter TargetName="CardBorder" Property="Background" Value="#CC2D1A00" />
+										<Setter TargetName="CardBorder" Property="BorderBrush" Value="#66553300" />
+										<Setter TargetName="CardBorder" Property="Opacity" Value="0.65" />								</Trigger>						</ControlTemplate.Triggers>
+					</ControlTemplate>
+				</Setter.Value>
+			</Setter>
+		</Style>
+	</Grid.Resources>
+
+	<!-- Dim backdrop (click-through) -->
+	<Rectangle Fill="#99000000" />
+
+	<!-- Centered panel -->
+	<Border Background="#EE0E1118" CornerRadius="10" Padding="24,18,24,20"
+			HorizontalAlignment="Center" VerticalAlignment="Center"
+			MaxWidth="980" MaxHeight="720"
+			BorderBrush="#33667788" BorderThickness="1">
+		<Grid>
+			<Grid.RowDefinitions>
+				<RowDefinition Height="Auto" />
+				<RowDefinition Height="Auto" />
+				<RowDefinition Height="*" />
+				<RowDefinition Height="Auto" />
+			</Grid.RowDefinitions>
+
+			<!-- Title -->
+			<TextBlock Grid.Row="0"
+				Text="Cheat Menu"
+				FontSize="22" FontWeight="Bold"
+				Foreground="#FFD54F"
+				HorizontalAlignment="Center"
+				Margin="0,0,0,2" />
+
+			<!-- Subtitle -->
+			<TextBlock Grid.Row="1"
+				Text="Click any entry to invoke the corresponding cheat for your player."
+				FontSize="12" Foreground="#99AABB"
+				HorizontalAlignment="Center"
+				TextWrapping="Wrap"
+				Margin="0,0,0,14" />
+
+			<!-- Card grid -->
+			<ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+				<Grid HorizontalAlignment="Center">
+]] .. (cards_xaml or "") .. [[
+				</Grid>
+			</ScrollViewer>
+
+			<!-- Footer -->
+			<Grid Grid.Row="3" Margin="0,14,0,0">
+				<Button Command="{Binding [cmd_close]}"
+					HorizontalAlignment="Center"
+					esUtility:AudioAttachedProperty.PreviewMouseLeftButtonUpSound="sfx_ui_hud_inGame_button_play">
+					<Border Background="#2D5A88" CornerRadius="4" Padding="22,8">
+						<TextBlock Text="Close" FontSize="13" Foreground="#FFFFFF" FontWeight="SemiBold" />
+					</Border>
+				</Button>
+			</Grid>
+		</Grid>
+	</Border>
+</Grid>
+]]
+end
+
+-----------------------------------------------------------------------
+-- Card builder
+--
+-- Builds the XAML for a single cheat card occupying one Grid cell.
+-- Each card binds its Command to a fixed key (cmd_N) and reads its
+-- icon/label/desc from sibling fixed keys (icon_N / label_N / desc_N).
+-- This avoids any dynamic-collection binding pitfalls.
+-----------------------------------------------------------------------
+function _DEVMENU_BUILD_CARD_XAML(idx, row, col)
+	local n = tostring(idx)
+	return
+		'<Button Grid.Row="' .. tostring(row) .. '" Grid.Column="' .. tostring(col) .. '" Margin="6,6"' ..
+		' Command="{Binding [cmd_' .. n .. ']}"' ..
+		' Tag="{Binding [kind_' .. n .. ']}"' ..
+		' Style="{StaticResource DevMenuCardButtonStyle}"' ..
+		' Visibility="{Binding [vis_' .. n .. '], Converter={StaticResource BoolToVis}}">' ..
+			'<Grid>' ..
+				'<Grid.RowDefinitions>' ..
+					'<RowDefinition Height="Auto" />' ..
+					'<RowDefinition Height="6" />' ..
+					'<RowDefinition Height="*" />' ..
+				'</Grid.RowDefinitions>' ..
+				'<Grid.ColumnDefinitions>' ..
+					'<ColumnDefinition Width="Auto" />' ..
+					'<ColumnDefinition Width="*" />' ..
+				'</Grid.ColumnDefinitions>' ..
+				'<Border Grid.Row="0" Grid.ColumnSpan="2" HorizontalAlignment="Right" CornerRadius="3" Padding="5,1" Background="#443A506B">' ..
+					'<TextBlock Text="{Binding [hint_' .. n .. ']}" FontSize="9" Foreground="#CFE6FF" FontWeight="SemiBold" />' ..
+				'</Border>' ..
+				'<Image Grid.Row="2" Grid.Column="0" Source="{Binding [icon_' .. n .. ']}" Width="36" Height="36"' ..
+					' VerticalAlignment="Top" Margin="0,0,8,0" />' ..
+				'<StackPanel Grid.Row="2" Grid.Column="1" VerticalAlignment="Top">' ..
+					'<TextBlock Text="{Binding [label_' .. n .. ']}"' ..
+						' FontSize="13" FontWeight="SemiBold" Foreground="#FFFFFF" TextWrapping="Wrap" LineStackingStrategy="BlockLineHeight" LineHeight="15" />' ..
+					'<TextBlock Text="{Binding [desc_' .. n .. ']}"' ..
+						' FontSize="11" Foreground="#99AABB" TextWrapping="Wrap" Margin="0,3,0,0" LineStackingStrategy="BlockLineHeight" LineHeight="13" />' ..
+					'<TextBlock Text="{Binding [note_' .. n .. ']}"' ..
+						' FontSize="10" Foreground="#7FB3FF" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,4,0,0" Visibility="{Binding [note_vis_' .. n .. '], Converter={StaticResource BoolToVis}}" LineStackingStrategy="BlockLineHeight" LineHeight="12" />' ..
+					'<TextBlock Text="{Binding [state_' .. n .. ']}"' ..
+						' FontSize="10" Foreground="#B8FFD2" FontWeight="SemiBold" Margin="0,4,0,0" TextWrapping="Wrap" MinHeight="12" />' ..							'<TextBlock Text="&#x1F512; LOCKED"' ..
+								' FontSize="10" FontWeight="Bold" Foreground="#AAAACC"' ..
+								' Margin="0,4,0,0" TextWrapping="NoWrap"' ..
+							' Visibility="{Binding [locked_vis_' .. n .. '], Converter={StaticResource BoolToVis}}" />' ..
+						'<TextBlock Text="&#x1F512; MP LOCKED"' ..
+							' FontSize="10" FontWeight="Bold" Foreground="#FFAA44"' ..
+							' Margin="0,4,0,0" TextWrapping="NoWrap"' ..
+							' Visibility="{Binding [mplocked_vis_' .. n .. '], Converter={StaticResource BoolToVis}}" />' ..			'</StackPanel>' ..
+			'</Grid>' ..
+		'</Button>'
+end
+
+-----------------------------------------------------------------------
+-- DEV-only panel builders (CHEAT panel untouched).
+--
+-- _DEVMENU_BUILD_DEV_PANEL_XAML  -> Level 1: optional Recent strip + categories grid.
+-- _DEVMENU_BUILD_DEV_SUBMENU_XAML -> Level 2: per-category submenu with Back button.
+--
+-- Both reuse the same `DevMenuCardButtonStyle` defined in the CHEAT panel
+-- builder via the shared style-host pattern below.
+-----------------------------------------------------------------------
+
+local _DEV_STYLE_BLOCK =
+[[<Grid.Resources>
+		<Style x:Key="DevMenuCardButtonStyle" TargetType="Button">
+			<Setter Property="SnapsToDevicePixels" Value="true" />
+			<Setter Property="OverridesDefaultStyle" Value="true" />
+			<Setter Property="Cursor" Value="Hand" />
+			<Setter Property="esUtility:AudioAttachedProperty.PreviewMouseLeftButtonUpSound"
+				Value="sfx_ui_hud_inGame_button_play" />
+			<Setter Property="Template">
+				<Setter.Value>
+					<ControlTemplate TargetType="Button">
+						<Border Name="CardBorder" Background="#CC1A2332" CornerRadius="6"
+							BorderBrush="#44668899" BorderThickness="1.5"
+							Padding="10,8,10,10" MinWidth="190" MaxWidth="210"
+							MinHeight="108">
+							<ContentPresenter />
+						</Border>
+						<ControlTemplate.Triggers>
+							<Trigger Property="Tag" Value="menu">
+								<Setter TargetName="CardBorder" Property="Background" Value="#CC253148" />
+								<Setter TargetName="CardBorder" Property="BorderBrush" Value="#5D89B8E6" />
+							</Trigger>
+							<Trigger Property="Tag" Value="toggle_on">
+								<Setter TargetName="CardBorder" Property="Background" Value="#CC1C3A2A" />
+								<Setter TargetName="CardBorder" Property="BorderBrush" Value="#5FB7F0A6" />
+							</Trigger>
+							<Trigger Property="Tag" Value="toggle_off">
+								<Setter TargetName="CardBorder" Property="Background" Value="#CC3A2020" />
+								<Setter TargetName="CardBorder" Property="BorderBrush" Value="#E0A06A6A" />
+							</Trigger>
+							<Trigger Property="IsMouseOver" Value="true">
+								<Setter TargetName="CardBorder" Property="Background" Value="#CC243A52" />
+								<Setter TargetName="CardBorder" Property="BorderBrush" Value="#8899BBDD" />
+							</Trigger>
+							<Trigger Property="IsPressed" Value="true">
+								<Setter TargetName="CardBorder" Property="Background" Value="#CC2E4A66" />
+								<Setter TargetName="CardBorder" Property="BorderBrush" Value="#BBCCEEFF" />
+						</Trigger>							<Trigger Property="Tag" Value="locked">
+									<Setter TargetName="CardBorder" Property="Background" Value="#CC1A1A1F" />
+									<Setter TargetName="CardBorder" Property="BorderBrush" Value="#33445566" />
+									<Setter TargetName="CardBorder" Property="Opacity" Value="0.6" />
+								</Trigger>
+								<Trigger Property="Tag" Value="mp_locked">
+									<Setter TargetName="CardBorder" Property="Background" Value="#CC2D1A00" />
+									<Setter TargetName="CardBorder" Property="BorderBrush" Value="#66553300" />
+									<Setter TargetName="CardBorder" Property="Opacity" Value="0.65" />
+								</Trigger>						</ControlTemplate.Triggers>
+					</ControlTemplate>
+				</Setter.Value>
+			</Setter>
+		</Style>
+		<Style x:Key="DevMenuNavPillStyle" TargetType="Button">
+			<Setter Property="SnapsToDevicePixels" Value="true" />
+			<Setter Property="OverridesDefaultStyle" Value="true" />
+			<Setter Property="Cursor" Value="Hand" />
+			<Setter Property="esUtility:AudioAttachedProperty.PreviewMouseLeftButtonUpSound"
+				Value="sfx_ui_hud_inGame_button_play" />
+			<Setter Property="Template">
+				<Setter.Value>
+					<ControlTemplate TargetType="Button">
+						<Border Name="PillBorder" CornerRadius="12" Padding="10,4" Background="#1A2D44">
+							<ContentPresenter />
+						</Border>
+						<ControlTemplate.Triggers>
+							<Trigger Property="Tag" Value="active">
+								<Setter TargetName="PillBorder" Property="Background" Value="#2A5580" />
+							</Trigger>
+							<Trigger Property="Tag" Value="filtered">
+								<Setter TargetName="PillBorder" Property="Background" Value="#7A4800" />
+							</Trigger>
+							<Trigger Property="Tag" Value="disabled">
+								<Setter TargetName="PillBorder" Property="Opacity" Value="0.3" />
+								<Setter Property="Cursor" Value="Arrow" />
+							</Trigger>
+							<Trigger Property="IsMouseOver" Value="true">
+								<Setter TargetName="PillBorder" Property="Background" Value="#243A52" />
+							</Trigger>
+							<Trigger Property="IsPressed" Value="true">
+								<Setter TargetName="PillBorder" Property="Background" Value="#3A6699" />
+							</Trigger>
+						</ControlTemplate.Triggers>
+					</ControlTemplate>
+				</Setter.Value>
+			</Setter>
+		</Style>
+		<Style x:Key="DevMenuSecHeaderStyle" TargetType="Button">
+			<Setter Property="SnapsToDevicePixels" Value="true" />
+			<Setter Property="OverridesDefaultStyle" Value="true" />
+			<Setter Property="HorizontalContentAlignment" Value="Left" />
+			<Setter Property="Cursor" Value="Hand" />
+			<Setter Property="Template">
+				<Setter.Value>
+					<ControlTemplate TargetType="Button">
+						<Border Name="HdrBorder" Background="Transparent"
+								BorderBrush="#22667788" BorderThickness="0,0,0,1"
+								Padding="4,6,4,6" Margin="0,6,0,4">
+							<StackPanel Orientation="Horizontal">
+								<TextBlock Name="HdrChevron" Text="&#x25BC; " FontSize="9"
+									Foreground="#77AABB" VerticalAlignment="Center" Margin="0,0,4,0" />
+								<ContentPresenter VerticalAlignment="Center" />
+							</StackPanel>
+						</Border>
+						<ControlTemplate.Triggers>
+							<Trigger Property="Tag" Value="collapsed">
+								<Setter TargetName="HdrChevron" Property="Text" Value="&#x25B6; " />
+								<Setter TargetName="HdrBorder" Property="Opacity" Value="0.7" />
+							</Trigger>
+							<Trigger Property="IsMouseOver" Value="true">
+								<Setter TargetName="HdrBorder" Property="Background" Value="#0D334466" />
+							</Trigger>
+							<Trigger Property="IsPressed" Value="true">
+								<Setter TargetName="HdrBorder" Property="Background" Value="#1A334466" />
+							</Trigger>
+						</ControlTemplate.Triggers>
+					</ControlTemplate>
+				</Setter.Value>
+			</Setter>
+		</Style>
+		<!-- Tier tab button style — used by the unit spawner age-tier selector row. -->
+		<!-- Active tab: strong blue highlight. Hover: subtle lift. Flush cells (no per-tab border). -->
+		<Style x:Key="TierTabStyle" TargetType="Button">
+			<Setter Property="SnapsToDevicePixels" Value="true" />
+			<Setter Property="OverridesDefaultStyle" Value="true" />
+			<Setter Property="Cursor" Value="Hand" />
+			<Setter Property="esUtility:AudioAttachedProperty.PreviewMouseLeftButtonUpSound"
+				Value="sfx_ui_hud_inGame_button_play" />
+			<Setter Property="Template">
+				<Setter.Value>
+					<ControlTemplate TargetType="Button">
+						<Border Name="TierBorder" Background="#0D1926" CornerRadius="0" Height="22">
+							<ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+						</Border>
+						<ControlTemplate.Triggers>
+							<Trigger Property="Tag" Value="active">
+								<Setter TargetName="TierBorder" Property="Background" Value="#2A5580" />
+							</Trigger>
+							<Trigger Property="IsMouseOver" Value="true">
+								<Setter TargetName="TierBorder" Property="Background" Value="#1A3652" />
+							</Trigger>
+							<Trigger Property="IsPressed" Value="true">
+								<Setter TargetName="TierBorder" Property="Background" Value="#3A6699" />
+							</Trigger>
+						</ControlTemplate.Triggers>
+					</ControlTemplate>
+				</Setter.Value>
+			</Setter>
+		</Style>
+	</Grid.Resources>]]
+
+-- Level 1 — DEV categories panel.
+-- `recent_cards_xaml` is the prebuilt markup for the Top-3 strip (may be "").
+-- `custom_cards_xaml` is the curated CUSTOM section grid.
+-- `open_cards_xaml`   is categories that open submenus.
+-- `run_cards_xaml`    is direct-run categories.
+function _DEVMENU_BUILD_DEV_PANEL_XAML(recent_cards_xaml, recent_visible, custom_cards_xaml, custom_visible, open_cards_xaml, open_visible, run_cards_xaml, run_visible)
+	return
+[[<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+		xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+		xmlns:esUtility="clr-namespace:WPFGUI.Shared.Utility;assembly=EngineUI"
+		HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+		Visibility="{Binding [panel_visible], Converter={StaticResource BoolToVis}}">
+	]] .. _DEV_STYLE_BLOCK .. [[
+
+	<Rectangle Fill="#99000000" />
+
+	<Border Background="#EE0E1118" CornerRadius="10" Padding="24,18,24,20"
+			HorizontalAlignment="Center" VerticalAlignment="Center"
+			MaxWidth="980" MaxHeight="780"
+			BorderBrush="#33667788" BorderThickness="1">
+		<Grid>
+			<Grid.RowDefinitions>
+				<RowDefinition Height="Auto" />
+				<RowDefinition Height="Auto" />
+				<RowDefinition Height="Auto" />
+				<RowDefinition Height="Auto" />
+				<RowDefinition Height="*" />
+				<RowDefinition Height="Auto" />
+			</Grid.RowDefinitions>
+
+			<TextBlock Grid.Row="0" Text="Developer Menu — Categories"
+				FontSize="22" FontWeight="Bold" Foreground="#FFD54F"
+				HorizontalAlignment="Center" Margin="0,0,0,2" />
+
+			<TextBlock Grid.Row="1" Text="CUSTOM / OPEN MENU / RUN NOW"
+				FontSize="12" Foreground="#99AABB"
+				HorizontalAlignment="Center" Margin="0,0,0,12" />
+
+			<TextBlock Grid.Row="2" Text="Recently Modified"
+				FontSize="12" FontWeight="SemiBold" Foreground="#7FB3FF"
+				HorizontalAlignment="Left" Margin="2,0,0,4"
+				Visibility="]] .. (recent_visible or "Collapsed") .. [[" />
+
+			<Grid Grid.Row="3" HorizontalAlignment="Center" Margin="0,0,0,10"
+				Visibility="]] .. (recent_visible or "Collapsed") .. [[">
+]] .. (recent_cards_xaml or "") .. [[
+			</Grid>
+
+			<ScrollViewer Grid.Row="4" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+				<StackPanel HorizontalAlignment="Center">
+					<TextBlock Text="CUSTOM"
+						FontSize="12" FontWeight="SemiBold" Foreground="#7FB3FF"
+						HorizontalAlignment="Left" Margin="2,0,0,4"
+						Visibility="]] .. (custom_visible or "Collapsed") .. [[" />
+					<Grid HorizontalAlignment="Center" Margin="0,0,0,10"
+						Visibility="]] .. (custom_visible or "Collapsed") .. [[">
+]] .. (custom_cards_xaml or "") .. [[
+					</Grid>
+
+					<TextBlock Text="OPEN MENU"
+						FontSize="12" FontWeight="SemiBold" Foreground="#7FB3FF"
+						HorizontalAlignment="Left" Margin="2,0,0,4"
+						Visibility="]] .. (open_visible or "Collapsed") .. [[" />
+					<Grid HorizontalAlignment="Center" Margin="0,0,0,10"
+						Visibility="]] .. (open_visible or "Collapsed") .. [[">
+]] .. (open_cards_xaml or "") .. [[
+					</Grid>
+
+					<TextBlock Text="RUN NOW"
+						FontSize="12" FontWeight="SemiBold" Foreground="#7FB3FF"
+						HorizontalAlignment="Left" Margin="2,0,0,4"
+						Visibility="]] .. (run_visible or "Collapsed") .. [[" />
+					<Grid HorizontalAlignment="Center" Margin="0,0,0,2"
+						Visibility="]] .. (run_visible or "Collapsed") .. [[">
+]] .. (run_cards_xaml or "") .. [[
+					</Grid>
+				</StackPanel>
+			</ScrollViewer>
+
+			<Grid Grid.Row="5" Margin="0,14,0,0">
+				<Button Command="{Binding [cmd_close]}"
+					HorizontalAlignment="Center"
+					esUtility:AudioAttachedProperty.PreviewMouseLeftButtonUpSound="sfx_ui_hud_inGame_button_play">
+					<Border Background="#2D5A88" CornerRadius="4" Padding="22,8">
+						<TextBlock Text="Close" FontSize="13" Foreground="#FFFFFF" FontWeight="SemiBold" />
+					</Border>
+				</Button>
+			</Grid>
+		</Grid>
+	</Border>
+</Grid>
+]]
+end
+
+function _DEVMENU_BUILD_DEV_SUBMENU_SECTION_XAML(title, subtitle, cards_xaml)
+	local safe_title = _DEVMENU_XML_ESCAPE(title or "")
+	local safe_subtitle = _DEVMENU_XML_ESCAPE(subtitle or "")
+	local body = {}
+	table.insert(body, '<StackPanel Margin="0,0,0,14">')
+	-- Title is omitted when empty: callers that render the title via an outer
+	-- collapsible header button pass "" to avoid a duplicate title block.
+	if safe_title ~= "" then
+		table.insert(body, '<TextBlock Text="' .. safe_title .. '" FontSize="12" FontWeight="SemiBold" Foreground="#7FB3FF" HorizontalAlignment="Left" Margin="2,0,0,4" />')
+	end
+	if safe_subtitle ~= "" then
+		table.insert(body, '<TextBlock Text="' .. safe_subtitle .. '" FontSize="11" Foreground="#8DA6BF" HorizontalAlignment="Left" TextWrapping="Wrap" Margin="2,0,0,6" />')
+	end
+	table.insert(body, '<StackPanel HorizontalAlignment="Center">')
+	table.insert(body, cards_xaml or "")
+	table.insert(body, '</StackPanel>')
+	table.insert(body, '</StackPanel>')
+	return table.concat(body, "\n")
+end
+
+function _DEVMENU_BUILD_DEV_SUBMENU_GROUP_XAML(title, subtitle, cards_xaml)
+	local safe_title = _DEVMENU_XML_ESCAPE(title or "")
+	local safe_subtitle = _DEVMENU_XML_ESCAPE(subtitle or "")
+	local body = {}
+	table.insert(body, '<StackPanel Margin="0,0,0,10">')
+	table.insert(body, '<Border Background="#1F344A62" CornerRadius="4" Padding="10,6" Margin="2,0,2,6">')
+	table.insert(body, '<StackPanel>')
+	table.insert(body, '<TextBlock Text="' .. safe_title .. '" FontSize="11" FontWeight="SemiBold" Foreground="#D6E7FF" HorizontalAlignment="Left" />')
+	if safe_subtitle ~= "" then
+		table.insert(body, '<TextBlock Text="' .. safe_subtitle .. '" FontSize="10" Foreground="#8DA6BF" HorizontalAlignment="Left" TextWrapping="Wrap" Margin="0,2,0,0" />')
+	end
+	table.insert(body, '</StackPanel>')
+	table.insert(body, '</Border>')
+	table.insert(body, '<Grid HorizontalAlignment="Center">')
+	table.insert(body, cards_xaml or "")
+	table.insert(body, '</Grid>')
+	table.insert(body, '</StackPanel>')
+	return table.concat(body, "\n")
+end
+
+-- Level 2 — DEV submenu panel (per category). `title` is the category label.
+function _DEVMENU_BUILD_DEV_SUBMENU_XAML(title, subtitle, body_xaml)
+	local safe_title    = _DEVMENU_XML_ESCAPE(title or "Submenu")
+	local safe_subtitle = _DEVMENU_XML_ESCAPE(subtitle or "")
+	-- Build 6 windowed nav pills + scroll arrows. Pill N maps to window slot N
+	-- (DC keys nav_pill_cmd_N, nav_pill_tag_N, nav_pill_vis_N, nav_pill_label_N).
+	-- nav_scroll_left_cmd / nav_scroll_right_cmd scroll the window; their Tag
+	-- keys ("disabled" / "") drive opacity via DevMenuNavPillStyle trigger.
+	-- Each pill occupies Grid.Column=N-1 in a 6-col inner Grid so collapsed pills
+	-- leave their slot empty — arrows never shift or overlap as sections change.
+	local pill_parts = {}
+	for i = 1, 6 do
+		local n   = tostring(i)
+		local col = tostring(i - 1)
+		table.insert(pill_parts,
+			'\t\t\t\t\t<Button Grid.Column="' .. col .. '" Command="{Binding [nav_pill_cmd_' .. n .. ']}"' ..
+			' Tag="{Binding [nav_pill_tag_' .. n .. ']}"' ..
+			' Style="{StaticResource DevMenuNavPillStyle}" Margin="3,0"' ..
+			' HorizontalAlignment="Stretch"' ..
+			' Visibility="{Binding [nav_pill_vis_' .. n .. '], Converter={StaticResource BoolToVis}}">' ..
+			'<TextBlock Text="{Binding [nav_pill_label_' .. n .. ']}"' ..
+			' FontSize="10" FontWeight="SemiBold" Foreground="#CFE6FF" /></Button>')
+	end
+	-- Pill strip (Row 2): LEFT arrow | 6-slot fixed-column inner Grid | RIGHT arrow.
+	-- Outer Grid has Auto arrow columns flanking a * center column (MinWidth=320).
+	-- Arrow positions are stable regardless of how many pills are visible.
+	-- Gated by nav_strip_visible (>= 1 section).
+	local nav_strip_xaml =
+		'\t\t\t<Grid Grid.Row="2" HorizontalAlignment="Center" Margin="0,0,0,4"\n' ..
+		'\t\t\t\tVisibility="{Binding [nav_strip_visible], Converter={StaticResource BoolToVis}}">\n' ..
+		'\t\t\t\t<Grid.ColumnDefinitions>\n' ..
+		'\t\t\t\t\t<ColumnDefinition Width="Auto" />\n' ..
+		'\t\t\t\t\t<ColumnDefinition Width="*" MinWidth="320" />\n' ..
+		'\t\t\t\t\t<ColumnDefinition Width="Auto" />\n' ..
+		'\t\t\t\t</Grid.ColumnDefinitions>\n' ..
+		'\t\t\t\t<Button Grid.Column="0" Command="{Binding [nav_scroll_left_cmd]}" Tag="{Binding [nav_scroll_left_tag]}"\n' ..
+		'\t\t\t\t\tStyle="{StaticResource DevMenuNavPillStyle}" Margin="0,0,6,0" Padding="6,4">\n' ..
+		'\t\t\t\t\t<TextBlock Text="&#x2190;" FontSize="11" FontWeight="Bold" Foreground="#CFE6FF" /></Button>\n' ..
+		'\t\t\t\t<Grid Grid.Column="1">\n' ..
+		'\t\t\t\t\t<Grid.ColumnDefinitions>\n' ..
+		'\t\t\t\t\t\t<ColumnDefinition Width="*" />\n' ..
+		'\t\t\t\t\t\t<ColumnDefinition Width="*" />\n' ..
+		'\t\t\t\t\t\t<ColumnDefinition Width="*" />\n' ..
+		'\t\t\t\t\t\t<ColumnDefinition Width="*" />\n' ..
+		'\t\t\t\t\t\t<ColumnDefinition Width="*" />\n' ..
+		'\t\t\t\t\t\t<ColumnDefinition Width="*" />\n' ..
+		'\t\t\t\t\t</Grid.ColumnDefinitions>\n' ..
+		table.concat(pill_parts, "\n") ..
+		'\n\t\t\t\t</Grid>\n' ..
+		'\t\t\t\t<Button Grid.Column="2" Command="{Binding [nav_scroll_right_cmd]}" Tag="{Binding [nav_scroll_right_tag]}"\n' ..
+		'\t\t\t\t\tStyle="{StaticResource DevMenuNavPillStyle}" Margin="6,0,0,0" Padding="6,4">\n' ..
+		'\t\t\t\t\t<TextBlock Text="&#x2192;" FontSize="11" FontWeight="Bold" Foreground="#CFE6FF" /></Button>\n' ..
+		'\t\t\t</Grid>'
+	-- Expand/Collapse row (Row 3): standalone right-aligned toggle, gated by
+	-- nav_expand_visible (>= 1 section). Intentionally separate from pill strip
+	-- so it is always reachable even when there is only one section.
+	local expand_row_xaml =
+		'\t\t\t<StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,0,0,8"\n' ..
+		'\t\t\t\tVisibility="{Binding [nav_expand_visible], Converter={StaticResource BoolToVis}}">\n' ..
+		'\t\t\t\t<Button Command="{Binding [nav_expand_cmd]}" Style="{StaticResource DevMenuNavPillStyle}">\n' ..
+		'\t\t\t\t\t<TextBlock Text="{Binding [nav_expand_label]}"\n' ..
+		'\t\t\t\t\t\tFontSize="10" FontWeight="SemiBold" Foreground="#FFD54F" />\n' ..
+		'\t\t\t\t</Button>\n' ..
+		'\t\t\t</StackPanel>'
+	return
+[[<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+		xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+		xmlns:esUtility="clr-namespace:WPFGUI.Shared.Utility;assembly=EngineUI"
+		HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+		Visibility="{Binding [panel_visible], Converter={StaticResource BoolToVis}}">
+	]] .. _DEV_STYLE_BLOCK .. [[
+
+	<Rectangle Fill="#99000000" />
+
+	<Border Background="#EE0E1118" CornerRadius="10" Padding="24,18,24,20"
+			HorizontalAlignment="Center" VerticalAlignment="Center"
+			MaxWidth="980" MaxHeight="720"
+			BorderBrush="#33667788" BorderThickness="1">
+		<Grid>
+			<Grid.RowDefinitions>
+				<RowDefinition Height="Auto" />
+				<RowDefinition Height="Auto" />
+				<RowDefinition Height="Auto" />
+				<RowDefinition Height="Auto" />
+				<RowDefinition Height="*" />
+				<RowDefinition Height="Auto" />
+			</Grid.RowDefinitions>
+
+			<StackPanel Grid.Row="0" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,0,0,2">
+				<TextBlock Text="DEV &#x2192; " FontSize="12" Foreground="#7FB3FF" VerticalAlignment="Center" />
+				<TextBlock Text="]] .. safe_title .. [["
+					FontSize="22" FontWeight="Bold" Foreground="#FFD54F" />
+			</StackPanel>
+
+			<TextBlock Grid.Row="1" Text="]] .. safe_subtitle .. [["
+				FontSize="12" Foreground="#99AABB"
+				HorizontalAlignment="Center" TextWrapping="Wrap"
+				Margin="0,0,0,8" />
+
+]] .. nav_strip_xaml .. [[
+
+]] .. expand_row_xaml .. [[
+
+			<ScrollViewer Grid.Row="4" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+				<StackPanel HorizontalAlignment="Center">
+]] .. (body_xaml or "") .. [[
+				</StackPanel>
+			</ScrollViewer>
+
+			<Grid Grid.Row="5" Margin="0,14,0,0">
+				<StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+					<Button Command="{Binding [cmd_back]}" Margin="0,0,8,0"
+						esUtility:AudioAttachedProperty.PreviewMouseLeftButtonUpSound="sfx_ui_hud_inGame_button_play">
+						<Border Background="#3A506B" CornerRadius="4" Padding="22,8">
+							<TextBlock Text="Back" FontSize="13" Foreground="#FFFFFF" FontWeight="SemiBold" />
+						</Border>
+					</Button>
+					<Button Command="{Binding [cmd_close]}"
+						esUtility:AudioAttachedProperty.PreviewMouseLeftButtonUpSound="sfx_ui_hud_inGame_button_play">
+						<Border Background="#2D5A88" CornerRadius="4" Padding="22,8">
+							<TextBlock Text="Close" FontSize="13" Foreground="#FFFFFF" FontWeight="SemiBold" />
+						</Border>
+					</Button>
+				</StackPanel>
+			</Grid>
+		</Grid>
+	</Border>
+</Grid>
+]]
+end
+
+-----------------------------------------------------------------------
+-- Persistent (non-modal) Cheat Actions Quick Panel
+--
+-- Design constraints:
+--   * No full-screen Rectangle backdrop -> gameplay clicks pass through
+--     transparent regions of the presenter root.
+--   * Anchored to the LEFT edge, vertically centered, with bottom-margin
+--     budget so it sits clear of PlayerUI's bottom HUD strip.
+--   * Compact card layout: 1-column Grid of cards, fixed narrow width.
+--   * Header includes a small "X" close button that flips the toggle in
+--     the CHEAT menu (so the toggle and the panel stay in sync).
+--   * `[panel_visible]` binding gates the WHOLE root, so when disabled
+--     the entire presenter is collapsed and not even hit-testable.
+-----------------------------------------------------------------------
+
+local _CHEAT_QUICK_STYLE_BLOCK =
+[[<Grid.Resources>
+		<Style x:Key="CheatQuickCardButtonStyle" TargetType="Button">
+			<Setter Property="SnapsToDevicePixels" Value="true" />
+			<Setter Property="OverridesDefaultStyle" Value="true" />
+			<Setter Property="Cursor" Value="Hand" />
+			<Setter Property="esUtility:AudioAttachedProperty.PreviewMouseLeftButtonUpSound"
+				Value="sfx_ui_hud_inGame_button_play" />
+			<Setter Property="Template">
+				<Setter.Value>
+					<ControlTemplate TargetType="Button">
+						<Border Name="CardBorder" Background="#D81A2332" CornerRadius="5"
+							BorderBrush="#55668899" BorderThickness="1.2"
+							Padding="8,5,8,6" MinWidth="178" MaxWidth="178"
+							MinHeight="44">
+							<ContentPresenter />
+						</Border>
+						<ControlTemplate.Triggers>
+							<Trigger Property="Tag" Value="toggle_on">
+								<Setter TargetName="CardBorder" Property="Background" Value="#D81C3A2A" />
+								<Setter TargetName="CardBorder" Property="BorderBrush" Value="#5FB7F0A6" />
+							</Trigger>
+							<Trigger Property="Tag" Value="toggle_off">
+								<Setter TargetName="CardBorder" Property="Background" Value="#D83A2020" />
+								<Setter TargetName="CardBorder" Property="BorderBrush" Value="#E0A06A6A" />
+							</Trigger>
+							<Trigger Property="IsMouseOver" Value="true">
+								<Setter TargetName="CardBorder" Property="Background" Value="#E8243A52" />
+								<Setter TargetName="CardBorder" Property="BorderBrush" Value="#8899BBDD" />
+							</Trigger>
+							<Trigger Property="IsPressed" Value="true">
+								<Setter TargetName="CardBorder" Property="Background" Value="#FF2E4A66" />
+								<Setter TargetName="CardBorder" Property="BorderBrush" Value="#BBCCEEFF" />
+							</Trigger>
+						</ControlTemplate.Triggers>
+					</ControlTemplate>
+				</Setter.Value>
+			</Setter>
+		</Style>
+		<!-- Compact inline stepper buttons used by the Spawn Group Size control -->
+		<Style x:Key="StepperBtnStyle" TargetType="Button">
+			<Setter Property="SnapsToDevicePixels" Value="true" />
+			<Setter Property="OverridesDefaultStyle" Value="true" />
+			<Setter Property="Cursor" Value="Hand" />
+			<Setter Property="esUtility:AudioAttachedProperty.PreviewMouseLeftButtonUpSound"
+				Value="sfx_ui_hud_inGame_button_play" />
+			<Setter Property="Template">
+				<Setter.Value>
+					<ControlTemplate TargetType="Button">
+						<Border Name="SBtn" Background="#08AADDFF" CornerRadius="0">
+							<ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+						</Border>
+						<ControlTemplate.Triggers>
+							<Trigger Property="IsMouseOver" Value="true">
+								<Setter TargetName="SBtn" Property="Background" Value="#22AADDFF" />
+							</Trigger>
+							<Trigger Property="IsPressed" Value="true">
+								<Setter TargetName="SBtn" Property="Background" Value="#448BBDDD" />
+							</Trigger>
+						</ControlTemplate.Triggers>
+					</ControlTemplate>
+				</Setter.Value>
+			</Setter>
+		</Style>
+	</Grid.Resources>]]
+
+-- Compact card builder for Quick Panel rows. Single row, icon left, label
+-- right (description omitted to keep cards short).
+function _DEVMENU_BUILD_QUICK_CARD_XAML(idx, row)
+	local n = tostring(idx)
+	return
+		'<Button Grid.Row="' .. tostring(row) .. '" Grid.Column="0" Margin="0,2"' ..
+		' Command="{Binding [cmd_' .. n .. ']}"' ..
+		' Tag="{Binding [kind_' .. n .. ']}"' ..
+		' Style="{StaticResource CheatQuickCardButtonStyle}"' ..
+		' ToolTip="{Binding [desc_' .. n .. ']}"' ..
+		' Visibility="{Binding [vis_' .. n .. '], Converter={StaticResource BoolToVis}}">' ..
+			'<Grid>' ..
+				'<Grid.ColumnDefinitions>' ..
+					'<ColumnDefinition Width="Auto" />' ..
+					'<ColumnDefinition Width="*" />' ..
+				'</Grid.ColumnDefinitions>' ..
+				'<Image Grid.Column="0" Source="{Binding [icon_' .. n .. ']}" Width="24" Height="24"' ..
+					' VerticalAlignment="Center" Margin="0,0,8,0" />' ..
+				'<StackPanel Grid.Column="1" VerticalAlignment="Center">' ..
+					'<TextBlock Text="{Binding [label_' .. n .. ']}"' ..
+					' FontSize="12" FontWeight="SemiBold" Foreground="#FFFFFF" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" />' ..
+					'<TextBlock Text="{Binding [state_' .. n .. ']}"' ..
+						' FontSize="9" Foreground="#B8FFD2" FontWeight="SemiBold" TextWrapping="NoWrap" />' ..
+				'</StackPanel>' ..
+			'</Grid>' ..
+		'</Button>'
+end
+
+-- Build the Quick Panel XAML around a pre-built rows-grid (a 1-column Grid
+-- of CheatQuickCardButton entries).
+--
+-- The root Grid has NO Visibility binding — it is always present in the
+-- presenter tree. Inside it two siblings live at the same HAlignment/
+-- VAlignment anchor so they naturally stack:
+--   1. A small "tab" button visible ONLY when panel_visible=false (uses a
+--      DataTrigger — no inverse converter required).
+--   2. The full panel Border visible ONLY when panel_visible=true (BoolToVis).
+-- This ensures the user can always reopen the panel even after pressing X.
+function _DEVMENU_BUILD_CHEAT_QUICK_PANEL_XAML(rows_xaml)
+	return
+[[<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+		xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+		xmlns:esUtility="clr-namespace:WPFGUI.Shared.Utility;assembly=EngineUI"
+		Background="{x:Null}"
+		HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+	]] .. _CHEAT_QUICK_STYLE_BLOCK .. [[
+
+	<!-- ═══ COLLAPSED STATE: small re-open tab, visible when panel_visible=false ═══ -->
+	<Button Command="{Binding [cmd_open]}"
+			HorizontalAlignment="Left" VerticalAlignment="Center"
+			Margin="0,0,0,120"
+			Cursor="Hand" BorderThickness="0" Padding="0"
+			esUtility:AudioAttachedProperty.PreviewMouseLeftButtonUpSound="sfx_ui_hud_inGame_button_play"
+			ToolTip="Reopen Cheat Actions panel">
+		<Button.Style>
+			<Style TargetType="Button">
+				<!-- Default: visible (collapsed state) -->
+				<Setter Property="Visibility" Value="Visible" />
+				<Setter Property="Template">
+					<Setter.Value>
+						<ControlTemplate TargetType="Button">
+							<Border Name="TabBorder" Background="#CC0E1118" CornerRadius="0,5,5,0"
+									BorderBrush="#44668899" BorderThickness="0,1,1,1"
+									Padding="6,8,6,8" MinWidth="20" MinHeight="36">
+								<Image Source="pack://application:,,,/WPFGUI;component/images/fe/taskbar_settings.png"
+                                                                               Width="20" Height="20"
+                                                                               VerticalAlignment="Center" HorizontalAlignment="Center" />
+							</Border>
+							<ControlTemplate.Triggers>
+								<Trigger Property="IsMouseOver" Value="true">
+									<Setter TargetName="TabBorder" Property="Background" Value="#E8243A52" />
+									<Setter TargetName="TabBorder" Property="BorderBrush" Value="#8899BBDD" />
+								</Trigger>
+								<Trigger Property="IsPressed" Value="true">
+									<Setter TargetName="TabBorder" Property="Background" Value="#FF2E4A66" />
+								</Trigger>
+							</ControlTemplate.Triggers>
+						</ControlTemplate>
+					</Setter.Value>
+				</Setter>
+				<!-- Collapsed when this panel is open OR the Spawn Panel is open -->
+				<Style.Triggers>
+					<DataTrigger Binding="{Binding [panel_visible]}" Value="True">
+						<Setter Property="Visibility" Value="Collapsed" />
+					</DataTrigger>
+					<DataTrigger Binding="{Binding [sp_panel_visible]}" Value="True">
+						<Setter Property="Visibility" Value="Collapsed" />
+					</DataTrigger>
+				</Style.Triggers>
+			</Style>
+		</Button.Style>
+	</Button>
+
+	<!-- ═══ EXPANDED STATE: full panel, visible when panel_visible=true ═══ -->
+	<Border Background="#E60E1118" CornerRadius="6" Padding="8,6,8,8"
+			HorizontalAlignment="Left" VerticalAlignment="Center"
+			Margin="6,0,0,120"
+			MaxWidth="200" MaxHeight="560"
+			BorderBrush="#44668899" BorderThickness="1"
+			Visibility="{Binding [panel_visible], Converter={StaticResource BoolToVis}}">
+		<StackPanel>
+
+			<!-- Header row: title + close (collapses to tab; toggle in modal stays in sync) -->
+			<Grid Margin="2,0,2,4">
+				<Grid.ColumnDefinitions>
+					<ColumnDefinition Width="*" />
+					<ColumnDefinition Width="Auto" />
+					<ColumnDefinition Width="Auto" />
+				</Grid.ColumnDefinitions>
+				<TextBlock Grid.Column="0" Text="Cheat Actions"
+					FontSize="11" FontWeight="Bold" Foreground="#FFD54F"
+					VerticalAlignment="Center" />
+				<Button Grid.Column="1" Command="{Binding [cmd_switch_to_sp]}"
+					Cursor="Hand" Background="Transparent" BorderThickness="0"
+					ToolTip="Switch to Spawn Panel" Padding="4,0">
+					<TextBlock Text="&#x21C4;" FontSize="11" Foreground="#6688AA" FontWeight="Bold" />
+				</Button>
+				<Button Grid.Column="2" Command="{Binding [cmd_close]}"
+					esUtility:AudioAttachedProperty.PreviewMouseLeftButtonUpSound="sfx_ui_hud_inGame_button_play"
+					Cursor="Hand" Background="Transparent" BorderThickness="0"
+					Padding="4,0">
+					<TextBlock Text="✕" FontSize="11" Foreground="#99AABB" FontWeight="Bold" />
+				</Button>
+			</Grid>
+
+			<TextBlock Text="Selection-safe. Contextual."
+				FontSize="9" Foreground="#7F8FA0" TextWrapping="Wrap" Margin="2,0,2,5" />
+
+			<ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+				MaxHeight="480">
+				<Grid HorizontalAlignment="Stretch">
+]] .. (rows_xaml or "") .. [[
+				</Grid>
+			</ScrollViewer>
+
+		</StackPanel>
+	</Border>
+</Grid>
+]]
+end
+
+-- Compact slot card for one history entry (Grid.Row = i-1).
+local function _devmenu_build_spawn_slot_card(i)
+local s = tostring(i)
+return
+'<Button Grid.Row="' .. tostring(i - 1) .. '" Margin="0,2"' ..
+' Command="{Binding [slot_cmd_' .. s .. ']}"' ..
+' Style="{StaticResource CheatQuickCardButtonStyle}"' ..
+' ToolTip="{Binding [slot_label_' .. s .. ']}"' ..
+' Visibility="{Binding [slot_vis_' .. s .. '], Converter={StaticResource BoolToVis}}">' ..
+'<Grid>' ..
+'<Grid.ColumnDefinitions>' ..
+'<ColumnDefinition Width="*" />' ..
+'<ColumnDefinition Width="Auto" />' ..
+'</Grid.ColumnDefinitions>' ..
+'<TextBlock Grid.Column="0" Text="{Binding [slot_label_' .. s .. ']}"' ..
+' FontSize="11" FontWeight="SemiBold" Foreground="#FFFFFF"' ..
+' TextWrapping="Wrap" TextTrimming="CharacterEllipsis"' ..
+' VerticalAlignment="Center" />' ..
+'<Border Grid.Column="1" Background="#22558833" CornerRadius="3"' ..
+' Padding="4,2" Margin="5,0,0,0" VerticalAlignment="Center">' ..
+'<TextBlock Text="SPAWN" FontSize="8" FontWeight="Bold" Foreground="#8AFF8A" />' ..
+'</Border>' ..
+'</Grid>' ..
+'</Button>'
+end
+
+-- Compact quick-action button. badge_fg/bg colours differentiate action types.
+local function _devmenu_build_spawn_action_button(row, cmd_key, label, badge, badge_fg, badge_bg, tip)
+return
+'<Button Grid.Row="' .. row .. '" Margin="0,2"' ..
+' Command="{Binding [' .. cmd_key .. ']}"' ..
+' Style="{StaticResource CheatQuickCardButtonStyle}"' ..
+' ToolTip="' .. tip .. '">' ..
+'<Grid>' ..
+'<Grid.ColumnDefinitions>' ..
+'<ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" />' ..
+'</Grid.ColumnDefinitions>' ..
+'<TextBlock Grid.Column="0" Text="' .. label .. '"' ..
+' FontSize="11" FontWeight="SemiBold" Foreground="#FFFFFF" VerticalAlignment="Center" />' ..
+'<Border Grid.Column="1" Background="' .. badge_bg .. '" CornerRadius="3"' ..
+' Padding="4,2" Margin="5,0,0,0" VerticalAlignment="Center">' ..
+'<TextBlock Text="' .. badge .. '" FontSize="8" FontWeight="Bold" Foreground="' .. badge_fg .. '" /></Border>' ..
+'</Grid></Button>'
+end
+
+local function _devmenu_build_spawn_stepper_xaml(row, title, cmd_dec, cmd_inc, val_key, tip_dec, tip_inc)
+return
+-- Outer card shell: same glow-border treatment as surrounding panel items.
+'<Border Grid.Row="' .. row .. '" Background="#EE0D1520" CornerRadius="4"' ..
+' BorderBrush="#44668899" BorderThickness="1" Margin="0,2" Padding="6,6,6,6">' ..
+'<Grid>' ..
+'<Grid.RowDefinitions>' ..
+'<RowDefinition Height="Auto" />' ..
+'<RowDefinition Height="Auto" />' ..
+'</Grid.RowDefinitions>' ..
+-- Label row: small caps-style label, cyan-tinted to match panel accent.
+'<TextBlock Grid.Row="0" Text="' .. title .. '" FontSize="7.5" FontWeight="Bold"' ..
+' Foreground="#7AAABB" Margin="1,0,0,5" />' ..
+-- Stepper row: single unified container; columns share background so the
+-- three parts read as one connected control.
+'<Border Grid.Row="1" CornerRadius="3" BorderBrush="#33557788" BorderThickness="1"' ..
+' Background="#0A0D1520">' ..
+'<Grid Height="30">' ..
+'<Grid.ColumnDefinitions>' ..
+'<ColumnDefinition Width="38" />' ..
+'<ColumnDefinition Width="*" />' ..
+'<ColumnDefinition Width="38" />' ..
+'</Grid.ColumnDefinitions>' ..
+-- Minus button (left)
+'<Button Grid.Column="0" Command="{Binding [' .. cmd_dec .. ']}"' ..
+' Style="{StaticResource StepperBtnStyle}"' ..
+' ToolTip="' .. (tip_dec or "Decrease") .. '">' ..
+'<TextBlock Text="&#x2212;" FontSize="17" FontWeight="Bold" Foreground="#6699AA"' ..
+' HorizontalAlignment="Center" VerticalAlignment="Center"' ..
+' TextOptions.TextFormattingMode="Display" /></Button>' ..
+-- Value cell: thin vertical separator lines flank it.
+'<Border Grid.Column="1" BorderBrush="#33557788" BorderThickness="1,0">' ..
+'<TextBlock Text="{Binding [' .. val_key .. ']}" FontSize="14" FontWeight="Bold"' ..
+' Foreground="#FFD54F" HorizontalAlignment="Center" VerticalAlignment="Center"' ..
+' TextOptions.TextFormattingMode="Display" /></Border>' ..
+-- Plus button (right)
+'<Button Grid.Column="2" Command="{Binding [' .. cmd_inc .. ']}"' ..
+' Style="{StaticResource StepperBtnStyle}"' ..
+' ToolTip="' .. (tip_inc or "Increase") .. '">' ..
+'<TextBlock Text="+" FontSize="17" FontWeight="Bold" Foreground="#6699AA"' ..
+' HorizontalAlignment="Center" VerticalAlignment="Center"' ..
+' TextOptions.TextFormattingMode="Display" /></Button>' ..
+'</Grid>' ..
+'</Border>' ..
+'</Grid>' ..
+'</Border>'
+end
+
+local function _devmenu_build_spawn_toggle_xaml(row, label, cmd_key, badge_key, badge_fg_key, badge_bg_key, tip)
+return
+'<Button Grid.Row="' .. row .. '" Margin="0,2"' ..
+' Command="{Binding [' .. cmd_key .. ']}"' ..
+' Style="{StaticResource CheatQuickCardButtonStyle}"' ..
+' ToolTip="' .. tip .. '">' ..
+'<Grid>' ..
+'<Grid.ColumnDefinitions>' ..
+'<ColumnDefinition Width="*" />' ..
+'<ColumnDefinition Width="Auto" />' ..
+'</Grid.ColumnDefinitions>' ..
+'<TextBlock Grid.Column="0" Text="' .. label .. '"' ..
+' FontSize="11" FontWeight="SemiBold" Foreground="#FFFFFF" VerticalAlignment="Center" />' ..
+'<Border Grid.Column="1" Background="{Binding [' .. badge_bg_key .. ']}" CornerRadius="3"' ..
+' Padding="4,2" Margin="5,0,0,0" VerticalAlignment="Center">' ..
+'<TextBlock Text="{Binding [' .. badge_key .. ']}" FontSize="8" FontWeight="Bold"' ..
+' Foreground="{Binding [' .. badge_fg_key .. ']}" /></Border>' ..
+'</Grid>' ..
+'</Button>'
+end
+
+-----------------------------------------------------------------------
+-- Spawn Panel -- persistent left-side panel, above Cheat Actions.
+--
+-- Collapsed: icon-only tab on the LEFT edge, 240px above centre.
+-- Expanded:  last-spawned history (3 slots) + quick-action buttons:
+--            Unit Spawner, Spawn Army, +1000 Resources, Photon Man.
+-- Mutual exclusion: opening one panel auto-closes the other.
+-----------------------------------------------------------------------
+
+-- Build the Spawn Panel XAML.
+function _DEVMENU_BUILD_SPAWN_PANEL_XAML()
+local ICON = "pack://application:,,,/WPFGUI;component/icons/resources/resource_military.png"
+local slot_row_defs = ""
+local slot_cards    = ""
+for i = 1, 3 do
+slot_row_defs = slot_row_defs .. '<RowDefinition Height="Auto" />'
+slot_cards    = slot_cards    .. _devmenu_build_spawn_slot_card(i)
+end
+local action_row_defs =
+'<RowDefinition Height="Auto" />' ..
+'<RowDefinition Height="Auto" />' ..
+'<RowDefinition Height="Auto" />'
+local action_buttons =
+_devmenu_build_spawn_action_button(0, "cmd_open_spawner", "Unit Spawner", "OPEN", "#88AAFF", "#22335588", "Open the full Unit Spawner catalog (all civs).") ..
+_devmenu_build_spawn_stepper_xaml(1, "SPAWN GROUP SIZE", "cmd_group_dec", "cmd_group_inc", "group_count", "Fewer units", "More units") ..
+_devmenu_build_spawn_toggle_xaml(2, "Spawn Mode", "cmd_spawn_mode", "spawn_mode_badge", "spawn_mode_badge_fg", "spawn_mode_badge_bg", "Toggle spawn location: Keep (default) or Camera (current view).")
+return
+[[<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+xmlns:esUtility="clr-namespace:WPFGUI.Shared.Utility;assembly=EngineUI"
+Background="{x:Null}"
+HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+]] .. _CHEAT_QUICK_STYLE_BLOCK .. [[
+
+<!-- COLLAPSED: icon-only tab, left edge, ABOVE Cheat Actions Quick Panel -->
+<Button Command="{Binding [cmd_open]}"
+HorizontalAlignment="Left" VerticalAlignment="Center"
+Margin="0,0,0,240"
+Cursor="Hand" BorderThickness="0" Padding="0"
+esUtility:AudioAttachedProperty.PreviewMouseLeftButtonUpSound="sfx_ui_hud_inGame_button_play"
+ToolTip="Open Spawn Panel">
+<Button.Style>
+<Style TargetType="Button">
+<Setter Property="Visibility" Value="Visible" />
+<Setter Property="Template">
+<Setter.Value>
+<ControlTemplate TargetType="Button">
+<Border Name="TabBorder" Background="#CC0E1118" CornerRadius="0,5,5,0"
+BorderBrush="#44668899" BorderThickness="0,1,1,1"
+Padding="6,8,6,8" MinWidth="20" MinHeight="36">
+<Image Source="]] .. ICON .. [[" Width="20" Height="20"
+VerticalAlignment="Center" HorizontalAlignment="Center" />
+</Border>
+<ControlTemplate.Triggers>
+<Trigger Property="IsMouseOver" Value="true">
+<Setter TargetName="TabBorder" Property="Background" Value="#E8243A52" />
+<Setter TargetName="TabBorder" Property="BorderBrush" Value="#8899BBDD" />
+</Trigger>
+<Trigger Property="IsPressed" Value="true">
+<Setter TargetName="TabBorder" Property="Background" Value="#FF2E4A66" />
+</Trigger>
+</ControlTemplate.Triggers>
+</ControlTemplate>
+</Setter.Value>
+</Setter>
+<Style.Triggers>
+<DataTrigger Binding="{Binding [panel_visible]}" Value="True">
+<Setter Property="Visibility" Value="Collapsed" />
+</DataTrigger>
+<DataTrigger Binding="{Binding [qp_panel_visible]}" Value="True">
+<Setter Property="Visibility" Value="Collapsed" />
+</DataTrigger>
+</Style.Triggers>
+</Style>
+</Button.Style>
+</Button>
+
+<!-- EXPANDED: full panel, left edge -->
+<Border Background="#E60E1118" CornerRadius="6" Padding="8,6,8,8"
+HorizontalAlignment="Left" VerticalAlignment="Center"
+Margin="6,0,0,240"
+MaxWidth="200" MaxHeight="420"
+BorderBrush="#44668899" BorderThickness="1"
+Visibility="{Binding [panel_visible], Converter={StaticResource BoolToVis}}">
+<StackPanel>
+<Grid Margin="2,0,2,4">
+<Grid.ColumnDefinitions>
+<ColumnDefinition Width="*" />
+<ColumnDefinition Width="Auto" />
+<ColumnDefinition Width="Auto" />
+</Grid.ColumnDefinitions>
+<StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+<Image Source="]] .. ICON .. [[" Width="14" Height="14"
+Margin="0,0,5,0" VerticalAlignment="Center" />
+<TextBlock Text="Spawn Panel"
+FontSize="11" FontWeight="Bold" Foreground="#FFD54F"
+VerticalAlignment="Center" />
+</StackPanel>
+<Button Grid.Column="1" Command="{Binding [cmd_switch_to_qp]}"
+Cursor="Hand" Background="Transparent" BorderThickness="0"
+ToolTip="Switch to Cheat Panel" Padding="4,0">
+<TextBlock Text="&#x21C4;" FontSize="11" Foreground="#6688AA" FontWeight="Bold" />
+</Button>
+<Button Grid.Column="2" Command="{Binding [cmd_close]}"
+esUtility:AudioAttachedProperty.PreviewMouseLeftButtonUpSound="sfx_ui_hud_inGame_button_play"
+Cursor="Hand" Background="Transparent" BorderThickness="0"
+Padding="4,0">
+<TextBlock Text="&#x2715;" FontSize="11" Foreground="#99AABB" FontWeight="Bold" />
+</Button>
+</Grid>
+<TextBlock Text="Open Unit Spawner to begin spawn history."
+FontSize="9" Foreground="#7F8FA0" TextWrapping="Wrap" Margin="2,0,2,5"
+Visibility="{Binding [slot_empty_vis], Converter={StaticResource BoolToVis}}" />
+<TextBlock Text="RECENT SPAWNS" FontSize="8" FontWeight="Bold" Foreground="#7F8FA0" Margin="2,0,2,3"
+Visibility="{Binding [slot_nonempty_vis], Converter={StaticResource BoolToVis}}" />
+<ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+MaxHeight="130"
+Visibility="{Binding [slot_nonempty_vis], Converter={StaticResource BoolToVis}}">
+<Grid HorizontalAlignment="Stretch">
+<Grid.RowDefinitions>
+]] .. slot_row_defs .. [[
+</Grid.RowDefinitions>
+]] .. slot_cards .. [[
+</Grid>
+</ScrollViewer>
+<Border Height="1" Background="#22668899" Margin="0,4,0,4"
+Visibility="{Binding [slot_nonempty_vis], Converter={StaticResource BoolToVis}}" />
+<TextBlock Text="QUICK ACTIONS"
+FontSize="8" FontWeight="Bold" Foreground="#7F8FA0" Margin="2,0,2,3" />
+<Grid HorizontalAlignment="Stretch">
+<Grid.RowDefinitions>
+]] .. action_row_defs .. [[
+</Grid.RowDefinitions>
+]] .. action_buttons .. [[
+</Grid>
+</StackPanel>
+</Border>
+</Grid>
+]]
+end
+
+
+
+
+-----------------------------------------------------------------------
+-- Teleport Arm Overlay 
+--
+-- Full-viewport transparent presenter shown while "teleport armed" is
+-- active. A transparent full-screen Button captures the NEXT click
+-- anywhere on the game world and fires cmd_execute with the cursor at
+-- that terrain position. A cancel button aborts the arm.
+--
+-- Visibility is driven by [panel_visible] (true = overlay shown).
+-- Background="Transparent" (not {x:Null}) makes the root Grid
+-- hit-testable across its full extent, so terrain clicks are captured
+-- even in areas with no visible chrome.
+-----------------------------------------------------------------------
+
+function _DEVMENU_BUILD_TELEPORT_ARM_PANEL_XAML()
+	return
+[[<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+		xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+		xmlns:esUtility="clr-namespace:WPFGUI.Shared.Utility;assembly=EngineUI"
+		Background="Transparent"
+		HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+		Visibility="{Binding [panel_visible], Converter={StaticResource BoolToVis}}">
+
+	<!-- Full-screen transparent click capture. Must be the FIRST child so
+	     the Cancel button defined below renders on top and intercepts
+	     its own area first (WPF z-order = document order, last = topmost).
+	     A custom ControlTemplate with Rectangle Fill="Transparent" is required
+	     because Background="Transparent" alone does NOT suppress the default
+	     WPF button chrome — the ControlTemplate still renders a visible shape.
+	     Rectangle Fill="Transparent" is hit-testable but invisible.          -->
+	<Button Command="{Binding [cmd_execute]}"
+			HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+			Cursor="Cross"
+			ToolTip="Click terrain to teleport selected units here">
+		<Button.Template>
+			<ControlTemplate TargetType="Button">
+				<Rectangle Fill="Transparent" />
+			</ControlTemplate>
+		</Button.Template>
+	</Button>
+
+	<!-- ARMED hint — non-hittestable so it does not block the above button. -->
+	<Border IsHitTestVisible="False"
+			HorizontalAlignment="Center" VerticalAlignment="Top"
+			Margin="0,140,0,0"
+			Background="#E6111820" CornerRadius="6" Padding="14,8,14,10"
+			BorderBrush="#88FFCC00" BorderThickness="1.2">
+		<StackPanel HorizontalAlignment="Center">
+			<TextBlock Text="TELEPORT ARMED"
+				FontSize="13" FontWeight="Bold" Foreground="#FFCC00"
+				HorizontalAlignment="Center" />
+			<TextBlock Text="Click anywhere on terrain to warp selected units"
+				FontSize="10" Foreground="#BBCCDD"
+				HorizontalAlignment="Center" Margin="0,4,0,0" />
+		</StackPanel>
+	</Border>
+
+	<!-- Cancel button — defined AFTER the full-screen button so it sits on
+	     top (higher z-order) and intercepts its own click area.           -->
+	<Button Command="{Binding [cmd_cancel]}"
+			HorizontalAlignment="Center" VerticalAlignment="Top"
+			Margin="0,200,0,0"
+			Cursor="Hand" Padding="14,6"
+			esUtility:AudioAttachedProperty.PreviewMouseLeftButtonUpSound="sfx_ui_hud_inGame_button_play">
+		<Button.Template>
+			<ControlTemplate TargetType="Button">
+				<Border Name="CancelBorder" Background="#CC3A1A1A" CornerRadius="4"
+						BorderBrush="#88FF6666" BorderThickness="1"
+						Padding="{TemplateBinding Padding}">
+					<TextBlock Text="Cancel Teleport"
+						FontSize="11" FontWeight="SemiBold" Foreground="#FF8888" />
+				</Border>
+				<ControlTemplate.Triggers>
+					<Trigger Property="IsMouseOver" Value="true">
+						<Setter TargetName="CancelBorder" Property="Background" Value="#E8521818" />
+						<Setter TargetName="CancelBorder" Property="BorderBrush" Value="#BBFF8888" />
+					</Trigger>
+					<Trigger Property="IsPressed" Value="true">
+						<Setter TargetName="CancelBorder" Property="Background" Value="#FF7A2020" />
+					</Trigger>
+				</ControlTemplate.Triggers>
+			</ControlTemplate>
+		</Button.Template>
+	</Button>
+
+</Grid>
+]]
+end
+
+-----------------------------------------------------------------------
+-- Toast XAML — lightweight confirmation popup (bottom-center).
+-- IsHitTestVisible is set to false on the XamlPresenter by the caller
+-- so clicks pass through the entire presenter transparently.
+-- Auto-dismissed by DevMenu_ShowToast via Rule_AddOneShot (3 s).
+-----------------------------------------------------------------------
+function _DEVMENU_BUILD_TOAST_XAML()
+	return
+[[<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+		xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+		Background="{x:Null}"
+		HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+	<Border Background="#EE1A2332" CornerRadius="8" Padding="18,10,18,10"
+			HorizontalAlignment="Center" VerticalAlignment="Top"
+			Margin="0,180,0,0"
+			MaxWidth="560"
+			BorderBrush="#55668899" BorderThickness="1"
+			Visibility="{Binding [toast_visible], Converter={StaticResource BoolToVis}}">
+		<StackPanel>
+			<TextBlock Text="&#x2713; Action Complete"
+				FontSize="10" FontWeight="SemiBold" Foreground="#88FF99"
+				HorizontalAlignment="Center" Margin="0,0,0,4" />
+			<!-- Inline message row: prefix + optional colored state word + optional suffix.
+			     state_on_visible  (green) / state_off_visible (red) are mutually exclusive.
+			     For plain (non-toggle) toasts only msg_prefix is set; the state and suffix
+			     blocks collapse automatically via BoolToVis. -->
+			<StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+				<TextBlock Text="{Binding [msg_prefix]}"
+					FontSize="13" FontWeight="SemiBold" Foreground="#E8FFEE"
+					VerticalAlignment="Center" />
+				<TextBlock Text="{Binding [msg_state_word]}"
+					FontSize="13" FontWeight="Bold" Foreground="#5DFF88"
+					VerticalAlignment="Center"
+					Visibility="{Binding [state_on_visible], Converter={StaticResource BoolToVis}}" />
+				<TextBlock Text="{Binding [msg_state_word]}"
+					FontSize="13" FontWeight="Bold" Foreground="#FF6B6B"
+					VerticalAlignment="Center"
+					Visibility="{Binding [state_off_visible], Converter={StaticResource BoolToVis}}" />
+				<TextBlock Text="{Binding [msg_suffix]}"
+					FontSize="13" FontWeight="SemiBold" Foreground="#E8FFEE"
+					VerticalAlignment="Center"
+					Visibility="{Binding [suffix_visible], Converter={StaticResource BoolToVis}}" />
+			</StackPanel>
+			<StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,4,0,0"
+				Visibility="{Binding [target_visible], Converter={StaticResource BoolToVis}}">
+				<!-- Flag container: purple background shows through when the flag PNG is
+				     missing (DLC civs not embedded in WPFGUI.dll).  The Image layer covers
+				     the background when the resource resolves successfully. -->
+				<Grid Width="22" Height="16" VerticalAlignment="Center" Margin="0,0,6,0"
+					Visibility="{Binding [flag_visible], Converter={StaticResource BoolToVis}}">
+					<Border Background="#7744AA" CornerRadius="2" />
+					<Image Source="{Binding [flag_image]}" Stretch="UniformToFill" />
+				</Grid>
+				<TextBlock Text="{Binding [player_name]}"
+					FontSize="13" FontWeight="SemiBold" Foreground="#FFD54F"
+					VerticalAlignment="Center" />
+			</StackPanel>
+			<TextBlock Text="{Binding [subtext]}"
+				FontSize="11" Foreground="#99AABB"
+				HorizontalAlignment="Center" Margin="0,2,0,0"
+				Visibility="{Binding [subtext_visible], Converter={StaticResource BoolToVis}}" />
+		</StackPanel>
+	</Border>
+</Grid>
+]]
+end
+
+-----------------------------------------------------------------------
+-- Block Notify XAML — interactive confirmation popup shown to the
+-- pressing peer when their cheat action is blocked by the victim's
+-- "Block Actions" flag.  Unlike the toast (IsHitTestVisible=false),
+-- this presenter is hit-test-visible so both buttons are clickable.
+-- Auto-dismissed after 10 s by a Rule_AddOneShot if not clicked.
+-----------------------------------------------------------------------
+-- VictimPrompt XAML: interactive 3-button overlay shown to the LOCAL PLAYER
+-- (the victim) when their units are targeted by another player's cheat action.
+-- Bindings: [victim_prompt_visible], [attacker_name_text], [btn_block_label],
+--           [cmd_block], [cmd_close], [cmd_disable]
+function _DEVMENU_BUILD_VICTIM_PROMPT_XAML()
+	return
+[[<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+		xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+		xmlns:esUtility="clr-namespace:WPFGUI.Shared.Utility;assembly=EngineUI"
+		Background="{x:Null}"
+		HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+	<Border Background="#EE111C2A" CornerRadius="8" Padding="18,12,18,14"
+			HorizontalAlignment="Center" VerticalAlignment="Top"
+			Margin="0,240,0,0"
+			MaxWidth="520"
+			BorderBrush="#AA886600" BorderThickness="1"
+			Visibility="{Binding [victim_prompt_visible], Converter={StaticResource BoolToVis}}">
+		<StackPanel>
+			<TextBlock Text="&#x26A0; Cheat Action Detected"
+				FontSize="10" FontWeight="SemiBold" Foreground="#FFCC44"
+				HorizontalAlignment="Center" Margin="0,0,0,6" />
+			<TextBlock Text="{Binding [attacker_name_text]}"
+				FontSize="12" Foreground="#C8E8FF"
+				HorizontalAlignment="Center" TextWrapping="Wrap"
+				MaxWidth="460" Margin="0,0,0,12" Visibility="Collapsed" />
+			<StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+				<!-- BLOCK / UNBLOCK button -->
+				<Button Command="{Binding [cmd_block]}"
+						esUtility:AudioAttachedProperty.PreviewMouseLeftButtonUpSound="sfx_ui_hud_inGame_button_play"
+						Cursor="Hand" Width="148" Height="30" Margin="0,0,6,0">
+					<Button.Template>
+						<ControlTemplate TargetType="Button">
+							<Border Name="BlkBorder" Background="#CC1A4A10" CornerRadius="5"
+									BorderBrush="#7755AA33" BorderThickness="1" Padding="10,5">
+								<TextBlock Text="{Binding [btn_block_label]}"
+									FontSize="11" FontWeight="SemiBold" Foreground="#CCFFCC"
+									HorizontalAlignment="Center" VerticalAlignment="Center" />
+							</Border>
+							<ControlTemplate.Triggers>
+								<Trigger Property="IsMouseOver" Value="True">
+									<Setter TargetName="BlkBorder" Property="Background" Value="#EE285E18" />
+									<Setter TargetName="BlkBorder" Property="BorderBrush" Value="#AA77CC44" />
+								</Trigger>
+								<Trigger Property="IsPressed" Value="True">
+									<Setter TargetName="BlkBorder" Property="Background" Value="#FF305E1A" />
+								</Trigger>
+							</ControlTemplate.Triggers>
+						</ControlTemplate>
+					</Button.Template>
+				</Button>
+				<!-- CLOSE button -->
+				<Button Command="{Binding [cmd_close]}"
+						esUtility:AudioAttachedProperty.PreviewMouseLeftButtonUpSound="sfx_ui_hud_inGame_button_play"
+						Cursor="Hand" Width="70" Height="30" Margin="0,0,6,0">
+					<Button.Template>
+						<ControlTemplate TargetType="Button">
+							<Border Name="CloseBorder" Background="#CC1A2332" CornerRadius="5"
+									BorderBrush="#44668899" BorderThickness="1" Padding="10,5">
+								<TextBlock Text="Close"
+									FontSize="11" FontWeight="SemiBold" Foreground="#99AABB"
+									HorizontalAlignment="Center" VerticalAlignment="Center" />
+							</Border>
+							<ControlTemplate.Triggers>
+								<Trigger Property="IsMouseOver" Value="True">
+									<Setter TargetName="CloseBorder" Property="Background" Value="#E81A2E44" />
+									<Setter TargetName="CloseBorder" Property="BorderBrush" Value="#66899ABB" />
+								</Trigger>
+								<Trigger Property="IsPressed" Value="True">
+									<Setter TargetName="CloseBorder" Property="Background" Value="#FF1A2E44" />
+								</Trigger>
+							</ControlTemplate.Triggers>
+						</ControlTemplate>
+					</Button.Template>
+				</Button>
+				<!-- DISABLE NOTIFICATIONS button -->
+				<Button Command="{Binding [cmd_disable]}"
+						esUtility:AudioAttachedProperty.PreviewMouseLeftButtonUpSound="sfx_ui_hud_inGame_button_play"
+						Cursor="Hand" Width="148" Height="30">
+					<Button.Template>
+						<ControlTemplate TargetType="Button">
+							<Border Name="DisBorder" Background="#CC221122" CornerRadius="5"
+									BorderBrush="#44664466" BorderThickness="1" Padding="10,5">
+								<TextBlock Text="Disable Notifications"
+									FontSize="11" FontWeight="SemiBold" Foreground="#AA8899AA"
+									HorizontalAlignment="Center" VerticalAlignment="Center" />
+							</Border>
+							<ControlTemplate.Triggers>
+								<Trigger Property="IsMouseOver" Value="True">
+									<Setter TargetName="DisBorder" Property="Background" Value="#E8331833" />
+									<Setter TargetName="DisBorder" Property="BorderBrush" Value="#66886688" />
+								</Trigger>
+								<Trigger Property="IsPressed" Value="True">
+									<Setter TargetName="DisBorder" Property="Background" Value="#FF3A1E3A" />
+								</Trigger>
+							</ControlTemplate.Triggers>
+						</ControlTemplate>
+					</Button.Template>
+				</Button>
+			</StackPanel>
+		</StackPanel>
+	</Border>
+</Grid>
+]]
+end
+

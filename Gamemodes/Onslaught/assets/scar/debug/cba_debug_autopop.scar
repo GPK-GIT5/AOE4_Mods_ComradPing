@@ -1,0 +1,341 @@
+---------------------------------------------------------------------------------------------------
+-- Onslaught: Auto-Population Debugger
+-- Verify population baseline enforcement and cap reconciliation across all civs/scenarios
+---------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------
+-- Debug Flags & Global State
+---------------------------------------------------------------------------------------------------
+_AUTOPOP_DEBUG_VERBOSE = false
+_AUTOPOP_TEST_RESULTS = {}  -- [playerIndex] = { civ, tracked, effective, delta, status }
+
+---------------------------------------------------------------------------------------------------
+-- Main Test Command: Run full auto-pop validation
+---------------------------------------------------------------------------------------------------
+
+-- Single-command entry point to run comprehensive auto-pop verification
+function Debug_AutoPop_FullValidation()
+	print("\n" .. string.rep("=", 100))
+	print("AUTO-POPULATION BASELINE VALIDATION - STARTING")
+	print(string.rep("=", 100))
+	
+	_AUTOPOP_TEST_RESULTS = {}
+	
+	-- Check 1: All population buildings are locked
+	Debug_AutoPop_CheckBuildingLocks()
+	
+	-- Check 2: Landmark upgrade exclusions are explicit
+	Debug_AutoPop_CheckUpgradeLocks()
+	
+	-- Check 3: Tracked vs effective cap alignment
+	Debug_AutoPop_CheckCapAlignment()
+	
+	-- Check 4: Reconciler delta detection
+	Debug_AutoPop_CheckReconcilerState()
+	
+	-- Check 5: Event-driven deferred reconcile system state
+	Debug_AutoPop_CheckEventDriven()
+	
+	-- Check 6: Reward-path suppression counters
+	Debug_AutoPop_CheckRewardSuppression()
+	
+	-- Summary
+	Debug_AutoPop_PrintSummary()
+	
+	print(string.rep("=", 100))
+	print("AUTO-POPULATION BASELINE VALIDATION - COMPLETE")
+	print(string.rep("=", 100) .. "\n")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Test 1: Verify all population buildings are locked
+---------------------------------------------------------------------------------------------------
+
+function Debug_AutoPop_CheckBuildingLocks()
+	print("\n[TEST 1] Building Lock Verification")
+	print("-" .. string.rep("-", 98))
+	
+	local lock_keys = {
+		{ key = "house", type = "standard", required = function(_) return true end },
+		{ key = "town_center", type = "standard", required = function(_) return true end },
+		{ key = "town_center_capital", type = "standard", required = function(_) return true end },
+		{ key = "town_center_capital_moving", type = "mongol_packed_tc", required = function(civ)
+			return civ == "mongol"
+		end },
+		{ key = "house_moving", type = "mongol_nomadic", required = function(civ)
+			return civ == "mongol" or civ == "mongol_ha_gol"
+		end },
+		{ key = "cistern", type = "byzantine_unique", required = function(civ)
+			return civ == "byzantine" or civ == "byzantine_ha_mac"
+		end },
+	}
+	
+	local building_check_pass = 0
+	local building_check_fail = 0
+	
+	for i, player in ipairs(PLAYERS) do
+		if player.isEliminated then goto continue end
+		local civ = tostring(player.raceName)
+		
+		print(string.format("  P%d [%s]:", i, civ))
+		for _, lock_info in ipairs(lock_keys) do
+			if lock_info.required(civ) then
+				local ebp = AGS_GetCivilizationEntity(player.raceName, lock_info.key)
+				if ebp ~= nil then
+					print(string.format("    PASS %s (%s) mapped", lock_info.key, lock_info.type))
+					building_check_pass = building_check_pass + 1
+				else
+					print(string.format("    FAIL %s (%s) required but unresolved", lock_info.key, lock_info.type))
+					building_check_fail = building_check_fail + 1
+				end
+			else
+				print(string.format("    SKIP %s (%s) not required for civ", lock_info.key, lock_info.type))
+			end
+		end
+
+		-- Chinese Dynasty Village lock coverage (explicit blueprint locks in auto-pop)
+		if civ == "chinese" or civ == "chinese_ha_01" then
+			local dyn_village = BP_GetEntityBlueprint("building_dynasty_village_control_chi")
+			if dyn_village ~= nil then
+				print("    PASS dynasty_village (chinese) blueprint resolved")
+				building_check_pass = building_check_pass + 1
+			else
+				print("    FAIL dynasty_village (chinese) blueprint unresolved")
+				building_check_fail = building_check_fail + 1
+			end
+			if civ == "chinese_ha_01" then
+				local dyn_village_ha = BP_GetEntityBlueprint("building_dynasty_village_control_chi_ha_01")
+				if dyn_village_ha ~= nil then
+					print("    PASS dynasty_village (chinese_ha_01) blueprint resolved")
+					building_check_pass = building_check_pass + 1
+				else
+					print("    FAIL dynasty_village (chinese_ha_01) blueprint unresolved")
+					building_check_fail = building_check_fail + 1
+				end
+			end
+		end
+
+		-- Lancaster manor is a unique house-type population building and is explicitly locked by BP.
+		if civ == "lancaster" then
+			local manor = BP_GetEntityBlueprint("building_manor_lan")
+			if manor ~= nil then
+				print("    PASS manor (lancaster) blueprint resolved")
+				building_check_pass = building_check_pass + 1
+			else
+				print("    FAIL manor (lancaster) blueprint unresolved")
+				building_check_fail = building_check_fail + 1
+			end
+		end
+		
+		::continue::
+	end
+	
+	print(string.format("\n  Summary: %d passed, %d failed (pop buildings mappable)", building_check_pass, building_check_fail))
+end
+
+-- Test 2: Landmark upgrade scope exclusion (intentional)
+---------------------------------------------------------------------------------------------------
+
+function Debug_AutoPop_CheckUpgradeLocks()
+	print("\n[TEST 2] Landmark Upgrade Scope Exclusion")
+	print("-" .. string.rep("-", 98))
+	print("  INFO: Auto-pop restriction scope is BUILDINGS ONLY.")
+	print("  INFO: Landmark pop-cap upgrades are intentionally excluded.")
+	print("  INFO: This is not treated as a lock failure.")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Test 3: Tracked vs Effective Cap Alignment Check
+---------------------------------------------------------------------------------------------------
+
+function Debug_AutoPop_CheckCapAlignment()
+	print("\n[TEST 3] Tracked vs Effective Cap Alignment")
+	print("-" .. string.rep("-", 98))
+	print(string.format("  %-4s | %-16s | %-8s | %-9s | %-6s | %-7s",
+		"P#", "Civ", "Tracked", "Effective", "Delta", "Status"))
+	print("  " .. string.rep("-", 94))
+	
+	local cap_pass = 0
+	local cap_fail = 0
+	
+	for i, player in ipairs(PLAYERS) do
+		if player.isEliminated then
+			_AUTOPOP_TEST_RESULTS[i] = nil
+			goto continue
+		end
+		
+		local tracked = _AGS_AutoPop_Caps[player.id] or 0
+		local effective = Player_GetCurrentPopulationCap(player.id, CT_Personnel)
+		local delta = tracked - effective
+		local status = (math.abs(delta) <= 1) and "PASS" or "FAIL"
+		
+		_AUTOPOP_TEST_RESULTS[i] = {
+			civ = tostring(player.raceName),
+			tracked = tracked,
+			effective = effective,
+			delta = delta,
+			status = math.abs(delta) <= 1,
+		}
+		
+		if _AUTOPOP_TEST_RESULTS[i].status then
+			cap_pass = cap_pass + 1
+		else
+			cap_fail = cap_fail + 1
+		end
+		
+		print(string.format("  %4d | %-16s | %8d | %9d | %+6d | %s",
+			i, tostring(player.raceName), tracked, effective, delta, status))
+		
+		::continue::
+	end
+	
+	print(string.format("\n  Summary: %d aligned, %d MISALIGNED (delta > 1)", cap_pass, cap_fail))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Test 4: Reconciler State & Correction Tracking
+---------------------------------------------------------------------------------------------------
+
+function Debug_AutoPop_CheckReconcilerState()
+	print("\n[TEST 4] Reconciler State & Correction Tracking")
+	print("-" .. string.rep("-", 98))
+	print(string.format("  %-4s | %-16s | %-12s | %-7s",
+		"P#", "Civ", "Correction", "Applied"))
+	print("  " .. string.rep("-", 94))
+	
+	local reconciler_pass = 0
+	local reconciler_fail = 0
+	
+	for i, player in ipairs(PLAYERS) do
+		if player.isEliminated then goto continue end
+		
+		local correction = _AGS_AutoPop_Corrections[player.id] or 0
+		local has_correction = (correction ~= 0)
+		local expected_correction = (_AUTOPOP_TEST_RESULTS[i] and (_AUTOPOP_TEST_RESULTS[i].delta > 1)) and "Yes" or "No"
+		
+		print(string.format("  %4d | %-16s | %12d | %s",
+			i, tostring(player.raceName), correction, has_correction and "Yes" or "No"))
+		
+		if has_correction or (expected_correction == "Yes") then
+			-- Reconciler should have detected drift or will on next pass
+			reconciler_pass = reconciler_pass + 1
+		else
+			reconciler_pass = reconciler_pass + 1
+		end
+		
+		::continue::
+	end
+	
+	print(string.format("\n  Summary: Reconciler tracked %d correction states", reconciler_pass))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Summary Report
+---------------------------------------------------------------------------------------------------
+
+function Debug_AutoPop_PrintSummary()
+	print("\n[SUMMARY] Auto-Population Baseline Enforcement Status")
+	print("-" .. string.rep("-", 98))
+	
+	local total_players = 0
+	local passing_players = 0
+	local all_aligned = true
+	
+	for i, player in ipairs(PLAYERS) do
+		if not player.isEliminated then
+			total_players = total_players + 1
+			if _AUTOPOP_TEST_RESULTS[i] and _AUTOPOP_TEST_RESULTS[i].status then
+				passing_players = passing_players + 1
+			else
+				all_aligned = false
+			end
+		end
+	end
+	
+	print(string.format("Total players: %d", total_players))
+	print(string.format("Aligned players: %d / %d", passing_players, total_players))
+	print(string.format("Status: %s", all_aligned and "PASS ALL POPULATIONS ALIGNED" or "FAIL DRIFT DETECTED"))
+	
+	if not all_aligned then
+		print("\nMisaligned players:")
+		for i, result in pairs(_AUTOPOP_TEST_RESULTS) do
+			if not result.status then
+				print(string.format("  P%d [%s]: tracked=%d effective=%d (delta=%+d)",
+					i, result.civ, result.tracked, result.effective, result.delta))
+			end
+		end
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Test 5: Event-driven deferred reconcile system state
+---------------------------------------------------------------------------------------------------
+
+function Debug_AutoPop_CheckEventDriven()
+	print("\n[TEST 5] Event-Driven Deferred Reconcile State")
+	print("-" .. string.rep("-", 98))
+
+	-- Count forbidden BPs registered in the set
+	local bp_count = 0
+	if type(_AGS_AutoPop_ForbiddenBPSet) == "table" then
+		for _ in pairs(_AGS_AutoPop_ForbiddenBPSet) do
+			bp_count = bp_count + 1
+		end
+	end
+
+	local deferred_pending = (_AGS_AutoPop_DeferredPending == true)
+	local set_status = bp_count > 0 and "PASS" or "WARN"
+
+	print(string.format("  Forbidden BP set: %d entries [%s]", bp_count, set_status))
+	print(string.format("  Deferred reconcile pending: %s", tostring(deferred_pending)))
+
+	if bp_count == 0 then
+		print("  WARN: Forbidden BP set is empty — event-driven reconcile will not fire.")
+		print("        Check that AGS_AutoPop_BuildForbiddenBPSet() ran at startup.")
+	else
+		print("  PASS: Event-driven reconcile system initialized and registered.")
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Test 6: Reward-path suppression counters
+---------------------------------------------------------------------------------------------------
+
+function Debug_AutoPop_CheckRewardSuppression()
+	print("\n[TEST 6] Reward-Path Pop-Source Suppression")
+	print("-" .. string.rep("-", 98))
+
+	local suppressed = _AGS_AutoPop_RewardSuppressCount or 0
+	local autopop_active = (_mod ~= nil and _mod.pop_cap_incease_on_interval ~= nil and _mod.pop_cap_incease_on_interval ~= 0)
+
+	print(string.format("  Auto-pop active: %s", tostring(autopop_active)))
+	print(string.format("  Reward unlock suppressions (lifetime): %d", suppressed))
+
+	if suppressed > 0 then
+		print(string.format("  PASS: %d forbidden pop-source reward unlock(s) were suppressed this session.", suppressed))
+	elseif autopop_active then
+		print("  INFO: No suppressions yet (reward threshold for forbidden pop source not yet reached).")
+	else
+		print("  SKIP: Auto-pop not active; reward suppression guard not applicable.")
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Console Command Registration
+---------------------------------------------------------------------------------------------------
+
+-- Register the debug command so it can be called from console
+if type(Cmd_ExecuteByName) == "function" then
+	-- For direct console: debug.autopop.fullValidation()
+end
+
+-- Quick entry points for console (callable directly)
+-- Example: Debug_ValidateAutoPopulation()
+function Debug_ValidateAutoPopulation()
+	Debug_AutoPop_FullValidation()
+end
+
+-- Shorthand alias
+function debug_autopop()
+	Debug_AutoPop_FullValidation()
+end

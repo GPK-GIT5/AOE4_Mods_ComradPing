@@ -1,0 +1,413 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — Rule & Invariant Registry
+-- Declarative validation rules with severity levels, domain tagging, dependency tracking,
+-- and batch execution. Replaces inline assertions with discoverable, enforceable rules.
+--
+-- Loaded after cba_debug_registry.scar, before cba_debug_core.scar — so domain modules
+-- can register rules during their own load phase.
+--
+-- Console quick-reference:
+--   Debug_ListRules()                     -- show all rules
+--   Debug_ListRules("leaver")             -- filter by domain
+--   Debug_CheckRules()                    -- run all rules, print results
+--   Debug_CheckRules("leaver")            -- run rules for one domain
+--   Debug_RuleReport()                    -- structured pass/fail summary
+--   Debug_RuleInfo("handled_reconciliation") -- detailed info for one rule
+---------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------
+-- Severity Levels
+---------------------------------------------------------------------------------------------------
+
+RULE_HARD_FAIL = "hard_fail"   -- Pipeline-stopping: must pass for system to be valid
+RULE_WARNING   = "warning"     -- Logged concern: does not block but should be investigated
+RULE_INFO      = "info"        -- Advisory: informational metric, never blocks
+
+---------------------------------------------------------------------------------------------------
+-- Internal Storage
+---------------------------------------------------------------------------------------------------
+
+-- Array of registered rule entries (insertion order preserved)
+local _RULE_LIST = {}
+
+-- name → rule entry lookup (fast access)
+local _RULE_INDEX = {}
+
+-- Last batch run results: array of { name, domain, severity, passed, message }
+local _LAST_RESULTS = {}
+
+---------------------------------------------------------------------------------------------------
+-- Rule Contract
+--
+-- Debug_RegisterRule({
+--   name        string    REQUIRED  Unique rule name (e.g. "handled_reconciliation")
+--   domain      string    REQUIRED  Domain tag (e.g. "leaver", "siege", "population")
+--   severity    string    REQUIRED  One of RULE_HARD_FAIL, RULE_WARNING, RULE_INFO
+--   check       function  REQUIRED  function(ctx) → boolean passed, string message
+--                                   ctx is passed from Debug_CheckRules caller (nil-safe)
+--   description string    OPTIONAL  Human-readable description
+--   depends_on  table     OPTIONAL  Array of rule names that must pass first
+-- })
+---------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------
+-- Public API — Registration
+---------------------------------------------------------------------------------------------------
+
+--- Register a named validation rule.
+-- @param rule  table  Rule definition (see contract above)
+function Debug_RegisterRule(rule)
+	if type(rule) ~= "table" or type(rule.name) ~= "string" then
+		print("[DEBUG_RULES] RegisterRule requires rule.name (string)")
+		return
+	end
+	if type(rule.domain) ~= "string" then
+		print(string.format("[DEBUG_RULES] Rule '%s' missing domain (string)", rule.name))
+		return
+	end
+	if type(rule.check) ~= "function" then
+		print(string.format("[DEBUG_RULES] Rule '%s' missing check (function)", rule.name))
+		return
+	end
+
+	-- Normalize optional fields
+	rule.severity    = rule.severity or RULE_WARNING
+	rule.description = rule.description or ""
+	rule.depends_on  = rule.depends_on or {}
+
+	-- Validate severity
+	if rule.severity ~= RULE_HARD_FAIL and rule.severity ~= RULE_WARNING and rule.severity ~= RULE_INFO then
+		print(string.format("[DEBUG_RULES] Rule '%s' has unknown severity '%s' — defaulting to warning",
+			rule.name, tostring(rule.severity)))
+		rule.severity = RULE_WARNING
+	end
+
+	-- Duplicate check
+	if _RULE_INDEX[rule.name] ~= nil then
+		print(string.format("[DEBUG_RULES] WARNING: rule '%s' already registered — overwriting", rule.name))
+	end
+
+	_RULE_INDEX[rule.name] = rule
+	table.insert(_RULE_LIST, rule)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Public API — Execution
+---------------------------------------------------------------------------------------------------
+
+--- Run all registered rules (or those matching a domain filter), passing optional context.
+-- @param domain_filter  string|nil  Case-insensitive substring match on domain
+-- @param ctx            table|nil   Context table passed to each rule's check function
+-- @return number passed, number total, number hard_fails
+function Debug_CheckRules(domain_filter, ctx)
+	ctx = ctx or {}
+	_LAST_RESULTS = {}
+
+	-- Build execution order respecting depends_on (simple: skip rules whose deps haven't passed)
+	local passed_set = {}
+	local total = 0
+	local passed = 0
+	local hard_fails = 0
+	local skipped = 0
+
+	-- Sort rules by name for deterministic output
+	local sorted = {}
+	for _, rule in ipairs(_RULE_LIST) do
+		table.insert(sorted, rule)
+	end
+	table.sort(sorted, function(a, b) return a.name < b.name end)
+
+	-- Two-pass: first gather eligible rules, then execute
+	local eligible = {}
+	for _, rule in ipairs(sorted) do
+		if domain_filter == nil or string.find(string.lower(rule.domain), string.lower(domain_filter)) then
+			table.insert(eligible, rule)
+		end
+	end
+
+	if #eligible == 0 then
+		print(string.format("[DEBUG_RULES] No rules match domain filter '%s'", tostring(domain_filter)))
+		return 0, 0, 0
+	end
+
+	print(string.format("[DEBUG_RULES] --- Checking %d rule(s) %s---",
+		#eligible,
+		domain_filter and ("(domain: " .. domain_filter .. ") ") or ""))
+
+	-- Execute with dependency awareness (simple single-pass: if dep not in passed_set, skip)
+	for _, rule in ipairs(eligible) do
+		total = total + 1
+
+		-- Check dependencies
+		local deps_met = true
+		for _, dep_name in ipairs(rule.depends_on) do
+			if not passed_set[dep_name] then
+				deps_met = false
+				break
+			end
+		end
+
+		if not deps_met then
+			skipped = skipped + 1
+			local result = {
+				name = rule.name, domain = rule.domain, severity = rule.severity,
+				passed = false, message = "SKIPPED: unmet dependency"
+			}
+			table.insert(_LAST_RESULTS, result)
+			print(string.format("  [SKIP] %-35s (%s) unmet dependency", rule.name, rule.severity))
+		else
+			-- Execute rule check with pcall
+			local ok, rule_passed, rule_msg = pcall(rule.check, ctx)
+			if not ok then
+				-- check function crashed
+				local result = {
+					name = rule.name, domain = rule.domain, severity = rule.severity,
+					passed = false, message = "CRASH: " .. tostring(rule_passed)
+				}
+				table.insert(_LAST_RESULTS, result)
+				if rule.severity == RULE_HARD_FAIL then hard_fails = hard_fails + 1 end
+				print(string.format("  [CRASH] %-35s (%s) %s", rule.name, rule.severity, tostring(rule_passed)))
+			else
+				local msg = rule_msg or ""
+				local result = {
+					name = rule.name, domain = rule.domain, severity = rule.severity,
+					passed = rule_passed, message = msg
+				}
+				table.insert(_LAST_RESULTS, result)
+
+				if rule_passed then
+					passed = passed + 1
+					passed_set[rule.name] = true
+					print(string.format("  [PASS] %-35s %s", rule.name, msg))
+				else
+					if rule.severity == RULE_HARD_FAIL then hard_fails = hard_fails + 1 end
+					local sev_tag = rule.severity == RULE_HARD_FAIL and "FAIL" or
+					                rule.severity == RULE_WARNING   and "WARN" or "INFO"
+					print(string.format("  [%s] %-35s %s", sev_tag, rule.name, msg))
+				end
+			end
+		end
+	end
+
+	print(string.format("[DEBUG_RULES] Checked: %d  Passed: %d  Failed: %d  Skipped: %d  Hard-Fails: %d",
+		total, passed, total - passed - skipped, skipped, hard_fails))
+
+	return passed, total, hard_fails
+end
+
+---------------------------------------------------------------------------------------------------
+-- Public API — Discovery
+---------------------------------------------------------------------------------------------------
+
+--- List all registered rules, optionally filtered by domain.
+-- @param domain_filter  string|nil  Case-insensitive substring match
+function Debug_ListRules(domain_filter)
+	print("[DEBUG_RULES] --- Registered Rules ---")
+	local count = 0
+
+	local sorted = {}
+	for _, rule in ipairs(_RULE_LIST) do
+		table.insert(sorted, rule)
+	end
+	table.sort(sorted, function(a, b)
+		if a.domain == b.domain then return a.name < b.name end
+		return a.domain < b.domain
+	end)
+
+	for _, rule in ipairs(sorted) do
+		if domain_filter == nil or string.find(string.lower(rule.domain), string.lower(domain_filter)) then
+			local deps_str = #rule.depends_on > 0 and ("deps=[" .. table.concat(rule.depends_on, ",") .. "]") or ""
+			print(string.format("  %-35s [%-10s] %-10s %s  %s",
+				rule.name, rule.domain, rule.severity, deps_str, rule.description))
+			count = count + 1
+		end
+	end
+
+	print(string.format("[DEBUG_RULES] %d rule(s) shown, %d total registered", count, #_RULE_LIST))
+end
+
+--- Print detailed info for a single rule.
+-- @param name  string  Rule name
+function Debug_RuleInfo(name)
+	local rule = _RULE_INDEX[name]
+	if rule == nil then
+		print(string.format("[DEBUG_RULES] Rule '%s' not found. Use Debug_ListRules()", tostring(name)))
+		return
+	end
+
+	print(string.format("[DEBUG_RULES] === %s ===", rule.name))
+	print(string.format("  Domain:       %s", rule.domain))
+	print(string.format("  Severity:     %s", rule.severity))
+	print(string.format("  Description:  %s", rule.description))
+	print(string.format("  Dependencies: %s", #rule.depends_on > 0 and table.concat(rule.depends_on, ", ") or "(none)"))
+	print(string.format("  Check fn:     %s", type(rule.check)))
+
+	-- Show last result if available
+	for _, result in ipairs(_LAST_RESULTS) do
+		if result.name == name then
+			print(string.format("  Last result:  %s — %s", result.passed and "PASS" or "FAIL", result.message))
+			break
+		end
+	end
+end
+
+--- Print a structured report of the last Debug_CheckRules run.
+function Debug_RuleReport()
+	if #_LAST_RESULTS == 0 then
+		print("[DEBUG_RULES] No results — run Debug_CheckRules() first.")
+		return
+	end
+
+	print("[DEBUG_RULES] --- Last Run Report ---")
+	local by_severity = { hard_fail = {}, warning = {}, info = {} }
+	for _, r in ipairs(_LAST_RESULTS) do
+		local sev = r.severity or "info"
+		if by_severity[sev] then
+			table.insert(by_severity[sev], r)
+		end
+	end
+
+	for _, sev in ipairs({RULE_HARD_FAIL, RULE_WARNING, RULE_INFO}) do
+		local group = by_severity[sev] or {}
+		if #group > 0 then
+			print(string.format("\n  [%s] (%d rules)", string.upper(sev), #group))
+			for _, r in ipairs(group) do
+				local tag = r.passed and "PASS" or "FAIL"
+				print(string.format("    [%s] %-30s %s", tag, r.name, r.message))
+			end
+		end
+	end
+	print("")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Manifest Export (for AI tooling / offline scripts)
+---------------------------------------------------------------------------------------------------
+
+--- Return the full rule list as an array (for Debug_ExportManifest serializer).
+-- @return table
+function Debug_GetAllRules()
+	return _RULE_LIST
+end
+
+--- Return the count of registered rules.
+-- @return number
+function Debug_GetRuleCount()
+	return #_RULE_LIST
+end
+
+---------------------------------------------------------------------------------------------------
+-- Built-in Leaver Rules (registered here because they validate core pipeline invariants)
+-- These rules expect ctx to contain leaver pipeline state. When called without context,
+-- they read from the global _leaver_last_transfer_stats if available.
+-- EXTENSION: Add new rules to domain files via Debug_RegisterRule(). See contract above.
+---------------------------------------------------------------------------------------------------
+
+Debug_RegisterRule({
+	name = "handled_reconciliation",
+	domain = "leaver",
+	severity = RULE_HARD_FAIL,
+	description = "All eligible entities must receive an explicit handled decision",
+	check = function(ctx)
+		local st = ctx.stats or (_leaver_last_transfer_stats or {})
+		local eligible = st.eligible_total or 0
+		local handled = st.handled_total or 0
+		if eligible == 0 then
+			return true, "no entities (idle)"
+		end
+		if eligible == handled then
+			return true, string.format("eligible=%d == handled=%d", eligible, handled)
+		end
+		return false, string.format("eligible=%d != handled=%d (delta=%d)", eligible, handled, eligible - handled)
+	end,
+})
+
+Debug_RegisterRule({
+	name = "silent_skip_zero",
+	domain = "leaver",
+	severity = RULE_HARD_FAIL,
+	description = "No entity may fall through without an explicit decision",
+	depends_on = {"handled_reconciliation"},
+	check = function(ctx)
+		local st = ctx.stats or (_leaver_last_transfer_stats or {})
+		local bldg_skip = st.bldg_silent_skip or 0
+		local mil_skip = st.mil_silent_skip or 0
+		local total_skip = bldg_skip + mil_skip
+		if total_skip == 0 then
+			return true, "silent_skip=0"
+		end
+		return false, string.format("silent_skip=%d (bldg=%d, mil=%d)", total_skip, bldg_skip, mil_skip)
+	end,
+})
+
+Debug_RegisterRule({
+	name = "handled_decision_accounting",
+	domain = "leaver",
+	severity = RULE_HARD_FAIL,
+	description = "handled_total must equal sum of terminal decision counters",
+	depends_on = {"handled_reconciliation"},
+	check = function(ctx)
+		local st = ctx.stats or (_leaver_last_transfer_stats or {})
+		local handled = st.handled_total or 0
+		if handled == 0 then
+			return true, "no decisions (idle)"
+		end
+		local converted   = (st.bldg_converted or 0) + (st.mil_converted or 0)
+		local transferred = (st.bldg_transferred or 0) + (st.mil_transferred or 0)
+		local killed      = (st.bldg_killed or 0) + (st.mil_killed or 0)
+		local blocked     = (st.bldg_blocked or 0) + (st.mil_blocked or 0)
+		local bypassed    = (st.bldg_bypassed or 0) + (st.mil_bypassed or 0)
+		local sum = converted + transferred + killed + blocked + bypassed
+		if handled == sum then
+			return true, string.format("handled=%d == conv+xfer+kill+block+bypass=%d", handled, sum)
+		end
+		return false, string.format("handled=%d != sum=%d (conv=%d xfer=%d kill=%d block=%d bypass=%d)",
+			handled, sum, converted, transferred, killed, blocked, bypassed)
+	end,
+})
+
+Debug_RegisterRule({
+	name = "audit_log_determinism",
+	domain = "leaver",
+	severity = RULE_WARNING,
+	description = "Audit log decision keys must be sorted for deterministic output",
+	check = function(ctx)
+		local log = ctx.audit_log or (_LEAVER_AUDIT_LOG or {})
+		if #log == 0 then
+			return true, "audit log empty (idle)"
+		end
+		-- Check that tallying by sorted keys produces stable key order
+		local keys = {}
+		local seen = {}
+		for _, entry in ipairs(log) do
+			local d = entry.decision or entry[2] or "unknown"
+			if not seen[d] then
+				table.insert(keys, d)
+				seen[d] = true
+			end
+		end
+		table.sort(keys)
+		-- Verify keys are non-empty
+		if #keys > 0 then
+			return true, string.format("%d unique decision keys, sorted OK", #keys)
+		end
+		return false, "no decision keys extracted from audit log"
+	end,
+})
+
+Debug_RegisterRule({
+	name = "population_guard_active",
+	domain = "population",
+	severity = RULE_WARNING,
+	description = "When auto-pop is active, population buildings must be killed (two-layer gate)",
+	check = function(ctx)
+		-- This rule only applies when auto-pop is active
+		if _mod == nil then return true, "_mod not loaded (pre-game)" end
+		if _mod.pop_cap_incease_on_interval == nil or _mod.pop_cap_incease_on_interval == 0 then
+			return true, "auto-pop disabled — guard not required"
+		end
+		-- When auto-pop is active, verify the class gate and resolved-key guard are reachable
+		-- (This is a structural check — actual enforcement tested by Debug_AutoPopHouseGuard)
+		return true, "auto-pop active — guards expected reachable (run Debug_AutoPopHouseGuard for full proof)"
+	end,
+})

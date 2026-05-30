@@ -1,0 +1,238 @@
+
+import("training.scar")
+import("training/campaigntraininggoals.scar")
+
+---------------------------------------------------
+-- Feudal Age
+---------------------------------------------------
+
+function Tutorials_MissionZero_HighlightAgeUp()
+	
+	local goal_sequence_highlightAgeUp = "HighlightAgeUpIcon"
+	-- $
+	
+	local GoalSelectVillagerForAgeUpFeudal = Training_Goal(
+		"Squad",											-- target type: "Squad", "Entity", "PBG" (for buttton), "Position"
+		{
+			ID = "SelectVillagerForAgeUpFeudal",					-- unique ID string
+			Message = "$11199483", 							-- LOCID of text to display
+			DataTemplate="LeftClickTrainingDataTemplate",	-- LeftClickTrainingDataTemplate, GenericTrainingDataTemplate, RightClickTrainingDataTemplate
+		},
+		MissionZero_Predicate_VillagerSelected							-- function that returns true to complete this goal
+		)
+
+	local GoalHighlightAgeUpIcon = Training_Goal(
+		"PBG", 
+		{
+			ID = "AgeUpFeudal",
+			Message= "$11193631",
+			DataTemplate="LeftClickTrainingDataTemplate",
+		},
+		Predicate_FeudalLandmarkBeingPlaced
+		)
+	
+	local GoalPlaceLandmark = Training_Goal(
+		"Cursor",											-- target type: "Squad", "Entity", "PBG" (for buttton), "Position"
+		{
+			ID = "PlaceFeudalLandmark",					-- unique ID string
+			Message = "$11180975", 							-- LOCID of text to display
+			DataTemplate="LeftClickTrainingDataTemplate",	-- LeftClickTrainingDataTemplate, GenericTrainingDataTemplate, RightClickTrainingDataTemplate
+		},
+		Predicate_FeudalLandmarkPlaced							-- function that returns true to complete this goal
+		)
+	
+	
+	local GoalSequencehighlightAgeUpIcon = Training_GoalSequence(
+		goal_sequence_highlightAgeUp, 					-- id
+		2, 													-- repeatMax
+		2, 													-- remindMax
+		MissionZero_AgeUpFeudalTrigger, 			        -- trigger
+		IgnorePredicate_AgeUpFeudalBuilt, 					-- ignore
+		nil,										 		-- remind
+		IgnorePredicate_AgeUpFeudalBuilt, 				    -- bypass
+		true, 												-- canRegress
+		{GoalSelectVillagerForAgeUpFeudal, GoalHighlightAgeUpIcon, GoalPlaceLandmark}								-- goals
+		)
+	Training_AddGoalSequence(GoalSequencehighlightAgeUpIcon)
+	
+	Training_EnableGoalSequenceByID(goal_sequence_highlightAgeUp, true)
+	
+	feudalAgeStartedConstruction = false
+	
+end
+
+
+function MissionZero_AgeUpFeudalTrigger(goalSequence)
+	
+	if Timer_GetElapsed(goalSequence.timerID) >= g_training_timers.mid and Player_CanConstruct(player1, EBP.ENGLISH.BUILDING_LANDMARK_AGE1_WESTMINSTER_ABBEY_ENG) then
+		
+		goalSequence.goals[1].key = MissionZero_PickConvenientVillager()
+		goalSequence.goals[2].key = "WondersDataTemplate" 
+		return true
+	end
+end
+
+function Predicate_FeudalLandmarkBeingPlaced(goal)
+	if (g_training_log.phase == "position phase") and (g_training_log.BP == EBP.ENGLISH.BUILDING_LANDMARK_AGE1_WESTMINSTER_ABBEY_ENG) then
+		return true
+	end
+	
+end
+
+
+function Predicate_FeudalLandmarkPlaced(goal)
+	if (g_training_log.phase == "issued phase") and (g_training_log.BP == EBP.ENGLISH.BUILDING_LANDMARK_AGE1_WESTMINSTER_ABBEY_ENG) then
+		return true
+	end
+	
+end
+
+function IgnorePredicate_AgeUpFeudalBuilt(goalSequence)
+	
+	if feudalAgeStartedConstruction == true or Objective_IsComplete(SOBJ_AgeUpFeudal) or Player_GetCurrentAge(player1) > AGE_DARK then
+		Training_EndGoalSequence(goalSequence, true)
+		return true
+	end	
+end
+---------------------------------------------------
+-- Functions:
+---------------------------------------------------
+
+function MissionZero_PickConvenientVillager(mustBeIdle)
+	
+	mustBeIdle = mustBeIdle or false
+	local bestSquad = nil
+	
+	Player_GetAll(player1)
+	SGroup_Filter (sg_allsquads, "scar_villager", FILTER_KEEP)
+	
+	if mustBeIdle then
+		--filter for idle only
+	end
+	
+	
+	for i = 1, SGroup_Count(sg_allsquads) do
+		local squad = SGroup_GetSquadAt(sg_allsquads, i)
+		if squad ~= nil then
+			local isIdle =  Squad_IsIdle(squad)
+			local isOnScreen = Misc_IsSquadOnScreen(squad, 1)
+			if isIdle and isOnScreen then
+				return squad
+			elseif isIdle then
+				bestSquad = squad
+			elseif isOnScreen and not mustBeIdle then
+				bestSquad = bestSquad or squad
+			end
+		end
+	end
+	
+	return bestSquad	
+	
+end
+
+function AgeUpFeudal_Monitor()
+	
+	if Player_GetCurrentAge(player1) == 2 then
+		Rule_RemoveMe()
+		Rule_RemoveGlobalEvent(ProgressAgeFeudal_OnConstructionStart)
+		Objective_Complete(SOBJ_AgeUpFeudal,false,true)
+	end
+end
+
+function AgeUpFeudal_OnComplete()
+	
+	Objective_Complete(OBJ_ProgressFeudalAge)
+	
+end
+
+function IntroProgressToFeudalAge_OnComplete()
+	
+	Rule_AddOneShot(AddLandmarkHintpoint, 2)
+	Objective_Start(OBJ_LearnSpearman)
+end
+
+function AddLandmarkHintpoint()
+	hpid_landmark = HintPoint_Add(eg_landmarkForTutorial, true, "$11197254", 3)
+end
+
+-- Global event callback for GE_ConstructionStart
+function ProgressAgeFeudal_OnConstructionStart(context)
+
+	local buildingOwner = Entity_GetPlayerOwner(context.entity)
+	if buildingOwner == player1 then
+		
+		if not Objective_IsComplete(SOBJ_AgeUpFeudal) then
+			if Entity_IsOfType(context.entity, "wonder_dark_age") then
+				-- in case the player canceled construction mid-stream and this is a second or later build attempt, we check if we've been here before
+				if feudalAgeStartedConstruction == true then
+					HintPoint_Remove(hpid_landmark_tip)
+					EGroup_Clear (eg_landmarkForTutorial)
+				end
+				-- now we proceed	
+				feudalAgeStartedConstruction = true
+				hpid_landmark_tip = HintPoint_Add(context.entity, true, "$11192775", 3)
+				EGroup_Add(eg_landmarkForTutorial, context.entity)
+
+			end
+		end
+	end
+end
+
+---------------------------------------------------
+-- Castle Age
+---------------------------------------------------
+function Tutorials_MissionZero_HighlightAgeUpCastle()
+	
+	local goal_sequence_highlightAgeUpCastle = "HighlightAgeUpCastleIcon"
+	
+	local GoalHighlightAgeUpCastleIcon = Training_Goal(
+		"PBG", 
+		{
+			ID = "Age Up to Castle Age",
+			Message= 11193652, --"Age Up to Castle Age
+			DataTemplate="GenericTrainingDataTemplate",
+		}, 
+		Predicate_AgeUpCastleBuilt
+	)
+	local GoalSequencehighlightAgeUpCastleIcon = Training_GoalSequence(
+		goal_sequence_highlightAgeUpCastle, 					-- id
+		2, 													-- repeatMax
+		2, 													-- remindMax
+		UserHasSelectedAVillagerAgeUpCastle_MissionZero, 			-- trigger
+		IgnorePredicate_AgeUpCastleBuilt, 												-- ignore
+		nil,										 		-- remind
+		Predicate_AgeUpCastleBuilt, 				      		-- bypass
+		true, 												-- canRegress
+		{g_GoalVillagerSelectedHidden, GoalHighlightAgeUpCastleIcon}								-- goals
+	)
+	Training_AddGoalSequence(GoalSequencehighlightAgeUpCastleIcon)
+	
+	Training_EnableGoalSequenceByID(goal_sequence_highlightAgeUpCastle, true)
+	
+end
+
+function UserHasSelectedAVillagerAgeUpCastle_MissionZero(goalSequence)
+	
+	local villagerBP = Cardinal_ConvertTypeToSquadBlueprint("scar_villager", Game_GetLocalPlayer())
+	
+	goalSequence.goals[2].key = "WondersDataTemplate" 
+
+	return true
+
+end
+
+function Predicate_AgeUpCastleBuilt(goal)
+		
+	return Objective_IsComplete(SOBJ_AgeUpCastle)
+	
+end
+
+function IgnorePredicate_AgeUpCastleBuilt(goalSequence)
+	
+	if castleAgeStartedConstruction then --Objective_IsComplete(SOBJ_AgeUpCastle) then
+		Training_EndGoalSequence(goalSequence, true)
+		return true
+	end
+	
+	return false
+end

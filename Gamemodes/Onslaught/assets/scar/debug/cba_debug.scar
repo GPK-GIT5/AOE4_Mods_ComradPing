@@ -1,0 +1,119 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — Entry Point
+-- Imports all debug sub-files in dependency order.
+-- Loaded via: cba.scar → import("cba_debug.scar") → import("debug/cba_debug.scar")
+--
+-- Branch: onslaught-v3.3
+-- Source files validated: cba.scar, rewards/cba_rewards.scar, cba_annihilation.scar,
+--   cba_religious.scar, wonder.scar, cba_options.scar, cba_auto_age.scar,
+--   ags_global_settings.scar, gameplay/cba_economy.scar
+-- State tables: _mod, _CBA, _buildingLimit, _autoage, _annihilation, _religious, _wonder,
+--   AGS_GLOBAL_SETTINGS
+---------------------------------------------------------------------------------------------------
+
+-- Infrastructure registries (loaded before core so modules can register during import)
+import("debug/cba_debug_settings.scar")
+import("debug/cba_debug_registry.scar")
+import("debug/cba_debug_rules.scar")
+
+-- Core (state, logging, test runner, reusable helpers — depends on registries above)
+import("debug/cba_debug_core.scar")
+
+-- Helpers (baseline resources, spawn, smoke tests)
+import("debug/cba_debug_helpers.scar")
+
+-- 6-phase validation
+import("debug/cba_debug_validation.scar")
+
+-- Read-only inspectors
+import("debug/cba_debug_inspectors.scar")
+
+-- 8-stage stress test
+import("debug/cba_debug_stress.scar")
+
+-- 10-batch API coverage
+import("debug/cba_debug_coverage.scar")
+
+-- Event handler resilience probes
+import("debug/cba_debug_event_probes.scar")
+
+-- Destructive game-state helpers
+import("debug/cba_debug_destructive.scar")
+
+-- Building/siege limit UI diagnostics
+import("debug/cba_debug_limits_ui.scar")
+
+-- Disconnect/transfer/annihilation edge cases
+import("debug/cba_debug_leaver.scar")
+
+-- Controlled spawn sequences (spawn plan engine)
+import("debug/cba_debug_spawn_sequences.scar")
+
+-- Advanced stress scenarios (extreme edge cases)
+import("debug/cba_debug_advanced_stress.scar")
+
+-- UI-driven interactive checks (prompts, precache validation)
+import("debug/cba_debug_ui_prompts.scar")
+
+-- 12-category comprehensive stress suite
+import("debug/cba_debug_comprehensive_stress.scar")
+
+-- 8-scenario AI behavior validation (visual + Q&A)
+import("debug/cba_debug_ai_behavior.scar")
+
+-- PlayerUI initialization/data/rendering diagnostics
+import("debug/cba_debug_playerui.scar")
+
+-- PlayerUI animation/crash isolation diagnostics
+import("debug/cba_debug_playerui_anim.scar")
+
+-- 7-stage scenario orchestrator
+import("debug/cba_debug_scenario.scar")
+
+-- Unified siege test: BP audit + ram/ST/weapons/SE/field/workshop/events (1 command: Debug_SiegeTest)
+import("debug/cba_debug_siege_test.scar")
+
+-- Blueprint existence audit (1 command: Debug_BlueprintAudit)
+import("debug/cba_debug_blueprint_audit.scar")
+
+-- Boon selection UI diagnostics (BoonDebug_ShowTestPanel, BoonDebug_ShowTemplar, etc.)
+import("debug/cba_debug_boon_selection.scar")
+
+-- Structured civ data overview and consistency audit
+import("debug/cba_debug_civ_overview.scar")
+
+-- Runtime data extraction (BP enumeration, costs, garrison, race squads)
+import("debug/cba_debug_data_extract.scar")
+
+-- Leaver military pipeline verification (routes, heroes, elephants, stats)
+import("debug/cba_verify_military_pipeline.scar")
+
+-- 10-phase AI player module verification (bootstrap, economy, buildings, production, armies, allies, scouts, outposts, events, integration)
+import("debug/cba_debug_ai_player.scar")
+
+-- Mass battle lag harness (100 men-at-arms per player to sacred site + event telemetry)
+import("debug/cba_debug_battle_lag.scar")
+
+-- 10-category AI player stress, edge-case, and robustness verification suite
+import("debug/cba_debug_ai_stress.scar")
+
+-- Single-command session stress runners (Debug_StressUI / Debug_StressGamemode)
+-- Wraps every UI suite and every gamemode suite into one console command each
+-- and emits machine-parseable [STRESS_SESSION_*] markers for cross-session handoff.
+import("debug/cba_debug_session_stress.scar")
+
+-- Determinism / sync / replay stress suite (1 command: Debug_Determinism)
+-- Validates KI-LEAVER-001 (Player_IsHuman desync) + KI-LEAVER-002 (siege cap).
+-- Non-destructive: snapshots/restores player.isHuman; no real disconnect triggered.
+import("debug/cba_debug_determinism.scar")
+
+-- Frame-41 OOS isolation helpers (implemented in core)
+--   Debug_Frame41_IsolationStatus()
+--   Debug_Frame41_IsolationMark("note")
+--   Debug_Frame41_IsolationResolved("note")
+
+---------------------------------------------------------------------------------------------------
+-- Seal the module registry now that all imports are complete.
+-- Runs deferred dependency validation; prints warnings on missing deps or duplicate tags.
+---------------------------------------------------------------------------------------------------
+Debug_SealModuleRegistry()

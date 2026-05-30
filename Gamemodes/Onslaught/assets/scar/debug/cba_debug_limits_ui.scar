@@ -1,0 +1,225 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — Limits UI
+-- Diagnostics for building-limit and siege-limit UI state (from cba_options.scar).
+--
+-- Branch: onslaught-v3.3
+-- State: _buildingLimit table + per-player fields (obj_buildingLimit_count,
+--   obj_buildingLimit_workshop_count, siegeLimit_count, ramLimit_count, siegeTowerLimit_count)
+-- Settings: AGS_GLOBAL_SETTINGS.MaximumProductionBuildings, MaximumSiegeWorkshop
+--
+-- AUDIT: English keeps dual-classified (military_only_production + military_production_building)
+--   can overcount production slots at startup reconciliation.
+-- AUDIT: CBA_Options_SiegeLimit_Disable uses multi-step restriction cascade (4 tiers).
+--
+-- Console: Debug_GetLimitsUIState(), Debug_ConstructionTrace(1), Debug_LimitsUIStress(), Debug_LimitsUI_TraceUpdateFlow()
+---------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------
+-- Building & Siege Limit UI State
+---------------------------------------------------------------------------------------------------
+
+function Debug_GetLimitsUIState()
+	print("")
+	print("[DEBUG_LIMITS_UI] Building & Siege Limit UI State:")
+	print("----------------------------------------------------")
+
+	local max_bld = AGS_GLOBAL_SETTINGS.MaximumProductionBuildings or "nil"
+	local max_ws = AGS_GLOBAL_SETTINGS.MaximumSiegeWorkshop or "nil"
+	local max_siege = AGS_GLOBAL_SETTINGS.MaximumMedicPopulation or "nil"
+	print(string.format("  MaxProdBuildings=%s  MaxSiegeWorkshop=%s  SiegeLimit=%s",
+		tostring(max_bld), tostring(max_ws), tostring(max_siege)))
+	print("")
+
+	for i, player in ipairs(PLAYERS) do
+		local bl_count = player.obj_buildingLimit_count or "nil"
+		local ws_count = player.obj_buildingLimit_workshop_count or "nil"
+		local sl_count = player.siegeLimit_count or "nil"
+		local ram_count = player.ramLimit_count or "nil"
+		local tower_count = player.siegeTowerLimit_count or "nil"
+		local civ = _Debug_GetPlayerCiv(player)
+
+		print(string.format("  P%d (%s): buildings=%s/%s  workshops=%s/%s  siege=%s/%s  ram=%s  tower=%s",
+			i, civ, tostring(bl_count), tostring(max_bld),
+			tostring(ws_count), tostring(max_ws),
+			tostring(sl_count), tostring(max_siege),
+			tostring(ram_count), tostring(tower_count)))
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Construction Trace (detailed entity type enumeration)
+---------------------------------------------------------------------------------------------------
+
+function Debug_ConstructionTrace(player_idx)
+	if player_idx == nil then
+		print("[DEBUG_LIMITS_UI] Usage: Debug_ConstructionTrace(player_index)")
+		return
+	end
+
+	local player = PLAYERS[player_idx]
+	if player == nil then
+		print(string.format("[DEBUG_LIMITS_UI] PLAYERS[%d] is nil", player_idx))
+		return
+	end
+
+	print(string.format("[DEBUG_LIMITS_UI] Construction trace for Player %d:", player_idx))
+
+	local eg = Player_GetEntities(player.id)
+	local total = EGroup_Count(eg)
+
+	local buildings = 0
+	local landmarks = 0
+	local prod_buildings = 0
+	local mil_only_prod = 0
+	local workshops = 0
+
+	for j = 1, EGroup_CountSpawned(eg) do
+		local eid = EGroup_GetSpawnedEntityAt(eg, j)
+		local eid_t = type(eid)
+		if (eid_t == "number" or eid_t == "userdata") and Entity_IsValid(eid) then
+			if Entity_IsOfType(eid, "building") then
+				buildings = buildings + 1
+			end
+			if Entity_IsOfType(eid, "landmark") then
+				landmarks = landmarks + 1
+			end
+			if Entity_IsOfType(eid, "military_production_building") then
+				prod_buildings = prod_buildings + 1
+			end
+			if Entity_IsOfType(eid, "military_only_production") then
+				mil_only_prod = mil_only_prod + 1
+			end
+		end
+	end
+
+	print(string.format("  Total entities: %d", total))
+	print(string.format("  Buildings: %d", buildings))
+	print(string.format("  Landmarks: %d (excluded from production count)", landmarks))
+	print(string.format("  military_production_building: %d", prod_buildings))
+	print(string.format("  military_only_production: %d", mil_only_prod))
+	print(string.format("  Tracked count (obj_buildingLimit_count): %s",
+		tostring(player.obj_buildingLimit_count or "nil")))
+	print(string.format("  Workshop count (obj_buildingLimit_workshop_count): %s",
+		tostring(player.obj_buildingLimit_workshop_count or "nil")))
+
+	-- AUDIT: Flag English keeps dual classification
+	local civ = _Debug_GetPlayerCiv(player)
+	if civ == "english" or civ == "english_ha_01" then
+		print("  [AUDIT] English: keeps may be dual-classified (military_only_production + military_production_building)")
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Limits UI Stress Test (counter consistency check)
+---------------------------------------------------------------------------------------------------
+
+function Debug_LimitsUIStress()
+	local ok_gt_start, t_start = pcall(World_GetGameTime)
+	t_start = (ok_gt_start and t_start) or 0
+	local passed = 0
+	local total = 0
+
+	print("")
+	print("[DEBUG_LIMITS_UI] Limits UI Stress Test:")
+	print("----------------------------------------------------")
+
+	total = total + 1
+	if _buildingLimit == nil then
+		print("  [FAIL] _buildingLimit is nil")
+		local ok_gt_end, t_end = pcall(World_GetGameTime)
+		t_end = (ok_gt_end and t_end) or t_start
+		_Debug_EndMarker("LimitsUIStress", passed, total, t_end - t_start)
+		return
+	end
+	passed = passed + 1
+
+	-- Check _buildingLimit table fields
+	print("  _buildingLimit table:")
+	print(string.format("    module = %s", tostring(_buildingLimit.module)))
+	print(string.format("    objective_buildingLimit = %s", tostring(_buildingLimit.objective_buildingLimit)))
+	print("")
+
+	-- Settings from AGS_GLOBAL_SETTINGS
+	local max_bld = AGS_GLOBAL_SETTINGS.MaximumProductionBuildings or 0
+	local max_ws = AGS_GLOBAL_SETTINGS.MaximumSiegeWorkshop or 0
+	print(string.format("  MaxProdBuildings = %s", tostring(max_bld)))
+	print(string.format("  MaxSiegeWorkshop = %s", tostring(max_ws)))
+	print("")
+
+	-- Counter consistency check per player
+	print("  Counter consistency check:")
+	local desyncs = 0
+	for i, player in ipairs(PLAYERS) do
+		total = total + 1
+		local ok_elim, elim = pcall(Core_IsPlayerEliminated, player.id)
+		if ok_elim and elim then
+			print(string.format("    Player %d: ELIMINATED (skip)", i))
+			passed = passed + 1
+		else
+			local tracked = player.obj_buildingLimit_count or 0
+			local eg = Player_GetEntities(player.id)
+			local actual = 0
+
+			local count = EGroup_CountSpawned(eg)
+			for j = 1, count do
+				local eid = EGroup_GetSpawnedEntityAt(eg, j)
+				local eid_t = type(eid)
+				if (eid_t == "number" or eid_t == "userdata") and Entity_IsValid(eid) then
+					-- Count production buildings, excluding landmarks
+					-- (matches cba_options.scar reconciliation logic)
+					if Entity_IsOfType(eid, "military_production_building") or
+					   Entity_IsOfType(eid, "military_only_production") then
+						if not Entity_IsOfType(eid, "landmark") then
+							actual = actual + 1
+						end
+					end
+				end
+			end
+
+			local match = (tracked == actual)
+			local tag = match and "[OK]" or "[DESYNC]"
+			if not match then
+				desyncs = desyncs + 1
+			else
+				passed = passed + 1
+			end
+			print(string.format("    Player %d: tracked=%d actual=%d %s", i, tracked, actual, tag))
+		end
+	end
+
+	print("")
+	if desyncs == 0 then
+		print("  RESULT: All counters consistent")
+	else
+		print(string.format("  RESULT: %d DESYNC(s) found — check Entity_SetPlayerOwner transfer path", desyncs))
+	end
+
+	local ok_gt_end, t_end = pcall(World_GetGameTime)
+	t_end = (ok_gt_end and t_end) or t_start
+	_Debug_EndMarker("LimitsUIStress", passed, total, t_end - t_start)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Update-Flow Trace Toggle
+-- Controls AGS_LimitsUI_DeferUpdate / AGS_LimitsUI_Update trace spam in gameplay module.
+---------------------------------------------------------------------------------------------------
+
+function Debug_LimitsUI_TraceUpdateFlow(enable)
+	if enable == nil then
+		enable = true
+	end
+	AGS_LIMITS_UI_TRACE_UPDATE_FLOW = (enable == true)
+	print(string.format("[DEBUG_LIMITS_UI] Update-flow trace %s", AGS_LIMITS_UI_TRACE_UPDATE_FLOW and "ENABLED" or "DISABLED"))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Namespace Registration
+---------------------------------------------------------------------------------------------------
+if debug then
+	debug.limits.state     = Debug_GetLimitsUIState
+	debug.limits.trace     = Debug_ConstructionTrace
+	debug.limits.stress    = Debug_LimitsUIStress
+	debug.limits.traceflow = Debug_LimitsUI_TraceUpdateFlow
+	debug.limits.run       = Debug_GetLimitsUIState
+	debug._register("limits", Debug_GetLimitsUIState, "Building/siege limit UI diagnostics + desync detection", 1)
+end

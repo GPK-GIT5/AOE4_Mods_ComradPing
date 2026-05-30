@@ -1,0 +1,90 @@
+-----------------------------------------------------------------------
+-- PlayerUI Tracking: Game Object Repository
+-- Tracks age, landmarks (non-Abbasid), House of Wisdom (Abbasid).
+-- Reference: observerui/tracking_gameobjectrepository.scar
+-----------------------------------------------------------------------
+
+PlayerUI_GameObjectRepository = {
+	AGE_TO_REQUIRED_ENTITY_TYPE_FOR_AGING_UP = {
+		"wonder_dark_age",
+		"wonder_feudal_age",
+		"wonder_castle_age",
+	},
+}
+
+PlayerUiInitialization:AddInitializable(PlayerUI_GameObjectRepository)
+
+function PlayerUI_GameObjectRepository:Initialize()
+	local humanPlayers = _PlayerUI_VisiblePlayers
+	if humanPlayers == nil then
+		return
+	end
+	for i = 1, #humanPlayers do
+		self:_Initialize(humanPlayers[i].id)
+	end
+end
+
+function PlayerUI_GameObjectRepository:_Initialize(player)
+	local gameObjectsOfPlayer = {}
+	self[player.PlayerID] = gameObjectsOfPlayer
+
+	local preparation = function()
+		gameObjectsOfPlayer.Age = Player_GetCurrentAge(player)
+	end
+	PlayerUiRuleSystem:AddDataGatheringPreparationRule(player.PlayerID, preparation)
+
+	if Player_GetRace(player) == RACE.ABBASID then
+		local abbasidPrep = function()
+			gameObjectsOfPlayer.HouseOfWisdom = nil
+		end
+		PlayerUiRuleSystem:AddDataGatheringPreparationRule(player.PlayerID, abbasidPrep)
+
+		local entity_GetBlueprint = Entity_GetBlueprint
+		local rule = function(entity)
+			if entity_GetBlueprint(entity).PropertyBagGroupID == 199772 then
+				gameObjectsOfPlayer.HouseOfWisdom = entity
+			end
+		end
+		PlayerUiRuleSystem:AddEntityDataGatheringRule(player.PlayerID, "BuildingWithQueue", rule)
+		return
+	end
+
+	local entity_IsOfType = Entity_IsOfType
+	if Player_GetRace(player) == RACE.CHINESE then
+		local chinesePrep = function()
+			gameObjectsOfPlayer.LandmarkForNextAge = nil
+			gameObjectsOfPlayer.SecondLandmarkForNextAge = nil
+		end
+		PlayerUiRuleSystem:AddDataGatheringPreparationRule(player.PlayerID, chinesePrep)
+
+		local rule = function(entity)
+			if gameObjectsOfPlayer.Age > 3 then
+				return
+			end
+			if entity_IsOfType(entity, self.AGE_TO_REQUIRED_ENTITY_TYPE_FOR_AGING_UP[gameObjectsOfPlayer.Age]) then
+				if not gameObjectsOfPlayer.LandmarkForNextAge then
+					gameObjectsOfPlayer.LandmarkForNextAge = entity
+				else
+					gameObjectsOfPlayer.SecondLandmarkForNextAge = entity
+				end
+			end
+		end
+		PlayerUiRuleSystem:AddEntityDataGatheringRule(player.PlayerID, "building", rule)
+		return
+	end
+
+	local defaultPrep = function()
+		gameObjectsOfPlayer.LandmarkForNextAge = nil
+	end
+	PlayerUiRuleSystem:AddDataGatheringPreparationRule(player.PlayerID, defaultPrep)
+
+	local rule = function(entity)
+		if gameObjectsOfPlayer.Age > 3 then
+			return
+		end
+		if entity_IsOfType(entity, self.AGE_TO_REQUIRED_ENTITY_TYPE_FOR_AGING_UP[gameObjectsOfPlayer.Age]) then
+			gameObjectsOfPlayer.LandmarkForNextAge = entity
+		end
+	end
+	PlayerUiRuleSystem:AddEntityDataGatheringRule(player.PlayerID, "building", rule)
+end

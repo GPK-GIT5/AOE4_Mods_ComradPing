@@ -1,0 +1,2302 @@
+-----------------------------------------------------------------------
+-- PlayerUI: Update UI Data Context
+-- Maps tracked game data into the UI data context for XAML binding.
+-- All human players have data slots. Data depth is tiered:
+--   Local player  -> full (resources, pop, units, relics, civ specifics)
+--   Allies        -> summary (pop total, military count, age-up)
+--   Enemies       -> minimal (name, color, age, eliminated status only)
+-- Reference: observerui/observeruiupdateui.scar
+-----------------------------------------------------------------------
+
+_PlayerUI_DataContext = PlayerUiDataContext
+
+_PLAYERUI_ELIM_TRANSFER_SUPPRESS_WARN_SEC = 15.0
+
+local _playerui_updateui_print = print
+local function print(...)
+	local message = tostring(select(1, ...))
+	if type(PlayerUI_ShouldPrintMessage) ~= "function" or PlayerUI_ShouldPrintMessage(message) then
+		_playerui_updateui_print(...)
+	end
+end
+
+-- State tracking for elimination animation trigger (per-player, one-time)
+_PlayerUI_EliminationAnimTriggered = {}   -- keyed by playerIndex, true once animation triggered
+
+function PlayerUI_ResetEliminationPresentationState()
+	_PlayerUI_EliminationAnimTriggered = {}
+	local mappings = PlayerUIDataContextMappings
+	if mappings == nil or mappings.PlayersByIndex == nil then
+		return
+	end
+	for i = 1, #mappings.PlayersByIndex do
+		local data = mappings.PlayersByIndex[i]
+		if data ~= nil then
+			data._elimPresentationKeyApplied = nil
+			data._elimPresentationPlayerID = nil
+			data._elimSteadyVisualKeyApplied = nil
+			data._elimPresentationRevealed = false
+			data._elimPresentationReady = false
+			data._elimTransferSuppressed = false
+			data._elimTransferSuppressedSince = nil
+			data._elimTransferSuppressedWarnedAt = nil
+			data.showEliminationPresentation = false
+			data.eliminationLabel = ""
+			data.eliminationLabelColor = "#FFDD3333"
+			data.showElimIconEliminated = false
+			data.showElimIconSurrender = false
+			data.showElimIconDisconnect = false
+			data.elimRevealOpacity = 1.0
+			data.elimGlowOpacity = 0.0
+			data.elimGlowColor = "#FFDD3333"
+			data.hideAliveStats = false
+			data.elimScoreForeground = "#FF888888"
+			data.elimRevealMargin = "0,0,0,0"
+			data._elimRevealCompleted = false
+			data.elimStatusForeground = "#FF888888"
+			data._elimStatusTargetColor = nil
+			-- Fill-alpha strings (safe alternatives to Opacity bindings)
+			data.elimStrikethroughFill = "#00FFFFFF"
+			data.elimOverlayNameFill = "#00111111"
+			data.elimOverlayStatsFill = "#00111111"
+			data.elimGlowFill = "#00DD3333"
+		end
+	end
+end
+
+function _PlayerUI_GetEliminationPresentationKey(isEliminated, showEliminationPresentation, eliminationReason)
+	if not isEliminated then
+		return "alive"
+	end
+	if not showEliminationPresentation then
+		return "hidden"
+	end
+	if eliminationReason == "surrender" then
+		return "surrender"
+	end
+	if eliminationReason == "disconnect" then
+		return "disconnect"
+	end
+	return "eliminated"
+end
+
+function _PlayerUI_ApplyEliminationPresentationIfChanged(data, presentationKey)
+	if data._elimPresentationKeyApplied == presentationKey then
+		return
+	end
+
+	data._elimPresentationKeyApplied = presentationKey
+
+	-- Track whether this is the first reveal (for Phase 1 reveal animation)
+	local wasPreviouslyRevealed = data._elimPresentationRevealed
+
+	if presentationKey == "surrender" then
+		data.showEliminationPresentation = true
+		data.eliminationLabel = "Surrendered"
+		data.eliminationLabelColor = "#FFDDAA22"
+		data.showElimIconEliminated = false
+		data.showElimIconSurrender = true
+		data.showElimIconDisconnect = false
+		data.showEliminationStrikethrough = true
+		data._elimPresentationRevealed = true
+		data._elimStatusTargetColor = "#FFDDAA22"
+		-- Phase 1 reveal: start at zero opacity so fade-in animates
+		if not wasPreviouslyRevealed and PlayerUI_Animate_EliminationReveal ~= nil then
+			data.elimRevealOpacity = 0.0
+			-- Phase 3A: alive grids visible during crossfade; score starts white; margin offset
+			data.hideAliveStats = false
+			data.elimScoreForeground = _PLAYERUI_ELIM_SCORE_COLOR_ALIVE
+			data.elimRevealMargin = "0," .. tostring(_PLAYERUI_ELIM_MARGIN_SLIDE_PX) .. ",0,0"
+			data.elimStatusForeground = _PLAYERUI_ELIM_STATUS_COLOR_START
+		else
+			data.hideAliveStats = true
+			data.elimScoreForeground = _PLAYERUI_ELIM_SCORE_COLOR_FINAL
+			data.elimRevealMargin = "0,0,0,0"
+			data.elimStatusForeground = "#FFDDAA22"
+		end
+	elseif presentationKey == "disconnect" then
+		data.showEliminationPresentation = true
+		data.eliminationLabel = "Disconnected"
+		data.eliminationLabelColor = "#FF6699BB"
+		data.showElimIconEliminated = false
+		data.showElimIconSurrender = false
+		data.showElimIconDisconnect = true
+		data.showEliminationStrikethrough = true
+		data._elimPresentationRevealed = true
+		data._elimStatusTargetColor = "#FF6699BB"
+		if not wasPreviouslyRevealed and PlayerUI_Animate_EliminationReveal ~= nil then
+			data.elimRevealOpacity = 0.0
+			data.hideAliveStats = false
+			data.elimScoreForeground = _PLAYERUI_ELIM_SCORE_COLOR_ALIVE
+			data.elimRevealMargin = "0," .. tostring(_PLAYERUI_ELIM_MARGIN_SLIDE_PX) .. ",0,0"
+			data.elimStatusForeground = _PLAYERUI_ELIM_STATUS_COLOR_START
+		else
+			data.hideAliveStats = true
+			data.elimScoreForeground = _PLAYERUI_ELIM_SCORE_COLOR_FINAL
+			data.elimRevealMargin = "0,0,0,0"
+			data.elimStatusForeground = "#FF6699BB"
+		end
+	elseif presentationKey == "eliminated" then
+		data.showEliminationPresentation = true
+		data.eliminationLabel = "Eliminated"
+		data.eliminationLabelColor = "#FFDD3333"
+		data.showElimIconEliminated = true
+		data.showElimIconSurrender = false
+		data.showElimIconDisconnect = false
+		data.showEliminationStrikethrough = true
+		data._elimPresentationRevealed = true
+		data._elimStatusTargetColor = "#FFDD3333"
+		if not wasPreviouslyRevealed and PlayerUI_Animate_EliminationReveal ~= nil then
+			data.elimRevealOpacity = 0.0
+			data.hideAliveStats = false
+			data.elimScoreForeground = _PLAYERUI_ELIM_SCORE_COLOR_ALIVE
+			data.elimRevealMargin = "0," .. tostring(_PLAYERUI_ELIM_MARGIN_SLIDE_PX) .. ",0,0"
+			data.elimStatusForeground = _PLAYERUI_ELIM_STATUS_COLOR_START
+		else
+			data.hideAliveStats = true
+			data.elimScoreForeground = _PLAYERUI_ELIM_SCORE_COLOR_FINAL
+			data.elimRevealMargin = "0,0,0,0"
+			data.elimStatusForeground = "#FFDD3333"
+		end
+	else
+		data.showEliminationPresentation = false
+		data.eliminationLabel = ""
+		data.eliminationLabelColor = "#FFDD3333"
+		data.showElimIconEliminated = false
+		data.showElimIconSurrender = false
+		data.showElimIconDisconnect = false
+		data.showEliminationStrikethrough = false
+		data._elimPresentationRevealed = false
+		data.elimRevealOpacity = 1.0
+		data.elimGlowOpacity = 0.0
+		data.hideAliveStats = false
+		data.elimScoreForeground = _PLAYERUI_ELIM_SCORE_COLOR_FINAL
+		data.elimRevealMargin = "0,0,0,0"
+		data._elimRevealCompleted = false
+		data.elimStatusForeground = _PLAYERUI_ELIM_STATUS_COLOR_START
+		data._elimStatusTargetColor = nil
+	end
+	-- Recompute Fill-alpha strings from current opacity values
+	_PlayerUI_UpdateElimFills(data)
+end
+
+-----------------------------------------------------------------------
+-- Compute elimination Fill-alpha strings from numeric opacity fields.
+-- XAML safety: Opacity bindings on elements inside ItemsControl crash
+-- D3D on Collapsed→Visible toggle.  Instead, encode opacity into Fill
+-- colour alpha channels (#AARRGGBB) and bind Fill only.
+-- Call this after writing elimRevealOpacity / elimGlowOpacity / elimGlowColor.
+-----------------------------------------------------------------------
+function _PlayerUI_UpdateElimFills(data)
+	local revealOp = data.elimRevealOpacity or 0
+	local glowOp = data.elimGlowOpacity or 0
+	local glowColor = data.elimGlowColor or "#FFDD3333"
+	local playerColor = data.color or "#FFFFFFFF"
+	-- Strikethrough: player color + reveal opacity
+	data.elimStrikethroughFill = _PlayerUI_FillWithOpacity(
+		(#playerColor == 7) and ("#FF" .. string.sub(playerColor, 2)) or playerColor, revealOp)
+	-- Name overlay: #CC111111 base + reveal opacity
+	data.elimOverlayNameFill = _PlayerUI_FillWithOpacity("#CC111111", revealOp)
+	-- Stats overlay: #99111111 base + reveal opacity
+	data.elimOverlayStatsFill = _PlayerUI_FillWithOpacity("#99111111", revealOp)
+	-- Glow: glowColor + glow opacity (shared by name and stats rows)
+	data.elimGlowFill = _PlayerUI_GlowFillWithOpacity(glowColor, glowOp)
+end
+
+function _PlayerUI_GetEliminationSteadyVisualKey(isEliminated, dimEnabled)
+	if isEliminated then
+		if dimEnabled then
+			return "elim_dim"
+		end
+		return "elim_nodim"
+	end
+	return "alive"
+end
+
+function _PlayerUI_ApplyEliminationSteadyVisualIfChanged(data, steadyVisualKey)
+	if data._elimSteadyVisualKeyApplied == steadyVisualKey then
+		return
+	end
+
+	data._elimSteadyVisualKeyApplied = steadyVisualKey
+	local setIfChanged = _PlayerUI_SetIfChanged
+	if setIfChanged == nil then
+		setIfChanged = function(t, k, v)
+			if t[k] ~= v then
+				t[k] = v
+			end
+		end
+	end
+
+	if steadyVisualKey == "elim_dim" then
+		setIfChanged(data, "rowOpacity", _PLAYERUI_ELIM_ANIM_FADE_TARGET)
+		data.rowDimFill = _PlayerUI_RowDimFill(_PLAYERUI_ELIM_ANIM_FADE_TARGET)
+		setIfChanged(data, "eliminationScaleFactor", 1.0)
+		setIfChanged(data, "eliminationAnimActive", false)
+		setIfChanged(data, "eliminationAnimElapsed", 0.0)
+	elseif steadyVisualKey == "elim_nodim" then
+		setIfChanged(data, "rowOpacity", 1.0)
+		data.rowDimFill = _PlayerUI_RowDimFill(1.0)
+		setIfChanged(data, "eliminationScaleFactor", 1.0)
+		setIfChanged(data, "eliminationAnimActive", false)
+		setIfChanged(data, "eliminationAnimElapsed", 0.0)
+	else
+		setIfChanged(data, "rowOpacity", 1.0)
+		data.rowDimFill = _PlayerUI_RowDimFill(1.0)
+		setIfChanged(data, "eliminationScaleFactor", 1.0)
+		setIfChanged(data, "eliminationAnimActive", false)
+		setIfChanged(data, "eliminationAnimElapsed", 0.0)
+	end
+end
+
+function PlayerUI_Debug_PrintEliminationSnapshot(index)
+	local allPlayers = _PlayerUI_AllPlayers
+	if allPlayers == nil then
+		print("[PLAYERUI_ELIM] snapshot unavailable: no players")
+		return
+	end
+	local playerEntry = allPlayers[index]
+	local data = PlayerUIDataContextMappings.PlayersByIndex[index]
+	if playerEntry == nil or data == nil then
+		print("[PLAYERUI_ELIM] snapshot unavailable for index=" .. tostring(index))
+		return
+	end
+	local animActive = _PlayerUI_IsEliminationAnimationActive(index)
+	local animProgress = 0.0
+	if PlayerUI_Animate_GetEliminationLastProgress ~= nil then
+		animProgress = PlayerUI_Animate_GetEliminationLastProgress(index)
+	end
+	print("[PLAYERUI_ELIM] idx=" .. tostring(index)
+		.. " pid=" .. tostring(playerEntry.id.PlayerID)
+		.. " eliminated=" .. tostring(playerEntry.isEliminated)
+		.. " shown=" .. tostring(data.showEliminationPresentation)
+		.. " revealed=" .. tostring(data._elimPresentationRevealed)
+		.. " animActive=" .. tostring(animActive)
+		.. " progress=" .. tostring(animProgress)
+		.. " opacity=" .. tostring(data.rowOpacity)
+		.. " scale=" .. tostring(data.eliminationScaleFactor)
+		.. " elapsed=" .. tostring(data.eliminationAnimElapsed)
+		.. " strike=" .. tostring(data.showEliminationStrikethrough)
+		.. " fence=" .. tostring(data._elimCompletionFenceCycles)
+		.. " seeded=" .. tostring(data._elimFirstFrameSeeded)
+		.. " reason=" .. tostring(data.eliminationReason))
+end
+
+local function _PlayerUI_Debug_GetAnimEntryValue(key, field, fallback)
+	local entry = _PlayerUI_Anim and _PlayerUI_Anim[key]
+	if entry == nil then
+		return fallback
+	end
+	local value = entry[field]
+	if value == nil then
+		return fallback
+	end
+	return value
+end
+
+local function _PlayerUI_Debug_GetDecayValue(key)
+	local entry = _PlayerUI_AnimDecay and _PlayerUI_AnimDecay[key]
+	if entry == nil then
+		return 0
+	end
+	return entry.value or 0
+end
+
+function PlayerUI_Debug_PrintFullSnapshot(index)
+	local allPlayers = _PlayerUI_AllPlayers
+	if allPlayers == nil then
+		print("[PLAYERUI_SNAPSHOT] unavailable: no players")
+		return
+	end
+
+	local playerEntry = allPlayers[index]
+	local data = PlayerUIDataContextMappings.PlayersByIndex[index]
+	if playerEntry == nil or data == nil then
+		print("[PLAYERUI_SNAPSHOT] unavailable for index=" .. tostring(index))
+		return
+	end
+
+	local pIdx = World_GetPlayerIndex(playerEntry.id)
+	local animProgress = 0.0
+	if PlayerUI_Animate_GetEliminationLastProgress ~= nil then
+		animProgress = PlayerUI_Animate_GetEliminationLastProgress(index)
+	end
+
+	local teamKey = data.IsRightSide and "teamRight" or "teamLeft"
+	local rankPos = tonumber(data.rankPosition) or 0
+	local rankEntry = nil
+	if _PlayerUI_RankState ~= nil and _PlayerUI_RankState[teamKey] ~= nil and rankPos >= 1 then
+		rankEntry = _PlayerUI_RankState[teamKey][rankPos]
+	end
+
+	local killKey = "kill_" .. tostring(index)
+	local rewardKey = "reward_bar_" .. tostring(index)
+	local workerKey = "workerPop_" .. tostring(pIdx)
+	local militaryKey = "militaryPop_" .. tostring(pIdx)
+	local rankTranslateKey = "rank_translateY_" .. teamKey .. "_" .. tostring(rankPos)
+	local rankScaleKey = "rank_scale_" .. teamKey .. "_" .. tostring(rankPos)
+	local rankHighlightKey = "rank_highlight_" .. teamKey .. "_" .. tostring(rankPos)
+
+	local scorePulse = _PlayerUI_ScorePulse and _PlayerUI_ScorePulse[index]
+	local scorePulseValue = scorePulse and scorePulse.value or 0
+
+	print("[PLAYERUI_SNAPSHOT] idx=" .. tostring(index)
+		.. " pid=" .. tostring(playerEntry.id.PlayerID)
+		.. " team=" .. tostring(teamKey)
+		.. " rankPos=" .. tostring(rankPos)
+		.. " eliminated=" .. tostring(playerEntry.isEliminated)
+		.. " reason=" .. tostring(data.eliminationReason)
+		.. " shown=" .. tostring(data.showEliminationPresentation)
+		.. " revealed=" .. tostring(data._elimPresentationRevealed)
+		.. " transferSuppressed=" .. tostring(data._elimTransferSuppressed)
+		.. " animActive=" .. tostring(_PlayerUI_IsEliminationAnimationActive(index))
+		.. " progress=" .. tostring(animProgress)
+		.. " opacity=" .. tostring(data.rowOpacity)
+		.. " scale=" .. tostring(data.eliminationScaleFactor)
+		.. " elapsed=" .. tostring(data.eliminationAnimElapsed)
+		.. " fence=" .. tostring(data._elimCompletionFenceCycles)
+		.. " seeded=" .. tostring(data._elimFirstFrameSeeded))
+
+	print("[PLAYERUI_SNAPSHOT] anim kill(d=" .. tostring(_PlayerUI_Debug_GetAnimEntryValue(killKey, "display", 0))
+		.. " t=" .. tostring(_PlayerUI_Debug_GetAnimEntryValue(killKey, "target", 0))
+		.. " moving=" .. tostring(PlayerUI_Animate_IsTransitioning and PlayerUI_Animate_IsTransitioning(killKey))
+		.. ") reward(d=" .. tostring(_PlayerUI_Debug_GetAnimEntryValue(rewardKey, "display", 0))
+		.. " t=" .. tostring(_PlayerUI_Debug_GetAnimEntryValue(rewardKey, "target", 0))
+		.. ") worker(d=" .. tostring(_PlayerUI_Debug_GetAnimEntryValue(workerKey, "display", 0))
+		.. " t=" .. tostring(_PlayerUI_Debug_GetAnimEntryValue(workerKey, "target", 0))
+		.. ") military(d=" .. tostring(_PlayerUI_Debug_GetAnimEntryValue(militaryKey, "display", 0))
+		.. " t=" .. tostring(_PlayerUI_Debug_GetAnimEntryValue(militaryKey, "target", 0))
+		.. ")")
+
+	print("[PLAYERUI_SNAPSHOT] ranking lock=" .. tostring(_PlayerUI_RankTransitionLock)
+		.. " pending=" .. tostring(_PlayerUI_RankPendingReorder)
+		.. " rankScaleDecay=" .. tostring(_PlayerUI_Debug_GetDecayValue(rankScaleKey))
+		.. " rankHighlightDecay=" .. tostring(_PlayerUI_Debug_GetDecayValue(rankHighlightKey))
+		.. " rankTranslate=" .. tostring(PlayerUI_Animate_GetPosition and PlayerUI_Animate_GetPosition(rankTranslateKey))
+		.. " pulse=" .. tostring(scorePulseValue)
+		.. " rankEntryTop=" .. tostring(rankEntry and rankEntry.isTopPlayer)
+		.. " rankEntryContested=" .. tostring(rankEntry and rankEntry.isContested)
+		.. " rankEntryChange=" .. tostring(rankEntry and rankEntry.rankChangeType))
+end
+
+function _PlayerUI_IsEliminationAnimationActive(index)
+	if PlayerUI_Animate_IsEliminationTransitionActive ~= nil then
+		return PlayerUI_Animate_IsEliminationTransitionActive(index)
+	end
+	return false
+end
+
+function PlayerUI_UpdateEliminationPresentationForIndex(index, playersEntryOverride)
+	local allPlayers = _PlayerUI_AllPlayers
+	if allPlayers == nil then
+		return
+	end
+
+	local playerEntry = allPlayers[index]
+	local data = PlayerUIDataContextMappings.PlayersByIndex[index]
+	if playerEntry == nil or data == nil then
+		return
+	end
+
+	local playersEntry = playersEntryOverride
+	if playersEntry == nil then
+		playersEntry = PLAYERS[World_GetPlayerIndex(playerEntry.id)]
+	end
+
+	local showEliminationPresentation = false
+	local transferSuppressed = false
+	local transferActive = (_leaver_transfer_state ~= nil)
+	if playerEntry.isEliminated then
+		-- Once presentation has been revealed (reached steady visual), don't suppress
+		-- during subsequent leaver transfers on other players. Only suppress while
+		-- animation is still active (pre-reveal) or if this is the first reveal.
+		if data._elimPresentationRevealed then
+			showEliminationPresentation = true
+		else
+			-- Gate first reveal: only open after fence/defer settle (Phase 4.1)
+			if data._elimPresentationReady == true then
+				transferSuppressed = transferActive
+				showEliminationPresentation = not transferSuppressed and not _PlayerUI_IsEliminationAnimationActive(index)
+			else
+				showEliminationPresentation = false
+				transferSuppressed = transferActive
+			end
+		end
+	end
+
+	-- Phase B hardening: track suppression duration so stuck transfer-state coupling
+	-- is visible in logs and can be audited via debugger.
+	local now = World_GetGameTime()
+	if transferSuppressed then
+		if data._elimTransferSuppressedSince == nil then
+			data._elimTransferSuppressedSince = now
+		end
+		local suppressedFor = now - data._elimTransferSuppressedSince
+		if suppressedFor >= _PLAYERUI_ELIM_TRANSFER_SUPPRESS_WARN_SEC and _PLAYERUI_ELIM_ANIM_DEBUG then
+			local lastWarn = data._elimTransferSuppressedWarnedAt or 0
+			if (now - lastWarn) >= _PLAYERUI_ELIM_TRANSFER_SUPPRESS_WARN_SEC then
+				print("[PLAYERUI_ELIM_SUPPRESS_WARN] idx=" .. tostring(index)
+					.. " suppressedFor=" .. string.format("%.1fs", suppressedFor)
+					.. " transferActive=" .. tostring(transferActive)
+					.. " ready=" .. tostring(data._elimPresentationReady)
+					.. " revealed=" .. tostring(data._elimPresentationRevealed)
+					.. " animActive=" .. tostring(_PlayerUI_IsEliminationAnimationActive(index)))
+				data._elimTransferSuppressedWarnedAt = now
+			end
+		end
+	else
+		data._elimTransferSuppressedSince = nil
+		data._elimTransferSuppressedWarnedAt = nil
+	end
+
+	if _PLAYERUI_ELIM_ANIM_DEBUG and data._elimTransferSuppressed ~= transferSuppressed then
+		print("[PLAYERUI_ELIM_LIFECYCLE] idx=" .. tostring(index)
+			.. " transferSuppressed=" .. tostring(transferSuppressed)
+			.. " transferActive=" .. tostring(transferActive)
+			.. " revealed=" .. tostring(data._elimPresentationRevealed)
+			.. " shown=" .. tostring(showEliminationPresentation)
+			.. " animActive=" .. tostring(_PlayerUI_IsEliminationAnimationActive(index)))
+	end
+	data._elimTransferSuppressed = transferSuppressed
+
+	local eliminationReason = "alive"
+	if playersEntry ~= nil and playersEntry.eliminationReason ~= nil then
+		eliminationReason = playersEntry.eliminationReason
+	elseif playerEntry.isEliminated then
+		eliminationReason = "eliminated"
+	end
+
+	-- Note: classification (eliminated / disconnect / surrender) is owned at the
+	-- source -- _Onslaught_SetEliminationReason in cba.scar handles MP
+	-- WR_ELIMINATION (with the starter-Keep-alive disconnect probe at the
+	-- moment of defeat), Surrender_OnPlayerDefeated handles WR_SURRENDER, and
+	-- Annihilation_OnPlayerDefeated stamps WR_ANNIHILATION explicitly.  We
+	-- intentionally do NOT re-probe Entity_IsValid(keep) here every frame:
+	-- killed keeps remain "valid" for several seconds during their death/ruin
+	-- animation, which would cause genuine eliminations to flicker into the
+	-- "disconnect" presentation.
+
+	data.eliminationReason = eliminationReason
+	local presentationKey = _PlayerUI_GetEliminationPresentationKey(playerEntry.isEliminated, showEliminationPresentation, eliminationReason)
+	_PlayerUI_ApplyEliminationPresentationIfChanged(data, presentationKey)
+end
+
+PlayerUI_ResourceMapping = {
+	food = RT_Food,
+	wood = RT_Wood,
+	gold = RT_Gold,
+	stone = RT_Stone,
+}
+
+function PlayerUI_AdaptIconPathForXaml(iconPath)
+	return string.format("pack://application:,,,/WPFGUI;component/%s.png", string.gsub(iconPath, "\\", "/"))
+end
+
+_PlayerUI_AgeIcons = {
+	{ [false] = PlayerUI_AdaptIconPathForXaml("icons/hud/age/age_display_persistent_1"),
+	  [true]  = PlayerUI_AdaptIconPathForXaml("icons/races/common/abilities/age_1") },
+	{ [false] = PlayerUI_AdaptIconPathForXaml("icons/hud/age/age_display_persistent_2"),
+	  [true]  = PlayerUI_AdaptIconPathForXaml("icons/races/common/abilities/age_2") },
+	{ [false] = PlayerUI_AdaptIconPathForXaml("icons/hud/age/age_display_persistent_3"),
+	  [true]  = PlayerUI_AdaptIconPathForXaml("icons/races/common/abilities/age_3") },
+	{ [false] = PlayerUI_AdaptIconPathForXaml("icons/hud/age/age_display_persistent_4"),
+	  [true]  = PlayerUI_AdaptIconPathForXaml("icons/races/common/abilities/age_4") },
+}
+
+_PlayerUI_RaceImage = {
+	abbasid   = PlayerUI_AdaptIconPathForXaml("images/civ_flags/flag_abbasid"),
+	chinese   = PlayerUI_AdaptIconPathForXaml("images/civ_flags/flag_chinese"),
+	english   = PlayerUI_AdaptIconPathForXaml("images/civ_flags/flag_english"),
+	french    = PlayerUI_AdaptIconPathForXaml("images/civ_flags/flag_french"),
+	hre       = PlayerUI_AdaptIconPathForXaml("images/civ_flags/flag_hre"),
+	mongol    = PlayerUI_AdaptIconPathForXaml("images/civ_flags/flag_mongol"),
+	rus       = PlayerUI_AdaptIconPathForXaml("images/civ_flags/flag_rus"),
+	sultanate = PlayerUI_AdaptIconPathForXaml("images/civ_flags/flag_sultanates"),
+	malian    = PlayerUI_AdaptIconPathForXaml("images/civ_flags/flag_malian"),
+	ottoman   = PlayerUI_AdaptIconPathForXaml("images/civ_flags/flag_ottoman"),
+}
+
+-----------------------------------------------------------------------
+-- Score-based color gradient: white(0) → yellow(5000) → orange(7500) → red(10000)
+-- Smooth transitions every ~250 score increment.
+-----------------------------------------------------------------------
+
+_PLAYERUI_COLOR_WHITE  = { r = 255, g = 255, b = 255 }  -- score 0
+_PLAYERUI_COLOR_YELLOW = { r = 255, g = 255, b = 0   }  -- score 5000
+_PLAYERUI_COLOR_ORANGE = { r = 255, g = 165, b = 0   }  -- score 7500
+_PLAYERUI_COLOR_RED    = { r = 255, g = 50,  b = 50  }  -- score 10000
+
+function _PlayerUI_LerpColor(c1, c2, t)
+	local r = math.floor(c1.r + (c2.r - c1.r) * t + 0.5)
+	local g = math.floor(c1.g + (c2.g - c1.g) * t + 0.5)
+	local b = math.floor(c1.b + (c2.b - c1.b) * t + 0.5)
+	return string.format("#FF%02X%02X%02X", r, g, b)
+end
+
+function _PlayerUI_GetScoreColor(score)
+	if score <= 0 then return "#FFFFFFFF" end
+	if score >= 10000 then return "#FFFF3232" end
+	if score <= 5000 then
+		return _PlayerUI_LerpColor(_PLAYERUI_COLOR_WHITE, _PLAYERUI_COLOR_YELLOW, score / 5000)
+	elseif score <= 7500 then
+		return _PlayerUI_LerpColor(_PLAYERUI_COLOR_YELLOW, _PLAYERUI_COLOR_ORANGE, (score - 5000) / 2500)
+	else
+		return _PlayerUI_LerpColor(_PLAYERUI_COLOR_ORANGE, _PLAYERUI_COLOR_RED, (score - 7500) / 2500)
+	end
+end
+
+function _PlayerUI_GetScoreGlowTier(score)
+	if score >= 10000 then return 3 end
+	if score >= 7500 then return 2 end
+	return 1
+end
+
+-----------------------------------------------------------------------
+-- Initialize data context: populate static fields for all visible players
+-----------------------------------------------------------------------
+
+function PlayerUI_InitializeDataContext()
+	local mappings = PlayerUIDataContextMappings
+	local allPlayers = _PlayerUI_AllPlayers
+	if allPlayers == nil then
+		return
+	end
+
+	PlayerUI_ResetEliminationPresentationState()
+
+	for index = 1, #allPlayers do
+		local playerEntry = allPlayers[index]
+		local raceName = Player_GetRaceName(playerEntry.id)
+		local isLocal = playerEntry.isLocalPlayer
+		local isAlly = playerEntry.isAlly
+		local isEnemy = playerEntry.isEnemy
+
+		local data = mappings.PlayersByIndex[index]
+		data.name = playerEntry.playerName.LocString
+		data.color = UI_GetColourAsString(Player_GetUIColour(playerEntry.id))
+		data.civIcon = PlayerUI_AdaptIconPathForXaml(World_GetRaceIcon(playerEntry.race))
+		data.civImage = _PlayerUI_RaceImage[raceName]
+		data.IsEliminated = false
+		data.ageIcon = ""
+		data.isUpping = false
+		data.ageUpProgress = 0.0
+		data.upAt = 0
+		data.upName = ""
+		data.upIcon = ""
+		data.populationVsMaximumPopulation = ""
+		data.workerPopulation = 0
+		data.idleWorkerPopulation = 0
+		data.allMilitaryPopulation = 0
+		data.militaryPopulation = 0
+		data.siegePopulation = 0
+		data.relics = 0
+		data.relicsDeposited = 0
+		data.upgradesQueued = {}
+		data.units = {}
+		data.unitsWorkers = {}
+		data.civSpecifics = {
+			visible = raceName == "rus",
+			icon = PlayerUI_AdaptIconPathForXaml("icons/races/rus/abilities/hunting_boon"),
+			text = "0",
+		}
+		data.isIncomePerMinute = PlayerUI_Settings.swapResourceWithIncomePerMinute
+		data.isLocalPlayer = isLocal
+		data.isAlly = isAlly
+		data.isEnemy = isEnemy
+
+		-- Visibility flags for XAML binding
+		data.showStats = isLocal or isAlly           -- stats panel (pop, age-up)
+		data.showResources = isLocal                 -- resource row (local only)
+		data.showUnits = false                       -- bottom strip intentionally disabled
+		data.eliminationReason = "alive"
+		data.eliminationLabel = ""
+		data.eliminationLabelColor = "#FFDD3333"
+		data.showEliminationPresentation = false
+		data.showElimIconEliminated = false
+		data.showElimIconSurrender = false
+		data.showElimIconDisconnect = false
+		data._elimPresentationKeyApplied = nil
+		data._elimPresentationPlayerID = playerEntry.id.PlayerID
+		data._elimSteadyVisualKeyApplied = nil
+		data._elimTransferSuppressed = false
+		data._elimTransferSuppressedSince = nil
+		data._elimTransferSuppressedWarnedAt = nil
+		data._elimPresentationReady = false
+
+		-- Elimination transition animation state (SCAR-driven fade + scale)
+		data.eliminationAnimActive = false
+		data.eliminationAnimElapsed = 0.0
+		data.eliminationAnimDuration = _PLAYERUI_ELIM_ANIM_DURATION
+		data.eliminationScaleFactor = 1.0      -- 0.95–1.0 range
+		data.elimRevealOpacity = 1.0           -- 0→1 fade-in for eliminated presentation elements
+		data.elimGlowOpacity = 0.0             -- peak→0 glow pulse for eliminated presentation
+		data.elimGlowColor = "#FFDD3333"       -- glow colour (set per-reason at trigger time)
+		data.hideAliveStats = false            -- Phase 3A: true after reveal completes (crossfade)
+		data.elimScoreForeground = "#FF888888" -- Phase 3A: score foreground (white→grey over reveal)
+		data.elimRevealMargin = "0,0,0,0"      -- Phase 3A: margin slide-in during reveal
+		data._elimRevealCompleted = false       -- true once reveal animation has finished (prevents re-trigger)
+		data.elimStatusForeground = "#FF888888" -- Phase B: status label foreground (grey→reason colour over reveal)
+		data._elimStatusTargetColor = nil        -- Phase B: reason colour target for lerp
+		-- Fill-alpha strings (safe alternatives to Opacity bindings)
+		data.elimStrikethroughFill = "#00FFFFFF"
+		data.elimOverlayNameFill = "#00111111"
+		data.elimOverlayStatsFill = "#00111111"
+		data.elimGlowFill = "#00DD3333"
+
+		-- Per-player reward progress (for team row display)
+		data.rewardNextTitle = ""
+		data.rewardNextIcon = ""
+		data.rewardProgressText = ""
+		data.rewardBarWidth = 0
+
+		-- Score color/glow/prediction fields
+		data.killScoreColor = "#FFFFFFFF"
+		data.scoreGlowTier = 1
+		data.killScorePulseFontSize = 18
+		data.isScoreUpdating = false
+		data.rankPredictionUp = false
+		data.rankPredictionDown = false
+		data.rewardEarnedFlash = false
+		data._lastDisplayedKillScore = 0
+		data._lastRawKillScore = 0
+		data._lastRewardReq = 0
+
+		local resources = {}
+		for key, enum in pairs(PlayerUI_ResourceMapping) do
+			resources[key] = {
+				amount = 0,
+				AmountFormatted = "",
+				workers = 0,
+				income = "",
+				icon = PlayerUI_AdaptIconPathForXaml("icons/resources/resource_" .. key .. "_icon"),
+			}
+		end
+		data.resources = resources
+	end
+end
+
+-- Isolation flag: set false to skip fast-refresh entirely (reverts to 8s-only cadence)
+_PLAYERUI_ENABLE_FAST_REFRESH = true
+
+-----------------------------------------------------------------------
+-- Fast-refresh (1.0s): lightweight timer + score/reward-bar target update.
+-- No entity/squad iteration — reads only PLAYERS table and World_GetGameTime.
+-- Keeps the timer display accurate to ~1 second and score animation deltas
+-- small enough for smooth +1 per-tick counting on the 0.1s animate rule.
+-----------------------------------------------------------------------
+
+function PlayerUI_FastRefresh()
+	if not _PLAYERUI_ENABLE_FAST_REFRESH then return end
+	-- Timer: O(1) — pcall + math + string.format
+	PlayerUiDataContext.elapsedTimeDisplay = PlayerUI_GetElapsedTimeDisplay()
+
+	-- Score + reward-bar animation targets: O(n) PLAYERS table lookups.
+	-- Also: elimination latch + reason fast-sync so classify probes and debug
+	-- consumers see isEliminated / eliminationReason within 1s of defeat rather
+	-- than waiting up to 8s for the ring-rule cycle.
+	-- showEliminationPresentation and all animation sequencing remain ring-rule-owned.
+	local allPlayers = _PlayerUI_AllPlayers
+	local _fastRefreshMappings = PlayerUIDataContextMappings
+	if allPlayers ~= nil then
+		for index = 1, #allPlayers do
+			local playerEntry = allPlayers[index]
+			local player = playerEntry.id
+			local playersEntry = PLAYERS[World_GetPlayerIndex(player)]
+			if playersEntry then
+				-- Kill score target (primary: 1.0s cadence; 8s ring rule is safety net)
+				local rawKillScore = Onslaught_GetPlayerScore(playersEntry)
+				PlayerUI_Animate_SetTarget("kill_" .. index, rawKillScore, "ease_in")
+				-- Reward bar target
+				local kills = playersEntry.killed_number or 0
+				PlayerUI_Animate_SetTarget("reward_bar_" .. index, kills, "ease_in")
+			end
+			-- Elimination fast-sync (no entity iteration)
+			local data = _fastRefreshMappings and _fastRefreshMappings.PlayersByIndex
+				and _fastRefreshMappings.PlayersByIndex[index]
+			if data ~= nil then
+				if not playerEntry.isEliminated then
+					if (playersEntry ~= nil and playersEntry.isEliminated)
+							or not Player_IsAlive(player) then
+						playerEntry.isEliminated = true
+						data.IsEliminated = true
+					end
+				end
+				if playerEntry.isEliminated
+						and data.eliminationReason == "alive"
+						and playersEntry ~= nil
+						and playersEntry.eliminationReason ~= nil
+						and playersEntry.eliminationReason ~= "alive" then
+					data.eliminationReason = playersEntry.eliminationReason
+				end
+			end
+		end
+	end
+
+	-- Push updated timer to XAML (score display is pushed by animate tick)
+	PlayerUI_ApplyDataContext()
+end
+
+-----------------------------------------------------------------------
+-- Per-frame update: local player = full, allies = summary only
+-----------------------------------------------------------------------
+
+function PlayerUI_UpdateDataContext()
+	local allPlayers = _PlayerUI_AllPlayers
+	if allPlayers == nil then
+		return
+	end
+
+	-- Keep elapsed time in DataContext (avoids risky XAML external source bindings).
+	-- NOTE: Primary timer refresh is the 1.0s fast-refresh rule above.
+	-- This 8s path serves as a safety fallback.
+	PlayerUiDataContext.elapsedTimeDisplay = PlayerUI_GetElapsedTimeDisplay()
+
+	for index = 1, #allPlayers do
+		local playerEntry = allPlayers[index]
+		local data = PlayerUIDataContextMappings.PlayersByIndex[index]
+		local player = playerEntry.id
+		if data._elimPresentationPlayerID ~= player.PlayerID then
+			data._elimPresentationPlayerID = player.PlayerID
+			_PlayerUI_EliminationAnimTriggered[index] = nil
+			if PlayerUI_Animate_ClearEliminationAnim ~= nil then
+				PlayerUI_Animate_ClearEliminationAnim(index)
+			end
+			if PlayerUI_Animate_ClearEliminationReveal ~= nil then
+				PlayerUI_Animate_ClearEliminationReveal(index)
+			end
+			if PlayerUI_Animate_ClearEliminationGlow ~= nil then
+				PlayerUI_Animate_ClearEliminationGlow(index)
+			end
+			data._elimPresentationKeyApplied = nil
+			data._elimSteadyVisualKeyApplied = nil
+			data._elimPresentationRevealed = false
+			data._elimPresentationReady = false
+			data.showEliminationPresentation = false
+			data.eliminationLabel = ""
+			data.eliminationLabelColor = "#FFDD3333"
+			data.showElimIconEliminated = false
+			data.showElimIconSurrender = false
+			data.showElimIconDisconnect = false
+			data.showEliminationStrikethrough = false
+			data._elimCompletionFenceCycles = 0
+			data._elimFirstFrameSeeded = false
+			data._elimSteadyDeferFrame = false
+			data._elimTransferSuppressedSince = nil
+			data._elimTransferSuppressedWarnedAt = nil
+			data.rowOpacity = 1.0
+			data.rowDimFill = _PlayerUI_RowDimFill(1.0)
+			data.eliminationAnimActive = false
+			data.eliminationAnimElapsed = 0.0
+			data.eliminationScaleFactor = 1.0
+			data.elimRevealOpacity = 1.0
+			data.elimGlowOpacity = 0.0
+			data.elimGlowColor = "#FFDD3333"
+			data.hideAliveStats = false
+			data.elimScoreForeground = "#FF888888"
+			data.elimRevealMargin = "0,0,0,0"
+			data._elimRevealCompleted = false
+			data.elimStatusForeground = "#FF888888"
+			data._elimStatusTargetColor = nil
+			-- Fill-alpha strings (safe alternatives to Opacity bindings)
+			data.elimStrikethroughFill = "#00FFFFFF"
+			data.elimOverlayNameFill = "#00111111"
+			data.elimOverlayStatsFill = "#00111111"
+			data.elimGlowFill = "#00DD3333"
+		end
+
+		-- Sync elimination from game framework (one-way latch: once eliminated, stays eliminated)
+		local playersEntry = PLAYERS[World_GetPlayerIndex(player)]
+		if not playerEntry.isEliminated then
+			if (playersEntry ~= nil and playersEntry.isEliminated) or not Player_IsAlive(player) then
+				playerEntry.isEliminated = true
+			end
+		end
+		data.IsEliminated = playerEntry.isEliminated
+
+		-- Trigger elimination animation once on first frame
+		-- (Phase 1: unconditional trigger; Phase 2 will add position-stability check)
+		if playerEntry.isEliminated and not _PlayerUI_EliminationAnimTriggered[index] then
+			_PlayerUI_EliminationAnimTriggered[index] = true
+			PlayerUI_Animate_EliminationTransition(index, _PLAYERUI_ELIM_ANIM_DURATION, data)
+		end
+
+		-- Phase 4: Gate presentation reveal behind fence/defer settle for animated players.
+		-- Players that never triggered elimination animation get immediate presentation updates.
+		if not _PlayerUI_EliminationAnimTriggered[index] then
+			data._elimPresentationReady = true
+			PlayerUI_UpdateEliminationPresentationForIndex(index, playersEntry)
+		end
+
+		-- Transition visuals are owned by animation while active; update only writes steady fallback values.
+		local completionFenceCycles = data._elimCompletionFenceCycles or 0
+		if completionFenceCycles > 0 then
+			if _PLAYERUI_ELIM_ANIM_DEBUG then
+				print("[PLAYERUI_ELIM_FENCE] idx=" .. tostring(index)
+					.. " cycle=" .. tostring(completionFenceCycles)
+					.. " next=" .. tostring(completionFenceCycles - 1))
+			end
+			data._elimPresentationReady = false
+			data._elimCompletionFenceCycles = completionFenceCycles - 1
+		elseif not _PlayerUI_IsEliminationAnimationActive(index) then
+			-- Fence is now 0 and animation is inactive
+			if data._elimSteadyDeferFrame then
+				-- Defer frame was set last cycle; now apply steady visual + reveal presentation
+				data._elimSteadyDeferFrame = false
+				data._elimPresentationReady = true   -- Phase 4.1: open latch after settle
+				local dimEnabled = (PlayerUI_Settings.EnableEliminationDim ~= false)
+				local steadyVisualKey = _PlayerUI_GetEliminationSteadyVisualKey(playerEntry.isEliminated, dimEnabled)
+				_PlayerUI_ApplyEliminationSteadyVisualIfChanged(data, steadyVisualKey)
+				PlayerUI_UpdateEliminationPresentationForIndex(index, playersEntry)
+				-- Phase 1: trigger reveal fade-in after presentation elements become visible
+				if data.showEliminationPresentation and not data._elimRevealCompleted and PlayerUI_Animate_EliminationReveal ~= nil then
+					PlayerUI_Animate_EliminationReveal(index, _PLAYERUI_ELIM_REVEAL_DURATION, data)
+					-- Phase 2: trigger glow pulse concurrent with reveal
+					if PlayerUI_Animate_EliminationGlow ~= nil then
+						data.elimGlowColor = data.eliminationLabelColor
+						PlayerUI_Animate_EliminationGlow(index, _PLAYERUI_ELIM_GLOW_DURATION, data)
+					end
+				end
+			elseif completionFenceCycles == 0 and data._elimSteadyVisualKeyApplied == nil then
+				-- Fence just reached 0 and steady visual has not been applied yet: defer one cycle
+				data._elimSteadyDeferFrame = true
+				data._elimPresentationReady = false
+			else
+				-- Steady visual already applied or no animation ever ran; ensure steady state
+				data._elimPresentationReady = true   -- Phase 4.2: open latch for pre-applied steady path
+				local dimEnabled = (PlayerUI_Settings.EnableEliminationDim ~= false)
+				local steadyVisualKey = _PlayerUI_GetEliminationSteadyVisualKey(playerEntry.isEliminated, dimEnabled)
+				_PlayerUI_ApplyEliminationSteadyVisualIfChanged(data, steadyVisualKey)
+				PlayerUI_UpdateEliminationPresentationForIndex(index, playersEntry)
+				-- Phase 1: trigger reveal fade-in after presentation elements become visible
+				if data.showEliminationPresentation and not data._elimRevealCompleted and PlayerUI_Animate_EliminationReveal ~= nil then
+					PlayerUI_Animate_EliminationReveal(index, _PLAYERUI_ELIM_REVEAL_DURATION, data)
+					-- Phase 2: trigger glow pulse concurrent with reveal
+					if PlayerUI_Animate_EliminationGlow ~= nil then
+						data.elimGlowColor = data.eliminationLabelColor
+						PlayerUI_Animate_EliminationGlow(index, _PLAYERUI_ELIM_GLOW_DURATION, data)
+					end
+				end
+			end
+		end
+
+		if data._elimFirstFrameSeeded == true then
+			data._elimFirstFrameSeeded = false
+		end
+
+		-- Phase B hardening: once transfer processing is done, ensure stale suppression
+		-- flags cannot survive across subsequent update cycles.
+		if _leaver_transfer_state == nil and data._elimTransferSuppressed == true then
+			if _PLAYERUI_ELIM_ANIM_DEBUG then
+				print("[PLAYERUI_ELIM_LIFECYCLE] idx=" .. tostring(index)
+					.. " transferSuppressed stale=true -> false (transfer completed)")
+			end
+			data._elimTransferSuppressed = false
+			data._elimTransferSuppressedSince = nil
+			data._elimTransferSuppressedWarnedAt = nil
+		end
+
+		-- Age icon is public knowledge (visible via scouting/events)
+		local age = Player_GetCurrentAge(player)
+		PlayerUI_UpdateIsUpping(data, player)
+		data.ageIcon = _PlayerUI_AgeIcons[age][data.isUpping]
+
+		-- Reward score from PLAYERS table (canonical Onslaught score)
+		-- NOTE: Primary target refresh is the 1.0s fast-refresh rule.
+		-- These SetTarget calls are a safety fallback (no-op when target unchanged).
+		local rawKillScore = Onslaught_GetPlayerScore(playersEntry)
+		data._lastRawKillScore = rawKillScore
+		PlayerUI_Animate_SetTarget("kill_" .. index, rawKillScore, "ease_in")
+		data.killScore = PlayerUI_Animate_GetDisplay("kill_" .. index)
+
+		-- Per-player reward progress (for team row bar)
+		if playersEntry then
+			local kills = playersEntry.killed_number or 0
+			local req = playersEntry.obj_kill_requirement or 0
+			PlayerUI_Animate_SetTarget("reward_bar_" .. index, kills, "ease_in")
+			local dispKills = PlayerUI_Animate_GetDisplay("reward_bar_" .. index)
+			data.rewardProgressText = tostring(dispKills) .. " / " .. tostring(req)
+			local ratio = (req > 0) and math.min(dispKills / req, 1.0) or 0
+			data.rewardBarWidth = math.floor(ratio * 100)
+			data.rewardNextTitle = PlayerUI_GetNextRewardTitle(playersEntry)
+			data.rewardNextIcon = PlayerUI_GetNextRewardIcon(playersEntry)
+
+			-- Score-based color gradient (white→yellow→orange→red by kill score)
+			if PlayerUI_Settings.EnableScoreColors ~= false then
+				data.killScoreColor = _PlayerUI_GetScoreColor(data.killScore)
+				data.scoreGlowTier = _PlayerUI_GetScoreGlowTier(data.killScore)
+			else
+				data.killScoreColor = "#FFFFFFFF"
+				data.scoreGlowTier = 1
+			end
+
+			-- Size pulse: true while score number is actively transitioning
+			data.isScoreUpdating = PlayerUI_Animate_IsTransitioning("kill_" .. index)
+
+			-- Rank prediction arrows are set by PlayerUI_Ranking_Update (below)
+			-- They are NOT set here — only reset to defaults for safety
+
+			-- Reward milestone star: flash when kill requirement increases (reward earned)
+			if data._lastRewardReq ~= nil and req > data._lastRewardReq and data._lastRewardReq > 0 then
+				data.rewardEarnedFlash = true
+				PlayerUI_Animate_TriggerDecay("reward_star_" .. index, 1.0, 0.067)
+			end
+			data._lastRewardReq = req
+			if PlayerUI_Animate_GetDecay("reward_star_" .. index) <= 0 then
+				data.rewardEarnedFlash = false
+			end
+		else
+			data.rewardProgressText = ""
+			data.rewardBarWidth = 0
+			data.rewardNextTitle = ""
+			data.rewardNextIcon = ""
+			data.killScoreColor = "#FFFFFFFF"
+			data.scoreGlowTier = 1
+			data.killScorePulseFontSize = 18
+			data.isScoreUpdating = false
+			data.rewardEarnedFlash = false
+		end
+
+		-- Update visibility flags (accounts for elimination mid-game)
+		data.showStats = playerEntry.isLocalPlayer or playerEntry.isAlly
+		data.showResources = false  -- disabled for Onslaught
+		data.showUnits = false      -- bottom strip intentionally disabled
+
+		if playerEntry.isLocalPlayer then
+			-- Full data: population, units (resources stripped for Onslaught)
+			data.populationVsMaximumPopulation = PlayerUI_GetPopulationVsMaximumPopulation(player)
+			PlayerUI_UpdatePopulationComposition(data, player)
+			PlayerUI_UpdateUnitsAndQueuedStuff(data, player, playerEntry.race)
+		elseif playerEntry.isAlly then
+			-- Summary data: population + military count (for center panel bars)
+			data.populationVsMaximumPopulation = PlayerUI_GetPopulationVsMaximumPopulation(player)
+			PlayerUI_UpdatePopulationComposition(data, player)
+		else
+			-- Enemies: max pop only (when automatic population is active)
+			if _mod ~= nil and _mod.pop_cap_incease_on_interval ~= nil and _mod.pop_cap_incease_on_interval ~= 0 then
+				data.populationVsMaximumPopulation = PlayerUI_GetMaxPopulationDisplay(player)
+			else
+				data.populationVsMaximumPopulation = ""
+			end
+		end
+	end
+
+	-- Aggregate team summaries (kill scores + military pop) for center panel
+	PlayerUI_UpdateTeamSummaries()
+	-- Limits display (local player only)
+	PlayerUI_UpdateLimits()
+	-- Reward progression strip (local player only)
+	PlayerUI_UpdateRewardProgress()
+
+	-- Ranking: update rank order with stability logic (FLIP animations triggered here)
+	if PlayerUI_Ranking_Update ~= nil then
+		PlayerUI_Ranking_Update()
+	end
+end
+
+function PlayerUI_GetElapsedTimeDisplay()
+	local ok, gameTime = pcall(World_GetGameTime)
+	if not ok or gameTime == nil then
+		return "0:00"
+	end
+
+	local totalSeconds = math.max(0, math.floor(gameTime))
+	local minutes = math.floor(totalSeconds / 60)
+	local seconds = totalSeconds - (minutes * 60)
+	return string.format("%d:%02d", minutes, seconds)
+end
+
+-----------------------------------------------------------------------
+-- Team summaries: aggregate worker/military/siege pop for center panel
+-- Called once per update cycle, after all per-player data is populated.
+-- Uses max(1, total) for denominators to prevent division-by-zero
+-- in XAML MultiBinding proportional bar calculations.
+-----------------------------------------------------------------------
+
+function PlayerUI_UpdateTeamSummaries()
+	local ctx = PlayerUiDataContext
+	local left = ctx.TeamSummaryLeft
+	local right = ctx.TeamSummaryRight
+
+	-- Reset accumulators
+	left.WorkerPopulation = 0
+	left.MilitaryPopulation = 0
+	left.SiegePopulation = 0
+	left.TotalPopulation = 0
+	left.KillScore = 0
+	left.KillScorePulseActive = false
+	right.WorkerPopulation = 0
+	right.MilitaryPopulation = 0
+	right.SiegePopulation = 0
+	right.TotalPopulation = 0
+	right.KillScore = 0
+	right.KillScorePulseActive = false
+
+	-- Aggregate left team (local + allies)
+	local teamLeftSlots = ctx.teamLeft
+	if teamLeftSlots then
+		for i = 1, #teamLeftSlots do
+			local d = teamLeftSlots[i]
+			left.WorkerPopulation = left.WorkerPopulation + (d.workerPopulation or 0)
+			left.MilitaryPopulation = left.MilitaryPopulation + (d.allMilitaryPopulation or 0)
+			left.SiegePopulation = left.SiegePopulation + (d.siegePopulation or 0)
+			left.TotalPopulation = left.TotalPopulation + (d.workerPopulation or 0) + (d.allMilitaryPopulation or 0)
+			left.KillScore = left.KillScore + (d.killScore or 0)
+			left.KillScorePulseActive = left.KillScorePulseActive or (d.killScorePulseActive == true)
+		end
+	end
+
+	-- Aggregate right team (enemies)
+	local teamRightSlots = ctx.teamRight
+	if teamRightSlots then
+		for i = 1, #teamRightSlots do
+			local d = teamRightSlots[i]
+			right.WorkerPopulation = right.WorkerPopulation + (d.workerPopulation or 0)
+			right.MilitaryPopulation = right.MilitaryPopulation + (d.allMilitaryPopulation or 0)
+			right.SiegePopulation = right.SiegePopulation + (d.siegePopulation or 0)
+			right.TotalPopulation = right.TotalPopulation + (d.workerPopulation or 0) + (d.allMilitaryPopulation or 0)
+			right.KillScore = right.KillScore + (d.killScore or 0)
+			right.KillScorePulseActive = right.KillScorePulseActive or (d.killScorePulseActive == true)
+		end
+	end
+
+	-- Combined totals (min 1 prevents div-by-zero in MultiBinding converters)
+	local summary = ctx.AllPlayersSummary
+	summary.CombinedWorkerPop = math.max(1, left.WorkerPopulation + right.WorkerPopulation)
+	summary.CombinedMilitaryPop = math.max(1, left.MilitaryPopulation + right.MilitaryPopulation)
+	summary.CombinedKillScore = math.max(1, left.KillScore + right.KillScore)
+end
+
+-----------------------------------------------------------------------
+-- Resource update (local player only — ally resources not displayed)
+-----------------------------------------------------------------------
+
+function PlayerUI_UpdateResources(t, player)
+	local resources = Player_GetResources(player) or {}
+	local tResources = t.resources
+	if tResources == nil then
+		tResources = {}
+		t.resources = tResources
+	end
+
+	for key, enum in pairs(PlayerUI_ResourceMapping) do
+		if tResources[key] == nil then
+			tResources[key] = {
+				amount = 0,
+				AmountFormatted = "0",
+				workers = 0,
+				income = "0/min",
+				icon = PlayerUI_AdaptIconPathForXaml("icons/resources/resource_" .. key .. "_icon"),
+			}
+		end
+
+		local amount = resources[key] or 0
+		tResources[key].amount = amount
+		tResources[key].workers = Player_GetStateModelInt(player, "num_" .. key .. "_gatherers")
+		tResources[key].income = tostring(math.floor(Player_GetResourceRate(player, enum) * 60)) .. "/min"
+		if amount >= 10000 then
+			tResources[key].AmountFormatted = tostring(math.floor(amount / 1000 + 0.5)) .. "k"
+		else
+			tResources[key].AmountFormatted = tostring(math.floor(amount))
+		end
+	end
+end
+
+-----------------------------------------------------------------------
+-- D3D CRASH FIX: Clone-and-strip sanitizer.
+--
+-- The SCAR-WPF bridge holds a LIVE REFERENCE to the table passed to
+-- UI_SetDataContext — it does NOT snapshot.  The old strip→push→restore
+-- approach left unbound numerics back in the live table after restore,
+-- which WPF read on its next render frame, causing a D3D crash.
+--
+-- The fix: build a SANITIZED CLONE that keeps ALL top-level fields
+-- (XAML binds many of them, including TeamSummaryLeft/Right,
+-- AllPlayersSummary, limits, rewards, rewardProgress_current/max),
+-- and only deep-clones the per-player arrays + rewardIcons to strip
+-- their unbound numeric fields.  Specific known-unbound top-level
+-- numerics (e.g. rewardStripOffsetX) are blacklisted explicitly.
+-----------------------------------------------------------------------
+_PLAYERUI_STRIP_PLAYER_NUMERICS = true   -- per-player teamLeft/teamRight entries
+_PLAYERUI_STRIP_ICON_NUMERICS   = true   -- rewardIcons entries
+
+-- Whitelist: per-player numeric fields that ARE bound in XAML (keep these).
+_PLAYERUI_BOUND_PLAYER_NUMERICS = {
+	killScore = true,
+	killScorePulseFontSize = true,
+}
+
+-- Blacklist: top-level numeric fields KNOWN to be unbound and dangerous.
+-- All other top-level fields are passed through unchanged (many ARE bound).
+_PLAYERUI_UNBOUND_TOPLEVEL_NUMERICS = {
+	rewardStripOffsetX = true,
+}
+
+-- Clone an array of entries, keeping only safe fields (strings, booleans,
+-- whitelisted numerics, shallow-cloned nested tables).
+local function _PlayerUI_CloneEntriesSafe(entries, numericWhitelist)
+	local cloned = {}
+	for idx = 1, #entries do
+		local entry = entries[idx]
+		local clean = {}
+		for k, v in pairs(entry) do
+			local vtype = type(v)
+			if vtype == "number" then
+				-- Only keep whitelisted numerics
+				if numericWhitelist ~= nil and numericWhitelist[k] then
+					clean[k] = v
+				end
+				-- else: skip unbound numeric
+			elseif vtype == "table" then
+				-- Pass nested tables through by reference.
+				-- Per-player slots have no nested numeric-bearing tables in
+				-- the current XAML, so a reference copy is safe.
+				clean[k] = v
+			else
+				-- Strings, booleans — always safe
+				clean[k] = v
+			end
+		end
+		cloned[idx] = clean
+	end
+	return cloned
+end
+
+function PlayerUI_ApplyDataContext()
+	if _PlayerUI_HudVisible and PlayerUI_Settings.EnableApplyDataContextWhenHudVisible == false then
+		return
+	end
+
+	-- Build a sanitized clone: shallow-copy the root, replace per-player
+	-- arrays with deep-cloned versions that have unbound numerics stripped,
+	-- and blacklist specific known-unbound top-level numerics.
+	local ctx = PlayerUiDataContext
+	local cleanCtx = {}
+
+	for k, v in pairs(ctx) do
+		if type(v) == "number" and _PLAYERUI_UNBOUND_TOPLEVEL_NUMERICS[k] then
+			-- Skip explicitly blacklisted unbound numeric
+		else
+			cleanCtx[k] = v
+		end
+	end
+
+	-- Replace team arrays with cloned versions (strips per-slot unbound numerics)
+	if _PLAYERUI_STRIP_PLAYER_NUMERICS then
+		if ctx.teamLeft ~= nil then
+			cleanCtx.teamLeft = _PlayerUI_CloneEntriesSafe(ctx.teamLeft, _PLAYERUI_BOUND_PLAYER_NUMERICS)
+		end
+		if ctx.teamRight ~= nil then
+			cleanCtx.teamRight = _PlayerUI_CloneEntriesSafe(ctx.teamRight, _PLAYERUI_BOUND_PLAYER_NUMERICS)
+		end
+	end
+
+	-- Replace rewardIcons with cloned version (strips unbound numerics)
+	if _PLAYERUI_STRIP_ICON_NUMERICS and ctx.rewardIcons ~= nil then
+		cleanCtx.rewardIcons = _PlayerUI_CloneEntriesSafe(ctx.rewardIcons, nil)
+	end
+
+	-- Push sanitized clone to XAML.  WPF holds a reference to this clone;
+	-- the per-player and rewardIcons sub-arrays are fresh objects with no
+	-- unbound numerics.  Other top-level tables are passed by reference
+	-- (their structures are stable and their numerics are XAML-bound).
+	if PlayerUI_Settings.EnableToggleCrashGuard ~= false then
+		local ok, err = pcall(UI_SetDataContext, "PlayerUIHud", cleanCtx)
+		if not ok then
+			print("[PLAYERUI_CRASH_GUARD] UI_SetDataContext failed: " .. tostring(err))
+		end
+	else
+		UI_SetDataContext("PlayerUIHud", cleanCtx)
+	end
+end
+
+-----------------------------------------------------------------------
+-- Population
+-----------------------------------------------------------------------
+
+function PlayerUI_GetPopulationVsMaximumPopulation(player)
+	local getCurrentPopulationCap = Player_GetCurrentPopulationCap
+	if not getCurrentPopulationCap then
+		getCurrentPopulationCap = Player_GetMaxPopulation
+	end
+	local maxPop = getCurrentPopulationCap(player, CT_Personnel)
+	local curPop = Player_GetCurrentPopulation(player, CT_Personnel)
+	return math.floor(curPop) .. "/" .. math.floor(maxPop)
+end
+
+function PlayerUI_GetMaxPopulationDisplay(player)
+	local getCurrentPopulationCap = Player_GetCurrentPopulationCap
+	if not getCurrentPopulationCap then
+		getCurrentPopulationCap = Player_GetMaxPopulation
+	end
+	local maxPop = getCurrentPopulationCap(player, CT_Personnel)
+	return tostring(math.floor(maxPop))
+end
+
+function PlayerUI_UpdatePopulationComposition(t, player)
+	local rawWorker, rawIdle, rawMilitary, rawMilitaryNonSiege, rawSiege
+		= PlayerUI_PopulationComposition:GetForPlayer_Worker_WorkerIdle_Military_MilitaryNonSiege_Siege(player)
+
+	-- Animate worker and military counts; idle/siege snap instantly
+	local pIdx = World_GetPlayerIndex(player)
+	PlayerUI_Animate_SetTarget("workerPop_" .. pIdx, rawWorker)
+	PlayerUI_Animate_SetTarget("militaryPop_" .. pIdx, rawMilitary)
+
+	t.workerPopulation = PlayerUI_Animate_GetDisplay("workerPop_" .. pIdx)
+	t.idleWorkerPopulation = rawIdle
+	t.allMilitaryPopulation = PlayerUI_Animate_GetDisplay("militaryPop_" .. pIdx)
+	t.militaryPopulation = rawMilitaryNonSiege
+	t.siegePopulation = rawSiege
+end
+
+-----------------------------------------------------------------------
+-- Relics
+-----------------------------------------------------------------------
+
+function PlayerUI_UpdateRelics(t, player)
+	t.relics, t.relicsDeposited = PlayerUI_RelicLocations:GetForPlayer_Carried_Deposited(player)
+end
+
+-----------------------------------------------------------------------
+-- Age-up
+-----------------------------------------------------------------------
+
+function PlayerUI_UpdateIsUpping(t, player)
+	t.isUpping, t.ageUpProgress, t.upAt, t.upIcon, t.upName =
+		PlayerUI_AgingUpProgress:GetForPlayer_IsAgingUp_Progress_EstimatedTimeOfCompletion_Icon_Name(player)
+end
+
+-----------------------------------------------------------------------
+-- Civ specifics (Rus bounty)
+-----------------------------------------------------------------------
+
+function PlayerUI_UpdateCivSpecifics(t, player)
+	if Player_GetRaceName(player) ~= "rus" then
+		return
+	end
+	t.civSpecifics.text = tostring(math.floor(Player_GetStateModelFloat(player, "master_hunter_bounty_total_rus")))
+end
+
+-----------------------------------------------------------------------
+-- Unit icons and queued production (local player only)
+-----------------------------------------------------------------------
+
+function PlayerUI_DismissErrors(default, func)
+	local success, result = pcall(func)
+	if success then
+		return result
+	end
+	return default
+end
+
+function PlayerUI_GetIconNameFromSquadBlueprint(pbg, race)
+	return PlayerUI_DismissErrors(nil, function() return BP_GetSquadUIInfo(pbg, race).iconName end)
+end
+
+function PlayerUI_GetIconNameFromUpgradeBlueprint(pbg)
+	return PlayerUI_DismissErrors(nil, function() return BP_GetUpgradeUIInfo(pbg).iconName end)
+end
+
+function PlayerUI_HasMilitaryIcon(bp, race)
+	local success, result = pcall(function() return BP_GetSquadUIInfo(bp, race).tooltipDataTemplate == "BuildingMilitaryDataTemplate" end)
+	if success then
+		return result
+	end
+	return false
+end
+
+function PlayerUI_GetUnits(player, race, isMilitary)
+	local ownedSquads = PlayerUI_OwnedSquads:GetForPlayer(player)
+	local units = {}
+	for _, stuff in pairs(ownedSquads) do
+		local icon = PlayerUI_GetIconNameFromSquadBlueprint(stuff.Bp, race)
+		if icon then
+			icon = PlayerUI_AdaptIconPathForXaml(icon)
+			if units[icon] then
+				units[icon] = units[icon] + stuff.Count
+			else
+				units[icon] = stuff.Count
+			end
+			if isMilitary[icon] == nil then
+				isMilitary[icon] = PlayerUI_HasMilitaryIcon(stuff.Bp, race)
+			end
+		end
+	end
+	return units
+end
+
+function PlayerUI_GetQueuedStuff(player, race, isMilitary)
+	local queuedStuff = PlayerUI_QueuedStuff:GetForPlayer(player)
+	local upgradesQueued = {}
+	local queued = {}
+	for _, stuff in pairs(queuedStuff) do
+		if stuff.Bp.PropertyBagGroupType == PBGTYPE_Upgrade then
+			table.insert(upgradesQueued, { icon = PlayerUI_AdaptIconPathForXaml(PlayerUI_GetIconNameFromUpgradeBlueprint(stuff.Bp)) })
+		elseif stuff.Bp.PropertyBagGroupType == PBGTYPE_Squad then
+			local icon = PlayerUI_GetIconNameFromSquadBlueprint(stuff.Bp, race)
+			if icon then
+				icon = PlayerUI_AdaptIconPathForXaml(icon)
+				if queued[icon] then
+					queued[icon] = queued[icon] + stuff.Count
+				else
+					queued[icon] = stuff.Count
+				end
+				if isMilitary[icon] == nil then
+					isMilitary[icon] = PlayerUI_HasMilitaryIcon(stuff.Bp, race)
+				end
+			end
+		end
+	end
+	return queued, upgradesQueued
+end
+
+function PlayerUI_HashSetToArray(t)
+	local array = {}
+	for icon, count in pairs(t) do
+		table.insert(array, { icon = icon, count = count })
+	end
+	return array
+end
+
+function PlayerUI_BuildUnitsUiTable(units, queued)
+	for i = 1, #units do
+		local queuedCount = queued[units[i].icon]
+		queued[units[i].icon] = nil
+		if not queuedCount then
+			queuedCount = 0
+		end
+		units[i].queued = queuedCount
+	end
+	for icon, count in pairs(queued) do
+		if count ~= 0 then
+			table.insert(units, { icon = icon, count = 0, queued = count })
+		end
+	end
+	for i = 1, #units do
+		units[i].countNot0 = units[i].count ~= 0
+		units[i].queuedNot0 = units[i].queued ~= 0
+	end
+	return units
+end
+
+function PlayerUI_SplitByIsMilitary(units, isMilitary)
+	local military = {}
+	local civil = {}
+	for i = 1, #units do
+		if isMilitary[units[i].icon] then
+			table.insert(military, units[i])
+		else
+			table.insert(civil, units[i])
+		end
+	end
+	return military, civil
+end
+
+function PlayerUI_CompareUnitCount(unit1, unit2)
+	if unit1.count ~= unit2.count then
+		return unit1.count < unit2.count
+	end
+	return unit1.queued < unit2.queued
+end
+
+function PlayerUI_UpdateUnitsAndQueuedStuff(t, player, race)
+	if not PlayerUI_Settings.ShowArmy then
+		t.upgradesQueued = {}
+		t.units = {}
+		t.unitsWorkers = {}
+		return
+	end
+
+	local isMilitary = {}
+	local units = PlayerUI_HashSetToArray(PlayerUI_GetUnits(player, race, isMilitary))
+	local queued, upgradesQueued = PlayerUI_GetQueuedStuff(player, race, isMilitary)
+
+	local ui = PlayerUI_BuildUnitsUiTable(units, queued)
+	local militaryUi, civilUi = PlayerUI_SplitByIsMilitary(ui, isMilitary)
+
+	table.sort(militaryUi, PlayerUI_CompareUnitCount)
+
+	for i = 1, #militaryUi do
+		militaryUi[i].civil = false
+		militaryUi[i].Color = t.color
+	end
+	for i = 1, #civilUi do
+		civilUi[i].civil = true
+	end
+
+	t.upgradesQueued = upgradesQueued
+	t.units = militaryUi
+	t.unitsWorkers = civilUi
+end
+
+-----------------------------------------------------------------------
+-- Limits display (local player, mirrors ags_limits_ui row definitions)
+-- Color thresholds: white < 8/15, yellow >= 8/15, red at cap
+-----------------------------------------------------------------------
+
+_PlayerUI_LimitsYellowRatio = (8 / 15)
+
+function PlayerUI_GetLimitColors(current, max)
+	if max <= 0 then
+		return "#FF4444", "#CCFF4444"
+	end
+	local ratio = current / max
+	if ratio >= 1.0 then
+		return "#FF4444", "#CCFF4444"
+	elseif ratio >= _PlayerUI_LimitsYellowRatio then
+		return "#FFD700", "#CCFFD700"
+	else
+		return "#FFFFFF", "#CCFFFFFF"
+	end
+end
+
+function PlayerUI_UpdateLimits()
+	local ctx = PlayerUiDataContext
+	local lim = ctx.limits
+	if lim == nil then
+		return
+	end
+
+	local localPlayerID = Game_GetLocalPlayer()
+	local player_idx = World_GetPlayerIndex(localPlayerID)
+	local player = PLAYERS[player_idx]
+	if player == nil then
+		return
+	end
+
+	-- Siege limit
+	local siege_max = (AGS_GLOBAL_SETTINGS and AGS_GLOBAL_SETTINGS.MaximumMedicPopulation) or 0
+	local siege_on = siege_max ~= nil and siege_max > 0
+	lim.siege_visible = siege_on
+	if siege_on then
+		local siege_cur = math.floor((player.siegeLimit_count or 0) + (player.siegeLimit_pending or 0))
+		lim.siege_current = siege_cur
+		lim.siege_max = math.max(1, siege_max)
+		lim.siege_counter = tostring(siege_cur) .. " / " .. tostring(siege_max)
+		lim.siege_fg, lim.siege_bar_fg = PlayerUI_GetLimitColors(siege_cur, siege_max)
+	end
+
+	-- Production building limit
+	local prod_max = (AGS_GLOBAL_SETTINGS and AGS_GLOBAL_SETTINGS.MaximumProductionBuildings) or 0
+	local prod_on = prod_max ~= nil and prod_max ~= 0
+	lim.prod_visible = prod_on
+	if prod_on then
+		local prod_cur = player.obj_buildingLimit_count or 0
+		lim.prod_current = prod_cur
+		lim.prod_max = math.max(1, math.abs(prod_max))
+		lim.prod_counter = tostring(prod_cur) .. " / " .. tostring(math.abs(prod_max))
+		lim.prod_fg, lim.prod_bar_fg = PlayerUI_GetLimitColors(prod_cur, math.abs(prod_max))
+	end
+
+	-- Siege workshop limit
+	local ws_max_fn = CBA_Options_GetWorkshopLimit
+	local ws_max = (ws_max_fn and ws_max_fn()) or 0
+	local ws_on = (AGS_GLOBAL_SETTINGS and AGS_GLOBAL_SETTINGS.MaximumSiegeWorkshop ~= nil
+		and AGS_GLOBAL_SETTINGS.MaximumSiegeWorkshop ~= 0
+		and not AGS_GLOBAL_SETTINGS.NoSiege)
+	lim.ws_visible = ws_on
+	if ws_on then
+		local ws_cur = player.obj_buildingLimit_workshop_count or 0
+		lim.ws_current = ws_cur
+		lim.ws_max = math.max(1, ws_max)
+		lim.ws_counter = tostring(ws_cur) .. " / " .. tostring(ws_max)
+		lim.ws_fg, lim.ws_bar_fg = PlayerUI_GetLimitColors(ws_cur, ws_max)
+	end
+
+	-- Outpost limit
+	local op_max = 20
+	local op_on = prod_on  -- outposts are enabled when production limits are active
+	lim.op_visible = op_on
+	if op_on then
+		local op_cur = player.obj_buildingLimit_outpost_count or 0
+		lim.op_current = op_cur
+		lim.op_max = math.max(1, op_max)
+		lim.op_counter = tostring(op_cur) .. " / " .. tostring(op_max)
+		lim.op_fg, lim.op_bar_fg = PlayerUI_GetLimitColors(op_cur, op_max)
+	end
+end
+
+-----------------------------------------------------------------------
+-- Reward progression: resolve next N upcoming rewards with icons
+-- Returns array of { icon, title, threshold, isNext } sorted by threshold
+-----------------------------------------------------------------------
+
+_PlayerUI_RewardIconFallback = "pack://application:,,,/WPFGUI;component/icons/races/common/buildings/keep.png"
+
+-----------------------------------------------------------------------
+-- Reward title resolver (language-agnostic)
+-- Prefers canonical blueprint UI names over pre-wrapped reward.title text.
+-----------------------------------------------------------------------
+function PlayerUI_GetNormalizedRewardTitle(reward, player_id, raceName)
+	if reward == nil then return "" end
+
+	local title = ""
+	if reward.upgrade ~= nil and raceName ~= nil then
+		local ok_bp, bp = pcall(AGS_GetCivilizationUpgrade, raceName, reward.upgrade)
+		if ok_bp and bp ~= nil then
+			local ok_ui, ui = pcall(BP_GetUpgradeUIInfo, bp)
+			if ok_ui and ui ~= nil and ui.screenName ~= nil then
+				title = ui.screenName
+			end
+		end
+	elseif reward.upgradeBP ~= nil then
+		local ok_bp, bp = pcall(BP_GetUpgradeBlueprint, reward.upgradeBP)
+		if ok_bp and bp ~= nil then
+			local ok_ui, ui = pcall(BP_GetUpgradeUIInfo, bp)
+			if ok_ui and ui ~= nil and ui.screenName ~= nil then
+				title = ui.screenName
+			end
+		end
+	elseif reward.unit ~= nil and player_id ~= nil then
+		title = PlayerUI_DismissErrors("", function()
+			return BP_GetSquadUIInfo(reward.unit, Player_GetRace(player_id)).screenName
+		end)
+	elseif reward.unit_upgrade ~= nil and player_id ~= nil then
+		title = PlayerUI_DismissErrors("", function()
+			return BP_GetSquadUIInfo(reward.unit_upgrade, Player_GetRace(player_id)).screenName
+		end)
+	elseif reward.age ~= nil then
+		title = "Age " .. tostring(reward.age)
+	end
+
+	if title == "" then
+		title = reward.title or reward.upgradeBP or reward.upgrade or reward.unit or reward.unit_upgrade or (reward.age and ("Age " .. tostring(reward.age))) or ""
+	end
+
+	if title ~= "" and CBA_Rewards_ToLocText then
+		title = CBA_Rewards_ToLocText(title)
+	end
+	return title
+end
+
+-----------------------------------------------------------------------
+-- Lightweight next-reward title resolver (per-player, no icon work)
+-----------------------------------------------------------------------
+function PlayerUI_GetNextRewardTitle(playersEntry)
+	if playersEntry == nil then return "" end
+
+	local civName = playersEntry.raceName
+	if (civName == nil or civName == "") and playersEntry.id ~= nil then
+		civName = Player_GetRaceName(playersEntry.id)
+	end
+
+	local reward_tree = _CBA and _CBA.rewards and _CBA.rewards[civName]
+	if reward_tree == nil then return "" end
+
+	local current_kills = playersEntry.killed_number or 0
+	local best_threshold = math.huge
+	local best_title = ""
+
+	for threshold, reward in pairs(reward_tree) do
+		if type(threshold) == "number" and threshold > current_kills then
+			if threshold < best_threshold then
+				best_threshold = threshold
+				best_title = PlayerUI_GetNormalizedRewardTitle(reward, playersEntry.id, civName)
+			end
+		end
+	end
+	return best_title
+end
+
+-----------------------------------------------------------------------
+-- Lightweight next-reward icon resolver (per-player, max 1 icon)
+-----------------------------------------------------------------------
+function PlayerUI_GetNextRewardIcon(playersEntry)
+	if playersEntry == nil then return "" end
+
+	local icons = PlayerUI_BuildRewardPreview(playersEntry, 1)
+	if #icons > 0 and icons[1].icon ~= nil then
+		return icons[1].icon
+	end
+
+	return _PlayerUI_RewardIconFallback
+end
+
+function PlayerUI_BuildRewardPreview(player, count)
+	local player_civ = Player_GetRaceName(player.id)
+	local reward_tree = _CBA and _CBA.rewards and _CBA.rewards[player_civ]
+	if reward_tree == nil then
+		return {}
+	end
+
+	local current_kills = player.killed_number or 0
+
+	-- Collect all thresholds above current kill count
+	local upcoming = {}
+	for threshold, reward in pairs(reward_tree) do
+		if type(threshold) == "number" and threshold > current_kills and reward.title ~= nil then
+			table.insert(upcoming, { threshold = threshold, reward = reward })
+		end
+	end
+
+	-- Sort by threshold ascending
+	table.sort(upcoming, function(a, b) return a.threshold < b.threshold end)
+
+	-- Take top N
+	local result = {}
+	local raceName = player.raceName
+	for i = 1, math.min(count, #upcoming) do
+		local entry = upcoming[i]
+		local rwd = entry.reward
+		local icon = nil
+
+		-- Resolve icon from reward type
+		if rwd.upgrade ~= nil then
+			local ok, bp = pcall(AGS_GetCivilizationUpgrade, raceName, rwd.upgrade)
+			if ok and bp then
+				icon = PlayerUI_GetIconNameFromUpgradeBlueprint(bp)
+			end
+		elseif rwd.upgradeBP ~= nil then
+			local ok, bp = pcall(BP_GetUpgradeBlueprint, rwd.upgradeBP)
+			if ok and bp then
+				icon = PlayerUI_GetIconNameFromUpgradeBlueprint(bp)
+			end
+		elseif rwd.unit ~= nil then
+			icon = PlayerUI_GetIconNameFromSquadBlueprint(rwd.unit, Player_GetRace(player.id))
+		elseif rwd.unit_upgrade ~= nil then
+			icon = PlayerUI_GetIconNameFromSquadBlueprint(rwd.unit_upgrade, Player_GetRace(player.id))
+		elseif rwd.age ~= nil then
+			icon = _PlayerUI_AgeIcons[rwd.age] and _PlayerUI_AgeIcons[rwd.age][false]
+		end
+
+		if icon ~= nil and not string.find(icon, "pack://") then
+			icon = PlayerUI_AdaptIconPathForXaml(icon)
+		end
+		if icon == nil then
+			icon = _PlayerUI_RewardIconFallback
+		end
+
+		table.insert(result, {
+			icon = icon,
+			title = PlayerUI_GetNormalizedRewardTitle(rwd, player.id, raceName),
+			threshold = entry.threshold,
+			isNext = (i == 1),
+		})
+	end
+
+	-- Compute prevThreshold for each entry (matching BuildPlaybackMilestone pattern)
+	for _, entry in ipairs(result) do
+		local prev = 0
+		for t, _ in pairs(reward_tree) do
+			if type(t) == "number" and t < entry.threshold and t > prev then
+				prev = t
+			end
+		end
+		entry.prevThreshold = prev
+	end
+
+	return result
+end
+
+-----------------------------------------------------------------------
+-- Compute reward progress bounds for relative (per-interval) display
+-- Returns: previous_threshold, resolved_next_threshold, relative_current, interval_max
+-----------------------------------------------------------------------
+function PlayerUI_GetRewardProgressBounds(current_kills, player_civ, objective_next_req)
+	local reward_tree = _CBA and _CBA.rewards and _CBA.rewards[player_civ]
+	local previous_threshold = 0
+	local resolved_next = current_kills + 1
+
+	if reward_tree ~= nil then
+		local nearest_next = math.huge
+		for threshold, _ in pairs(reward_tree) do
+			if type(threshold) == "number" then
+				if threshold <= current_kills and threshold > previous_threshold then
+					previous_threshold = threshold
+				end
+				if threshold > current_kills and threshold < nearest_next then
+					nearest_next = threshold
+				end
+			end
+		end
+		if nearest_next ~= math.huge then
+			resolved_next = nearest_next
+		end
+	end
+
+	if objective_next_req ~= nil and objective_next_req > current_kills then
+		resolved_next = objective_next_req
+	end
+
+	local interval = math.max(1, resolved_next - previous_threshold)
+	local relative_current = current_kills - previous_threshold
+	relative_current = math.max(0, math.min(relative_current, interval))
+
+	return previous_threshold, resolved_next, relative_current, interval
+end
+
+-----------------------------------------------------------------------
+-- Reconstruct all reward thresholds crossed between old_req and new_req.
+-- Returns a sorted array of threshold numbers in ascending order.
+-- Used by the playback runner to enqueue every milestone that the
+-- gameplay system advanced through between UI refreshes.
+-----------------------------------------------------------------------
+function PlayerUI_ReconstructCrossedThresholds(player_civ, old_req, new_req)
+	local reward_tree = _CBA and _CBA.rewards and _CBA.rewards[player_civ]
+	if reward_tree == nil then return {} end
+
+	local crossed = {}
+	for threshold, _ in pairs(reward_tree) do
+		if type(threshold) == "number" and threshold > 0 then
+			-- A threshold is "crossed" if it was at or above the old next-req
+			-- and is now strictly below the new next-req (meaning it was earned).
+			if threshold >= old_req and threshold < new_req then
+				table.insert(crossed, threshold)
+			end
+		end
+	end
+	table.sort(crossed, function(a, b) return a < b end)
+	return crossed
+end
+
+-----------------------------------------------------------------------
+-- Build a playback milestone entry for a specific threshold.
+-- Resolves title, icons, and interval bounds for a single reward.
+-----------------------------------------------------------------------
+function PlayerUI_BuildPlaybackMilestone(player, player_civ, threshold)
+	local reward_tree = _CBA and _CBA.rewards and _CBA.rewards[player_civ]
+	if reward_tree == nil then return nil end
+
+	local reward = reward_tree[threshold]
+	if reward == nil then return nil end
+
+	-- Find the previous threshold (the one just before this milestone)
+	local prev_threshold = 0
+	for t, _ in pairs(reward_tree) do
+		if type(t) == "number" and t < threshold and t > prev_threshold then
+			prev_threshold = t
+		end
+	end
+
+	local interval = math.max(1, threshold - prev_threshold)
+
+	-- Resolve title
+	local title = PlayerUI_GetNormalizedRewardTitle(reward, player.id, player.raceName or player_civ)
+
+	-- Resolve icon
+	local icon = nil
+	local raceName = player.raceName
+	if reward.upgrade ~= nil then
+		local ok, bp = pcall(AGS_GetCivilizationUpgrade, raceName, reward.upgrade)
+		if ok and bp then icon = PlayerUI_GetIconNameFromUpgradeBlueprint(bp) end
+	elseif reward.upgradeBP ~= nil then
+		local ok, bp = pcall(BP_GetUpgradeBlueprint, reward.upgradeBP)
+		if ok and bp then icon = PlayerUI_GetIconNameFromUpgradeBlueprint(bp) end
+	elseif reward.unit ~= nil then
+		icon = PlayerUI_GetIconNameFromSquadBlueprint(reward.unit, Player_GetRace(player.id))
+	elseif reward.unit_upgrade ~= nil then
+		icon = PlayerUI_GetIconNameFromSquadBlueprint(reward.unit_upgrade, Player_GetRace(player.id))
+	elseif reward.age ~= nil then
+		icon = _PlayerUI_AgeIcons[reward.age] and _PlayerUI_AgeIcons[reward.age][false]
+	end
+	if icon ~= nil and not string.find(icon, "pack://") then
+		icon = PlayerUI_AdaptIconPathForXaml(icon)
+	end
+	if icon == nil then
+		icon = _PlayerUI_RewardIconFallback
+	end
+
+	return {
+		threshold = threshold,
+		prevThreshold = prev_threshold,
+		interval = interval,
+		title = title,
+		icon = icon,
+	}
+end
+
+-----------------------------------------------------------------------
+-- Reward progress update (local player only)
+-- 1.0s path: detects requirement changes, enqueues crossed milestones,
+-- publishes live progress only when the playback queue is idle.
+-----------------------------------------------------------------------
+
+function PlayerUI_UpdateRewardProgress()
+	local ctx = PlayerUiDataContext
+	local rwd = ctx.rewards
+	if rwd == nil then
+		return
+	end
+
+	local localPlayerID = Game_GetLocalPlayer()
+	local player_idx = World_GetPlayerIndex(localPlayerID)
+	local player = PLAYERS[player_idx]
+	if player == nil then
+		return
+	end
+
+	local current = player.killed_number or 0
+	local next_req = player.obj_kill_requirement or 0
+	local player_civ = player.raceName or Player_GetRaceName(localPlayerID)
+	local pb = _PlayerUI_RewardPlayback
+
+	-- First-frame initialization: seed lastObservedReq without enqueuing
+	if pb.lastObservedReq == nil then
+		pb.lastObservedReq = next_req
+	end
+
+	-- Detect requirement advancement: enqueue all crossed thresholds
+	if next_req > pb.lastObservedReq and pb.lastObservedReq >= 0 then
+		local crossed = PlayerUI_ReconstructCrossedThresholds(player_civ, pb.lastObservedReq, next_req)
+		for _, threshold in ipairs(crossed) do
+			local milestone = PlayerUI_BuildPlaybackMilestone(player, player_civ, threshold)
+			if milestone ~= nil then
+				table.insert(pb.queue, milestone)
+			end
+		end
+		if #crossed > 0 then
+			print("[PLAYERUI_REWARD_PLAYBACK] enqueued " .. tostring(#crossed)
+				.. " milestone(s) oldReq=" .. tostring(pb.lastObservedReq)
+				.. " newReq=" .. tostring(next_req)
+				.. " queueLen=" .. tostring(#pb.queue))
+		end
+		-- Start playback if idle
+		if pb.phase == "idle" and #pb.queue > 0 then
+			PlayerUI_RewardPlayback_AdvanceQueue(pb, current)
+		end
+		-- Wake animation tick so playback runs at 0.1s
+		if Rule_Exists(_PlayerUI_Animate_Tick) then
+			Rule_Unpause(_PlayerUI_Animate_Tick)
+		end
+	end
+	pb.lastObservedReq = next_req
+
+	-- While playback is active, the 0.1s tick owns DataContext output.
+	-- Only refresh live fallback data here when idle.
+	if pb.phase ~= "idle" then
+		-- Still update the backing reward data for when playback finishes
+		rwd.icons = PlayerUI_BuildRewardPreview(player, 3)
+		return
+	end
+
+	-- ===== IDLE: normal live progress display =====
+	local previous_threshold, resolved_next, relative_current, interval =
+		PlayerUI_GetRewardProgressBounds(current, player_civ, next_req)
+
+	local baseChanged = (ctx._rewardProgressBase ~= previous_threshold)
+	ctx._rewardProgressBase = previous_threshold
+
+	if baseChanged then
+		local oldEntry = _PlayerUI_Anim["reward_progress"]
+		local oldDisplay = (oldEntry and oldEntry.display) or nil
+		local oldTarget = (oldEntry and oldEntry.target) or nil
+		print("[PLAYERUI_REWARD_REBASE] baseChanged=true"
+			.. " old_display=" .. tostring(oldDisplay)
+			.. " old_target=" .. tostring(oldTarget)
+			.. " new_relative=" .. string.format("%.1f", relative_current)
+			.. " new_interval=" .. tostring(interval)
+			.. " kills=" .. tostring(current))
+
+		-- Preserve ongoing animation: only snap display if no entry exists (never initialized)
+		if oldEntry == nil then
+			-- First time initialization: snap normally
+			_PlayerUI_Anim["reward_progress"] = {
+				target = relative_current,
+				display = relative_current,
+				easing = "linear",
+				arrived = false,
+			}
+		else
+			-- Animation in progress from playback drain → preserve display, update target only
+			oldEntry.target = relative_current
+			oldEntry.arrived = false
+		end
+	else
+		PlayerUI_Animate_SetTarget("reward_progress", relative_current)
+	end
+
+	local dispCurrent = PlayerUI_Animate_GetDisplay("reward_progress")
+	dispCurrent = math.max(0, math.min(dispCurrent, interval))
+
+	local ratio = math.min(dispCurrent / interval, 1.0)
+	local pct = math.floor((ratio * 100) + 0.5)
+	local dispCurrentInt = math.floor(dispCurrent + 0.5)
+	rwd.progress_text = tostring(dispCurrentInt) .. " / " .. tostring(interval) .. " (" .. tostring(pct) .. "%)"
+	rwd.progress_current = math.min(dispCurrent, interval)
+	rwd.progress_max = interval
+
+	-- Reward progress visuals: green -> yellow -> gold by completion ratio
+	local fill_color = "#FF4A7A2F"
+	if ratio <= 0.5 then
+		fill_color = _PlayerUI_LerpColor({ r = 74, g = 122, b = 47 }, { r = 200, g = 168, b = 50 }, ratio / 0.5)
+	else
+		fill_color = _PlayerUI_LerpColor({ r = 200, g = 168, b = 50 }, { r = 255, g = 215, b = 0 }, (ratio - 0.5) / 0.5)
+	end
+
+	local border_color = _PlayerUI_LerpColor({ r = 94, g = 105, b = 137 }, { r = 255, g = 215, b = 0 }, ratio)
+	local title_color = _PlayerUI_LerpColor({ r = 204, g = 204, b = 204 }, { r = 255, g = 215, b = 0 }, ratio)
+	local label_color = _PlayerUI_LerpColor({ r = 170, g = 170, b = 170 }, { r = 255, g = 215, b = 0 }, ratio)
+	local separator_color = _PlayerUI_LerpColor({ r = 97, g = 108, b = 140 }, { r = 255, g = 215, b = 0 }, ratio)
+
+	-- Build icon preview (next 3 rewards)
+	rwd.icons = PlayerUI_BuildRewardPreview(player, 3)
+
+	-- Flat mirror fields for XAML (no nested [rewards][X] paths)
+	ctx.rewardProgressText = rwd.progress_text
+	ctx.rewardProgress_current = rwd.progress_current
+	ctx.rewardProgress_max = rwd.progress_max
+	ctx.rewardNextTitle = (#rwd.icons > 0) and rwd.icons[1].title or ""
+	ctx.rewardBarFillColor = fill_color
+	ctx.rewardBarBorderColor = border_color
+	ctx.rewardNextTitleColor = title_color
+	ctx.rewardProgressLabelColor = label_color
+	ctx.rewardSeparatorColor = separator_color
+
+	-- Flatten icons with pre-computed border color for next-reward highlight
+	local flat_icons = {}
+	for i, entry in ipairs(rwd.icons) do
+		local increment = entry.threshold - (entry.prevThreshold or 0)
+		table.insert(flat_icons, {
+			icon = entry.icon,
+			borderColor = entry.isNext and "#FFD700" or "#555555",
+			thresholdText = "+" .. tostring(increment),
+		})
+	end
+	ctx.rewardIcons = _PlayerUI_SmoothRewardIcons(flat_icons)
+end
+
+-----------------------------------------------------------------------
+-- Playback runner: advance to next queued milestone
+-----------------------------------------------------------------------
+function PlayerUI_RewardPlayback_AdvanceQueue(pb, current_kills)
+	if #pb.queue == 0 then
+		print("[PLAYERUI_REWARD_PLAYBACK] queue drained -> idle")
+		pb.active = nil
+		pb.phase = "idle"
+		pb.fillDisplay = 0
+		pb.playedCount = 0
+		return
+	end
+
+	pb.active = table.remove(pb.queue, 1)
+
+	-- Validate milestone fields before activation
+	if pb.active.threshold == nil or pb.active.interval == nil or pb.active.interval <= 0 then
+		print("[PLAYERUI_REWARD_PLAYBACK] WARN: skipping malformed milestone"
+			.. " threshold=" .. tostring(pb.active.threshold)
+			.. " interval=" .. tostring(pb.active.interval)
+			.. " title=" .. tostring(pb.active.title))
+		pb.active = nil
+		return PlayerUI_RewardPlayback_AdvanceQueue(pb, current_kills)
+	end
+
+	-- Start phase: always completion_center when motion enabled (all items get center convergence)
+	local startPhase = "completion_center"
+	if PlayerUI_Settings.EnableRewardIconMotion ~= true then
+		startPhase = "completion_highlight"
+	end
+	pb.phase = startPhase
+	pb.phaseStart = World_GetGameTime()
+	pb.fillStartTime = World_GetGameTime()
+	pb.playedCount = (pb.playedCount or 0) + 1
+
+	-- First milestone: seed from current live bar display (smooth continuation).
+	-- Subsequent queued milestones: bar starts at 0% with smooth ramp.
+	if pb.playedCount <= 1 then
+		local liveDisplay = PlayerUI_Animate_GetDisplay("reward_progress")
+		pb.fillDisplay = math.max(0, math.min(liveDisplay or 0, pb.active.interval - 1))
+	else
+		pb.fillDisplay = 0  -- smooth ramp 0→100% during center/highlight
+	end
+
+	-- Capture seed for time-based fill ramp.  CENTER+HIGHLIGHT phases lerp
+	-- pb.fillDisplay from this seed up to pb.active.interval, guaranteeing
+	-- the bar reaches 100% before fadeout (which previously SNAPPED the
+	-- value from a partial fill straight to 100%).
+	pb.fillSeed = pb.fillDisplay
+	pb.fillTarget = pb.active.interval
+
+	print("[PLAYERUI_REWARD_PLAYBACK] playing threshold=" .. tostring(pb.active.threshold)
+		.. " interval=" .. tostring(pb.active.interval)
+		.. " phase=" .. startPhase
+		.. " remaining=" .. tostring(#pb.queue)
+		.. " playedCount=" .. tostring(pb.playedCount)
+		.. " fillStart=" .. string.format("%.1f", pb.fillDisplay)
+		.. " fillSeed=" .. string.format("%.1f", pb.fillSeed)
+		.. " fillTarget=" .. string.format("%.1f", pb.fillTarget)
+		.. " title=" .. tostring(pb.active.title or "?"))
+end
+
+-----------------------------------------------------------------------
+-- Toggle HUD visibility
+-----------------------------------------------------------------------
+
+function PlayerUI_TrySetObjectiveVisible(objectiveId, isVisible)
+	if objectiveId == nil then
+		return 0
+	end
+	local ok = pcall(Obj_SetVisible, objectiveId, isVisible)
+	if ok then
+		return 1
+	end
+	return 0
+end
+
+function PlayerUI_SetObjectivesVisible(isVisible)
+	if PlayerUI_Settings.EnableToggleObjectiveSync == false then
+		return
+	end
+
+	local toggled = 0
+
+	-- Keep AGS objective handlers in sync where they exist.
+	Core_CallDelegateFunctions("OnObjectiveToggle", isVisible)
+
+	if _mod ~= nil then
+		toggled = toggled + PlayerUI_TrySetObjectiveVisible(_mod.objective, isVisible)
+	end
+
+	if _religious ~= nil then
+		if _religious.objective ~= nil then
+			toggled = toggled + PlayerUI_TrySetObjectiveVisible(_religious.objective.control, isVisible)
+		end
+		if _religious.sites ~= nil then
+			for _, site in pairs(_religious.sites) do
+				if site ~= nil then
+					toggled = toggled + PlayerUI_TrySetObjectiveVisible(site.objective, isVisible)
+				end
+			end
+		end
+	end
+
+	if _CBA ~= nil then
+		toggled = toggled + PlayerUI_TrySetObjectiveVisible(_CBA.obj_kill, isVisible)
+	end
+
+	if _autoage ~= nil then
+		toggled = toggled + PlayerUI_TrySetObjectiveVisible(_autoage.objective_main, isVisible)
+		toggled = toggled + PlayerUI_TrySetObjectiveVisible(_autoage.objective_secondary, isVisible)
+	end
+
+	if _buildingLimit ~= nil then
+		toggled = toggled + PlayerUI_TrySetObjectiveVisible(_buildingLimit.objective_buildingLimit, isVisible)
+	end
+
+	if PLAYERS ~= nil then
+		for _, player in pairs(PLAYERS) do
+			if player ~= nil and player._wonder ~= nil then
+				toggled = toggled + PlayerUI_TrySetObjectiveVisible(player._wonder.objective_id, isVisible)
+			end
+		end
+	end
+
+	print("[PLAYERUI] Objective visibility=" .. tostring(isVisible) .. ", toggled=" .. tostring(toggled))
+end
+
+function PlayerUI_Toggle_TrySetProperty(target, property, value)
+	if PlayerUI_Settings.EnableToggleCrashGuard == false then
+		UI_SetPropertyValue(target, property, value)
+		return true, nil
+	end
+	local ok, err = pcall(UI_SetPropertyValue, target, property, value)
+	return ok, err
+end
+
+function PlayerUI_Toggle_TrySetObjectivesVisible(isVisible)
+	if PlayerUI_Settings.EnableToggleCrashGuard == false then
+		PlayerUI_SetObjectivesVisible(isVisible)
+		return true, nil
+	end
+	local ok, err = pcall(PlayerUI_SetObjectivesVisible, isVisible)
+	return ok, err
+end
+
+function PlayerUI_ToggleTrace(msg)
+	if PlayerUI_Settings.EnableToggleTraceLogging == false then
+		return
+	end
+	print("[PLAYERUI_TOGGLE] " .. tostring(msg))
+end
+
+function PlayerUI_Debug_ToggleProbe(path)
+	local mode = path or "all"
+	local showingPlayerUI = not _PlayerUI_HudVisible
+	local desiredHudVisibility = showingPlayerUI and "Visible" or "Collapsed"
+	local desiredScoreVisibility = showingPlayerUI and "Hidden" or "Visible"
+	local desiredObjectiveVisible = not showingPlayerUI
+
+	PlayerUI_ToggleTrace("probe start mode=" .. tostring(mode) .. " hudVisible=" .. tostring(_PlayerUI_HudVisible))
+
+	if mode == "hud" then
+		local okHud, errHud = PlayerUI_Toggle_TrySetProperty("PlayerUIHud", "Visibility", desiredHudVisibility)
+		PlayerUI_ToggleTrace("probe hud done ok=" .. tostring(okHud) .. " err=" .. tostring(errHud))
+		if okHud then
+			_PlayerUI_HudVisible = showingPlayerUI
+		end
+		return
+	end
+
+	if mode == "scores" then
+		local okScores, errScores = PlayerUI_Toggle_TrySetProperty("PlayerScores", "Visibility", desiredScoreVisibility)
+		PlayerUI_ToggleTrace("probe scores done ok=" .. tostring(okScores) .. " err=" .. tostring(errScores))
+		return
+	end
+
+	if mode == "objectives" then
+		local okObj, errObj = PlayerUI_Toggle_TrySetObjectivesVisible(desiredObjectiveVisible)
+		PlayerUI_ToggleTrace("probe objectives done ok=" .. tostring(okObj) .. " err=" .. tostring(errObj))
+		return
+	end
+
+	PlayerUI_ToggleTrace("probe all delegates to PlayerUI_Toggle")
+	PlayerUI_Toggle()
+	PlayerUI_ToggleTrace("probe all done hudVisible=" .. tostring(_PlayerUI_HudVisible))
+end
+
+-- Toggle throttle state
+_PlayerUI_LastToggleTime = -1
+_PLAYERUI_TOGGLE_THROTTLE_INTERVAL = 0.3  -- seconds; configurable via PlayerUI_Settings.ToggleThrottleInterval
+
+-- Early-game guard threshold (seconds) — matches first Ring Rule interval
+_PLAYERUI_EARLY_GAME_GUARD_TIME = 8.0
+
+function PlayerUI_Toggle()
+	-- V2 FIX: Toggle throttle — reject toggles within throttle interval
+	local throttleInterval = PlayerUI_Settings.ToggleThrottleInterval or _PLAYERUI_TOGGLE_THROTTLE_INTERVAL
+	local ok_time, gameTime = pcall(World_GetGameTime)
+	if ok_time and gameTime ~= nil and _PlayerUI_LastToggleTime >= 0 then
+		local elapsed = gameTime - _PlayerUI_LastToggleTime
+		if elapsed < throttleInterval then
+			PlayerUI_ToggleTrace("throttled (elapsed=" .. string.format("%.2f", elapsed) .. "s, min=" .. tostring(throttleInterval) .. "s)")
+			return
+		end
+	end
+	if ok_time and gameTime ~= nil then
+		_PlayerUI_LastToggleTime = gameTime
+	end
+
+	local showingPlayerUI = not _PlayerUI_HudVisible
+	local desiredHudVisibility = showingPlayerUI and "Visible" or "Collapsed"
+	local desiredScoreVisibility = showingPlayerUI and "Hidden" or "Visible"
+	local desiredObjectiveVisible = not showingPlayerUI
+
+	PlayerUI_ToggleTrace("start show=" .. tostring(showingPlayerUI)
+		.. " flags(hud=" .. tostring(PlayerUI_Settings.EnableToggleHudVisibility)
+		.. ", scores=" .. tostring(PlayerUI_Settings.EnableTogglePlayerScoresSync)
+		.. ", obj=" .. tostring(PlayerUI_Settings.EnableToggleObjectiveSync)
+		.. ", applyWhenVisible=" .. tostring(PlayerUI_Settings.EnableApplyDataContextWhenHudVisible) .. ")")
+
+	-- When showing the HUD, apply a fresh DataContext BEFORE the
+	-- Visibility transition so the renderer has valid bindings.
+	if showingPlayerUI then
+		-- V4 FIX: Early-game guard — force full entity iteration if game
+		-- time is before the first Ring Rule cycle so DataContext is complete.
+		if ok_time and gameTime ~= nil and gameTime < _PLAYERUI_EARLY_GAME_GUARD_TIME then
+			PlayerUI_ToggleTrace("early-game guard: forcing full UpdateDataContext at " .. string.format("%.1f", gameTime) .. "s")
+		end
+
+		PlayerUI_ToggleTrace("pre-show DataContext refresh")
+		local updateOk, updateErr = pcall(PlayerUI_UpdateDataContext)
+		if not updateOk then
+			PlayerUI_ToggleTrace("UpdateDataContext ERROR: " .. tostring(updateErr))
+		end
+		-- Compute glow fills before push so arrows have valid Fill-alpha values
+		if PlayerUI_Ranking_ApplyAnimatedFields ~= nil then
+			pcall(PlayerUI_Ranking_ApplyAnimatedFields)
+		end
+		-- Route through sanitizer so unbound numerics are stripped before
+		-- the Collapsed→Visible transition (direct UI_SetDataContext here
+		-- was the root cause of the D3D toggle crash).
+		PlayerUI_ApplyDataContext()
+	end
+
+	local okHud, errHud = true, nil
+	if PlayerUI_Settings.EnableToggleHudVisibility ~= false then
+		okHud, errHud = PlayerUI_Toggle_TrySetProperty("PlayerUIHud", "Visibility", desiredHudVisibility)
+		PlayerUI_ToggleTrace("hud op ok=" .. tostring(okHud) .. " err=" .. tostring(errHud))
+	end
+
+	local okScores, errScores = true, nil
+	local okObj, errObj = true, nil
+
+	-- V3 FIX: Staged visibility — on SHOW path, separate HUD/Scores/Objectives
+	-- across frames to avoid overwhelming the WPF bridge with simultaneous
+	-- visibility changes. HIDE path stays immediate (no D3D instantiation risk).
+	if showingPlayerUI and PlayerUI_Settings.EnableStagedToggle ~= false then
+		-- HUD is already set above. Scores and objectives are deferred.
+		_PlayerUI_HudVisible = showingPlayerUI
+		PlayerUI_ToggleTrace("staged show: HUD set, deferring scores+objectives")
+
+		if PlayerUI_Settings.EnableTogglePlayerScoresSync ~= false then
+			Rule_AddOneShot(_PlayerUI_StagedToggle_Scores, 0.1, {
+				visibility = desiredScoreVisibility,
+			})
+		end
+		if PlayerUI_Settings.EnableToggleObjectiveSync ~= false then
+			AGS_MATCH_UI_OBJECTIVE_VISIBILITY = desiredObjectiveVisible
+			Rule_AddOneShot(_PlayerUI_StagedToggle_Objectives, 0.2, {
+				visible = desiredObjectiveVisible,
+			})
+		end
+
+		PlayerUI_ToggleTrace("staged show complete hudVisible=" .. tostring(_PlayerUI_HudVisible))
+		return
+	end
+
+	-- Immediate path (HIDE, or staged toggle disabled)
+	if PlayerUI_Settings.EnableTogglePlayerScoresSync ~= false then
+		okScores, errScores = PlayerUI_Toggle_TrySetProperty("PlayerScores", "Visibility", desiredScoreVisibility)
+		PlayerUI_ToggleTrace("scores op ok=" .. tostring(okScores) .. " err=" .. tostring(errScores))
+	end
+
+	if PlayerUI_Settings.EnableToggleObjectiveSync ~= false then
+		AGS_MATCH_UI_OBJECTIVE_VISIBILITY = desiredObjectiveVisible
+		okObj, errObj = PlayerUI_Toggle_TrySetObjectivesVisible(desiredObjectiveVisible)
+		PlayerUI_ToggleTrace("objective op ok=" .. tostring(okObj) .. " err=" .. tostring(errObj))
+	end
+
+	if okHud and okScores and okObj then
+		_PlayerUI_HudVisible = showingPlayerUI
+		PlayerUI_ToggleTrace("success hudVisible=" .. tostring(_PlayerUI_HudVisible))
+		return
+	end
+
+	print("[PLAYERUI_CRASH_GUARD] Toggle failure: hud=" .. tostring(errHud)
+		.. " scores=" .. tostring(errScores) .. " obj=" .. tostring(errObj)
+		.. " flags(hud=" .. tostring(PlayerUI_Settings.EnableToggleHudVisibility)
+		.. ", scores=" .. tostring(PlayerUI_Settings.EnableTogglePlayerScoresSync)
+		.. ", obj=" .. tostring(PlayerUI_Settings.EnableToggleObjectiveSync) .. ")")
+
+	if PlayerUI_Settings.EnableToggleCrashGuard ~= false then
+		-- Fallback: force stock HUD visibility if any step failed.
+		pcall(UI_SetPropertyValue, "PlayerUIHud", "Visibility", "Collapsed")
+		pcall(UI_SetPropertyValue, "PlayerScores", "Visibility", "Visible")
+		AGS_MATCH_UI_OBJECTIVE_VISIBILITY = true
+		if PlayerUI_Settings.EnableToggleObjectiveSync ~= false then
+			pcall(PlayerUI_SetObjectivesVisible, true)
+		end
+		_PlayerUI_HudVisible = false
+	end
+end
+
+-----------------------------------------------------------------------
+-- Staged toggle callbacks (V3 fix): deferred visibility changes
+-----------------------------------------------------------------------
+
+function _PlayerUI_StagedToggle_Scores(context, data)
+	local vis = data.visibility or "Hidden"
+	local ok, err = PlayerUI_Toggle_TrySetProperty("PlayerScores", "Visibility", vis)
+	PlayerUI_ToggleTrace("staged scores op ok=" .. tostring(ok) .. " err=" .. tostring(err))
+end
+
+function _PlayerUI_StagedToggle_Objectives(context, data)
+	local visible = data.visible
+	if visible == nil then visible = true end
+	local ok, err = PlayerUI_Toggle_TrySetObjectivesVisible(visible)
+	PlayerUI_ToggleTrace("staged objectives op ok=" .. tostring(ok) .. " err=" .. tostring(err))
+end
+
+-----------------------------------------------------------------------
+-- Toggle resource income mode
+-----------------------------------------------------------------------
+
+function PlayerUI_SwapResourceWithIncomePerMinute()
+	PlayerUI_Settings.swapResourceWithIncomePerMinute = not PlayerUI_Settings.swapResourceWithIncomePerMinute
+	local allPlayers = _PlayerUI_AllPlayers
+	if allPlayers == nil then
+		return
+	end
+	for index = 1, #allPlayers do
+		local data = PlayerUIDataContextMappings.PlayersByIndex[index]
+		data.isIncomePerMinute = PlayerUI_Settings.swapResourceWithIncomePerMinute
+	end
+end

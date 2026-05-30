@@ -1,0 +1,141 @@
+-- ============================================================
+-- Debug & Test Functions (console-callable)
+-- ============================================================
+-- Utility functions for diagnosing scenario state in the
+-- AoE4 Content Editor console. Safe to call at any time.
+-- ============================================================
+
+-- Dump resources for all human co-op players (1–4)
+function Debug_Resources()
+	for i, player in pairs(PLAYERS) do
+		local food = Player_GetResource(player.id, RT_Food)
+		local wood = Player_GetResource(player.id, RT_Wood)
+		local gold = Player_GetResource(player.id, RT_Gold)
+		local stone = Player_GetResource(player.id, RT_Stone)
+		print(string.format("player%d | Food: %d | Wood: %d | Gold: %d | Stone: %d",
+			i, food, wood, gold, stone))
+	end
+end
+
+-- Dump all configured player slot states for disconnect diagnostics
+function Debug_PlayerSlots()
+	if ALL_PLAYER_SLOTS == nil or #ALL_PLAYER_SLOTS == 0 then
+		print("[DEBUG] ALL_PLAYER_SLOTS not initialized yet")
+		return
+	end
+
+	for i, pid in ipairs(ALL_PLAYER_SLOTS) do
+		local is_human = Player_IsHuman(pid)
+		local personality = is_human and "N/A (human)" or AI_GetPersonality(pid)
+		local original = (g_original_player_types ~= nil and g_original_player_types[i]) and "HUMAN" or "AI"
+		local transferred = (g_transferred_slots ~= nil and g_transferred_slots[i]) and "YES" or "no"
+		print(string.format("player%d | now: %s | was: %s | personality: %s | transferred: %s",
+			i, is_human and "HUMAN" or "AI", original, personality, transferred))
+	end
+end
+
+-- Dump squad count for all configured player slots
+function Debug_SquadCounts()
+	if ALL_PLAYER_SLOTS == nil or #ALL_PLAYER_SLOTS == 0 then
+		print("[DEBUG] ALL_PLAYER_SLOTS not initialized yet")
+		return
+	end
+
+	for i, pid in ipairs(ALL_PLAYER_SLOTS) do
+		Player_GetAll(pid)
+		local count = SGroup_CountSpawned(sg_allsquads)
+		print(string.format("player%d | squads: %d", i, count))
+	end
+end
+
+-- Dump DC (Difficulty Config) state
+function Debug_DifficultyConfig()
+	if DC == nil then
+		print("[DEBUG] DC not initialized — call Difficulty_Init() first")
+		return
+	end
+	print(string.format("[DEBUG] Tier: %s (AI_Difficulty=%d)", DC.label, AI_Difficulty))
+	for k, v in pairs(DC) do
+		print(string.format("[DEBUG]   DC.%s = %s", k, tostring(v)))
+	end
+end
+
+-- Dump DLC resolver state for all players
+function Debug_PlayerCivs()
+	for i, player in pairs(PLAYERS) do
+		local raw = string.lower(Player_GetRaceName(player.id))
+		local resolved = ResolveCivKey(raw) or "UNRESOLVED"
+		print(string.format("player%d | raw: %s | resolved: %s", i, raw, resolved))
+	end
+	-- AI player
+	local raw5 = string.lower(Player_GetRaceName(player5))
+	print(string.format("player5 (AI) | raw: %s", raw5))
+end
+
+-- Quick smoke test: verify key functions are loaded
+function Debug_SmokeTest()
+	local checks = {
+		"GetAIDifficulty", "Difficulty_Init",
+		"AGS_GetCivilizationEntity", "TryGetCivilizationEntity",
+		"IsCivExact", "IsCivFamily", "ResolveCivKey",
+		"ApplyRestrictionProfile",
+		"Patrol_Cycle", "Units_Deploy", "Reset_AI", "Reset_AI_OnTakeOver",
+		"CheckPlayerDisconnects", "FindRecipientPlayer", "TransferResources",
+		"ConvertBuildings", "ConvertSquads", "_ConvertBuildingEntity", "_TransferOrConvertSquad",
+		"Debug_PlayerSlots", "Debug_Resources", "Debug_SquadCounts",
+		"Tribute_Init", "Tribute_Cleanup",
+	}
+
+	local missing = 0
+	for _, name in ipairs(checks) do
+		local fn = _G[name]
+		if type(fn) ~= "function" then
+			print("[SMOKE] MISSING: " .. name)
+			missing = missing + 1
+		end
+	end
+
+	if missing > 0 then
+		print(string.format("[SMOKE] FAIL: %d missing function(s)", missing))
+		return false
+	end
+
+	print(string.format("[SMOKE] PASS: %d/%d functions present", #checks, #checks))
+	return true
+end
+
+-- Dump registered DLC civs
+function Debug_ListDLCCivs()
+	print("[DLC REGISTRY]")
+	for civ, parent in pairs(DLC_CIV_PARENT_MAP) do
+		print("  " .. civ .. " -> parent: " .. parent)
+	end
+end
+
+-- Dump diplomacy/tribute runtime state
+function Debug_DiplomacyStatus()
+	print("[DIPLOMACY]")
+	print(string.format("  g_tribute_initialized = %s", tostring(g_tribute_initialized)))
+
+	if _diplomacy == nil then
+		print("  _diplomacy = nil (module not initialized)")
+		return
+	end
+
+	local dc = _diplomacy.data_context
+	local player_count = 0
+	if dc ~= nil and dc.players ~= nil then
+		player_count = #dc.players
+	end
+
+	print("  _diplomacy = initialized")
+	print(string.format("  tax_rate = %s", tostring(_diplomacy.tribute and _diplomacy.tribute.tax_rate)))
+	print(string.format("  ui_created = %s", tostring(_diplomacy.is_ui_created)))
+	print(string.format("  players_in_context = %d", player_count))
+
+	if dc ~= nil then
+		print(string.format("  is_ui_visible = %s", tostring(dc.is_ui_visible)))
+		print(string.format("  is_ui_expanded = %s", tostring(dc.is_ui_expanded)))
+		print(string.format("  is_tribute_enabled = %s", tostring(dc.is_tribute_enabled)))
+	end
+end

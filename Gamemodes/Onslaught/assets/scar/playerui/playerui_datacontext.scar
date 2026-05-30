@@ -1,0 +1,82 @@
+-----------------------------------------------------------------------
+-- PlayerUI Data Context — root table bound to XAML via UI_SetDataContext
+-- Onslaught-specific: kill scores, limits, reward progression
+-----------------------------------------------------------------------
+
+PlayerUiDataContext = {}
+
+-- Team summaries for center panel (aggregated per update cycle)
+PlayerUiDataContext.TeamSummaryLeft = {
+	WorkerPopulation = 0,
+	MilitaryPopulation = 0,
+	SiegePopulation = 0,
+	TotalPopulation = 0,
+	KillScore = 0,
+	KillScorePulseActive = false,
+}
+PlayerUiDataContext.TeamSummaryRight = {
+	WorkerPopulation = 0,
+	MilitaryPopulation = 0,
+	SiegePopulation = 0,
+	TotalPopulation = 0,
+	KillScore = 0,
+	KillScorePulseActive = false,
+}
+PlayerUiDataContext.AllPlayersSummary = {
+	CombinedWorkerPop = 1,     -- min 1 prevents division-by-zero in MultiBinding
+	CombinedMilitaryPop = 1,   -- min 1 prevents division-by-zero in MultiBinding
+	CombinedKillScore = 1,     -- min 1 prevents division-by-zero in MultiBinding
+}
+
+-- Elapsed game time text for center panel
+PlayerUiDataContext.elapsedTimeDisplay = "0:00"
+
+-- Next Reward display: flat mirror fields (avoids nested [rewards][X] paths)
+PlayerUiDataContext.rewardProgressText = "0 / 0"
+PlayerUiDataContext.rewardProgressLabelColor = "#AAAAAA"
+PlayerUiDataContext.rewardNextTitle = ""
+PlayerUiDataContext.rewardNextTitleColor = "#CCCCCC"
+PlayerUiDataContext.rewardIcons = {}    -- flat array of {icon, borderColor, thresholdText, offsetX, scale, offsetXMargin}
+PlayerUiDataContext.rewardProgress_current = 0
+PlayerUiDataContext.rewardProgress_max = 1      -- min 1 prevents division-by-zero in MultiBinding
+PlayerUiDataContext.rewardBarFillColor = "#4A7A2F"
+PlayerUiDataContext.rewardBarBorderColor = "#5E6989"
+PlayerUiDataContext.rewardSeparatorColor = "#616C8C"
+PlayerUiDataContext.rewardStripOffsetX = 0      -- strip-level horizontal pan for motion (px)
+PlayerUiDataContext.rewardStripOffsetMargin = "0,2,0,2"  -- strip margin string for XAML binding (preserves 2px vert padding)
+
+-- Limits display (local player, mirrors ags_limits_ui row defs)
+PlayerUiDataContext.limits = {
+	siege_visible = false, siege_current = 0, siege_max = 1, siege_counter = "0 / 0", siege_fg = "#FFFFFF", siege_bar_fg = "#CCFFFFFF",
+	prod_visible  = false, prod_current  = 0, prod_max  = 1, prod_counter  = "0 / 0", prod_fg  = "#FFFFFF", prod_bar_fg  = "#CCFFFFFF",
+	ws_visible    = false, ws_current    = 0, ws_max    = 1, ws_counter    = "0 / 0", ws_fg    = "#FFFFFF", ws_bar_fg    = "#CCFFFFFF",
+	op_visible    = false, op_current    = 0, op_max    = 1, op_counter    = "0 / 0", op_fg    = "#FFFFFF", op_bar_fg    = "#CCFFFFFF",
+}
+
+-- Reward progression (local player only)
+PlayerUiDataContext.rewards = {
+	progress_text = "0 / 0",
+	progress_current = 0,
+	progress_max = 1,       -- min 1 prevents division-by-zero in MultiBinding
+	icons = {},             -- array of up to 3: { icon, title, isNext }
+}
+
+-----------------------------------------------------------------------
+-- Reward Playback Runner (UI-only, not gameplay state)
+-- Queues crossed reward thresholds so each milestone fills, reveals,
+-- and resets sequentially on the center strip before returning to live.
+-----------------------------------------------------------------------
+_PlayerUI_RewardPlayback = {
+	lastObservedReq = nil,      -- last obj_kill_requirement seen by UI
+	queue = {},                 -- array of { threshold, title, icons, interval, prevThreshold }
+	active = nil,               -- currently playing milestone entry (popped from queue[1])
+	phase = "idle",             -- "idle" | "completion_center" | "completion_highlight" | "completion_fadeout" | "reshuffle" | "advance"
+	phaseStart = 0,             -- World_GetGameTime() when current phase began
+	fillStartTime = 0,          -- World_GetGameTime() when bar fill ramp began (for smooth 0→100%)
+	fillDisplay = 0,            -- bar progress (smoothly ramped during center/highlight phases)
+	playedCount = 0,            -- milestones played in current batch (drives tiered fill speed)
+}
+
+-- Ranking system defaults (per-player fields initialized in initialize_datacontext)
+-- These are updated by playerui_ranking.scar each cycle.
+-- Kept here for documentation; actual per-slot init is below in InitializeDataContext.

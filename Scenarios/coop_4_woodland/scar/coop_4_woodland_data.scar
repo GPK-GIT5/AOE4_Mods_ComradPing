@@ -1,0 +1,1968 @@
+-- Used in Mission_SetRestrictions / AGS_ENTITY_TABLE
+AGS_BP_STONEWALL = "stone_wall"
+AGS_BP_PALISADE = "palisade_wall"
+AGS_BP_KEEP = "castle"
+AGS_BP_WORKSHOP = "siege_workshop"
+AGS_BP_DOCK = "scar_dock"
+AGS_BP_CAPITAL = "town_center_capital"
+AGS_BP_LUMBER = "lumber_camp"
+-- Used in Mission_SetRestrictions / CBA_SIEGE_TABLE
+BP_SIEGE_MANGONEL = "mangonel"
+BP_SIEGE_RIBAULDEQUIN = "ribauldequin"
+BP_SIEGE_NESTOFBEES = "nest_of_bees" -- Shared 4x (byz/mon/chi/chi_ha_01)
+-- Faction specific
+BP_SIEGE_MANGONEL_BUILDABLE = "mangonel_buildable"
+--BP_SIEGE_MANGONEL_ABB_HA_01 = "unit_mangonel_3_buildable_abb_ha_01"
+--BP_SIEGE_MANGONEL_MON = "unit_mangonel_3_field_construct_mon"
+BP_SIEGE_MANGONEL_DOUBLE  = "mangonel_double"
+BP_SIEGE_RIBAULDEQUIN_DOUBLE  = "ribauldequin_double"
+BP_SIEGE_ROYAL_RIBAULDEQUIN = "royal_ribauldequin"
+BP_SIEGE_NESTOFBEES_CLOCKTOWER_CHI   = "nestofbees_clocktower_chi"
+
+-- TC vision suppression tracking (pre-objective lock phase).
+g_tc_vision_mods = {}
+g_tc_vision_applied = {}
+
+local function _GetPlayerTCEGroup(player_id)
+	if player_id == player1 then return eg_player1_tc end
+	if player_id == player2 then return eg_player2_tc end
+	if player_id == player3 then return eg_player3_tc end
+	if player_id == player4 then return eg_player4_tc end
+	return nil
+end
+
+function _ApplyTC_VisionSuppression(player_id, sight_multiplier)
+	if g_tc_vision_applied[player_id] then
+		return
+	end
+
+	local tc_group = _GetPlayerTCEGroup(player_id)
+	if tc_group == nil or EGroup_Count(tc_group) == 0 then
+		return
+	end
+
+	local multiplier = sight_multiplier
+	if multiplier == nil then
+		multiplier = 0
+	end
+
+	local modSight = Modifier_Create(MAT_Entity, "sight_radius_modifier", MUT_Multiplication, false, multiplier, "")
+	g_tc_vision_mods[player_id] = {}
+
+	for i = 1, EGroup_Count(tc_group) do
+		local eid = EGroup_GetEntityAt(tc_group, i)
+		if Entity_IsValid(Entity_GetID(eid)) then
+			table.insert(g_tc_vision_mods[player_id], Modifier_ApplyToEntity(modSight, eid, 0))
+		end
+	end
+
+	g_tc_vision_applied[player_id] = true
+end
+
+function _RemoveTC_VisionSuppression(player_id)
+	local mods = g_tc_vision_mods[player_id]
+	if scartype(mods) == ST_TABLE then
+		for _, modifier in pairs(mods) do
+			Modifier_Remove(modifier)
+		end
+	end
+
+	g_tc_vision_mods[player_id] = {}
+	g_tc_vision_applied[player_id] = false
+end
+
+
+AGS_ENTITY_TABLE = {
+	
+	english = {
+		
+		castle = "building_defense_keep_eng",
+		town_center_capital = "building_town_center_capital_eng",
+		town_center = "building_town_center_eng",
+		town_center_landmark = "building_landmark_age2_westminster_palace_eng",
+		market = "building_econ_market_control_eng",
+		villager = "unit_villager_1_eng",
+		scout = "unit_scout_1_eng",
+		king = "unit_king_1_eng",
+		scar_dock = "building_unit_naval_eng",	
+		palisade_wall = "building_defense_palisade_eng",
+		palisade_gate = "building_defense_palisade_gate_eng",
+		monk = "unit_monk_3_eng",
+		monastery = "building_unit_religious_control_eng",
+		barracks = "building_unit_infantry_control_eng",
+		stable = "building_unit_cavalry_control_eng",
+		archery_range = "building_unit_ranged_control_eng",
+		siege_workshop = "building_unit_siege_control_eng",
+		scar_dock = "building_unit_naval_eng",		
+		house = "building_house_control_eng",
+		blacksmith = "building_tech_unit_infantry_control_eng",
+		wonder_imperial_age = "building_wonder_age4_canterbury_cathedral_eng",
+		crossbow = "unit_crossbowman_3_eng",
+		stone_wall = "building_defense_wall_eng",
+		mining_camp = "building_econ_mining_camp_control_eng",
+		lumber_camp = "building_econ_wood_control_eng",
+		mill = "building_econ_food_control_eng",
+		arsenal = "building_tech_unit_ranged_control_eng"
+
+	},	
+	chinese = {
+		castle = "building_defense_keep_chi",
+		town_center_capital = "building_town_center_capital_chi",
+		town_center = "building_town_center_chi",
+		market = "building_econ_market_control_chi",
+		villager = "unit_villager_1_chi",
+		scout = "unit_scout_1_chi",
+		king = "unit_king_1_chi",	
+		scar_dock = "building_unit_naval_chi",	
+		palisade_wall = "building_defense_palisade_chi",
+		palisade_gate = "building_defense_palisade_gate_chi",
+		monk = "unit_monk_3_chi",
+		monastery = "building_unit_religious_control_chi",
+		barracks = "building_unit_infantry_control_chi",
+		stable = "building_unit_cavalry_control_chi",
+		archery_range = "building_unit_ranged_control_chi",
+		siege_workshop = "building_unit_siege_control_chi",
+		scar_dock = "building_unit_naval_chi",	
+		house = "building_house_control_chi",	
+		blacksmith = "building_tech_unit_infantry_control_chi",	
+		wonder_imperial_age = "building_wonder_age4_forbidden_control_chi",
+		crossbow = "unit_crossbowman_3_chi",
+		stone_wall = "building_defense_wall_chi",
+		mining_camp = "building_econ_mining_camp_control_chi",
+		lumber_camp = "building_econ_wood_control_chi",
+		mill = "building_econ_food_control_chi",
+		arsenal = "building_tech_unit_ranged_control_chi"
+	},
+	french = {
+
+		castle = "building_defense_keep_fre",
+		town_center_capital = "building_town_center_capital_fre",
+		town_center = "building_town_center_fre",
+		market = "building_econ_market_control_fre",
+		villager = "unit_villager_1_fre",
+		scout = "unit_scout_1_fre",
+		king = "unit_king_1_fre",
+		scar_dock = "building_unit_naval_fre",
+		palisade_wall = "building_defense_palisade_fre",
+		palisade_gate = "building_defense_palisade_gate_fre",
+		monk = "unit_monk_3_fre",
+		monastery = "building_unit_religious_control_fre",
+		barracks = "building_unit_infantry_control_fre",
+		stable = "building_unit_cavalry_control_fre",
+		archery_range = "building_unit_ranged_control_fre",
+		siege_workshop = "building_unit_siege_control_fre",
+		scar_dock = "building_unit_naval_fre",	
+		house = "building_house_control_fre",	
+		blacksmith = "building_tech_unit_infantry_control_fre",
+		wonder_imperial_age = "building_wonder_age4_la_grande_cathedral_fre",
+		crossbow = "unit_crossbowman_3_fre",
+		stone_wall = "building_defense_wall_fre",
+		mining_camp = "building_econ_mining_camp_control_fre",
+		lumber_camp = "building_econ_wood_control_fre",
+		mill = "building_econ_food_control_fre",
+		arsenal = "building_tech_unit_ranged_control_fre"
+	},
+	hre = {
+
+		castle = "building_defense_keep_hre",
+		town_center_capital = "building_town_center_capital_hre",
+		town_center = "building_town_center_hre",
+		town_center_landmark = "building_landmark_age3_hohenzollern_castle_hre",
+		market = "building_econ_market_control_hre",
+		villager = "unit_villager_1_hre",
+		scout = "unit_scout_1_hre",
+		king = "unit_king_1_hre",
+		scar_dock = "building_unit_naval_hre",
+		palisade_wall = "building_defense_palisade_hre",
+		palisade_gate = "building_defense_palisade_gate_hre",
+		monk = "unit_monk_1_hre",
+		monastery = "building_unit_religious_control_hre",
+		barracks = "building_unit_infantry_control_hre",
+		stable = "building_unit_cavalry_control_hre",
+		archery_range = "building_unit_ranged_control_hre",
+		siege_workshop = "building_unit_siege_control_hre",
+		scar_dock = "building_unit_naval_hre",	
+		house = "building_house_control_hre",
+		blacksmith = "building_tech_unit_infantry_control_hre",	
+		wonder_imperial_age = "building_wonder_age4_glucksburg_castle_hre",
+		crossbow = "unit_crossbowman_3_hre",
+		stone_wall = "building_defense_wall_hre",
+		mining_camp = "building_econ_mining_camp_control_hre",
+		lumber_camp = "building_econ_wood_control_hre",
+		mill = "building_econ_food_control_hre",
+		arsenal = "building_tech_unit_ranged_control_hre"
+		
+	},
+	rus = {	
+
+		castle = "building_defense_keep_control_rus",
+		town_center_capital = "building_town_center_capital_rus",
+		town_center = "building_town_center_rus",
+		market = "building_econ_market_control_rus",
+		villager = "unit_villager_1_rus",
+		scout = "unit_scout_1_rus",
+		king = "unit_king_1_rus",
+		scar_dock = "building_unit_naval_rus",
+		palisade_wall = "building_defense_palisade_rus",
+		palisade_gate = "building_defense_palisade_gate_rus",
+		monk = "unit_monk_3_rus",
+		monastery = "building_unit_religious_control_rus",
+		barracks = "building_unit_infantry_control_rus",
+		stable = "building_unit_cavalry_control_rus",
+		archery_range = "building_unit_ranged_control_rus",
+		siege_workshop = "building_unit_siege_control_rus",
+		scar_dock = "building_unit_naval_rus",	
+		house = "building_house_control_rus",	
+		blacksmith = "building_tech_unit_infantry_control_rus",
+		wonder_imperial_age = "building_wonder_age4_saint_basils_cathedral_control_rus",
+		crossbow = "unit_crossbowman_3_rus",
+		stone_wall = "building_defense_wall_rus",
+		mining_camp = "building_econ_mining_camp_control_rus",
+		lumber_camp = "building_econ_wood_control_rus",
+		mill = "building_econ_food_control_rus",
+		arsenal = "building_tech_unit_ranged_control_rus"
+	},
+	abbasid = {
+		springald_buildable = "unit_springald_3_buildable_abb",
+		mangonel_buildable = "unit_mangonel_3_buildable_abb",
+		castle = "building_defense_keep_control_abb",
+		town_center_capital = "building_town_center_capital_abb",
+		town_center = "building_town_center_abb",
+		market = "building_econ_market_control_abb",
+		villager = "unit_villager_1_abb",
+		scout = "unit_scout_1_abb",
+		king = "unit_king_1_abb",
+		scar_dock = "building_unit_naval_abb",
+		house_of_wisdom = "building_house_of_wisdom_control_abb",
+		palisade_wall = "building_defense_palisade_abb",
+		palisade_gate = "building_defense_palisade_gate_abb",
+		monk = "unit_monk_3_abb",
+		monastery = "building_unit_religious_control_abb",
+		barracks = "building_unit_infantry_control_abb",
+		stable = "building_unit_cavalry_control_abb",
+		archery_range = "building_unit_ranged_control_abb",
+		siege_workshop = "building_unit_siege_control_abb",
+		scar_dock = "building_unit_naval_abb",		
+		house = "building_house_control_abb",	
+		blacksmith = "building_tech_unit_infantry_control_abb",
+		wonder_imperial_age = "building_wonder_age4_great_mosque_control_abb",
+		crossbow = "unit_crossbowman_3_abb",
+		stone_wall = "building_defense_wall_abb",
+		mining_camp = "building_econ_mining_camp_control_abb",
+		lumber_camp = "building_econ_wood_control_abb",
+		mill = "building_econ_food_control_abb",
+		arsenal = "building_tech_unit_ranged_control_abb"
+	},
+	mongol = {
+		
+		castle = false, -- Mongols have no keep
+		town_center_capital = "building_town_center_capital_mon",
+		town_center_capital_moving = "building_town_center_capital_moving_mon",
+		town_center = "building_town_center_mon",
+		market = "building_econ_market_mon",
+		villager = "unit_villager_1_mon",
+		scout = "unit_khan_1_mon",
+		king = "unit_king_1_mon",
+		scar_dock = "building_unit_naval_mon",
+		house_moving = "building_house_moving_mon",
+		monk = "unit_monk_3_mon",
+		monastery = "building_unit_religious_mon",
+		barracks = "building_unit_infantry_mon",
+		stable = "building_unit_cavalry_mon",
+		archery_range = "building_unit_ranged_mon",
+		siege_workshop = "building_unit_siege_mon",
+		scar_dock = "building_unit_naval_mon",	
+		house = "building_house_mon",
+		blacksmith = "building_tech_unit_infantry_mon",
+		wonder_imperial_age = "building_wonder_age4_final_wonder_mon",
+		crossbow = "unit_crossbowman_3_mon",
+		mining_camp = false, -- Mongols have no mining camp
+		lumber_camp = false, -- Mongols have no lumber camp
+		mill = false, -- Mongols have no mill
+		arsenal = "building_tech_unit_ranged_mon"
+	},
+	sultanate = {
+
+		castle = "building_defense_keep_control_sul",
+		town_center_capital = "building_town_center_capital_sul",
+		town_center = "building_town_center_sul",
+		market = "building_econ_market_control_sul",
+		villager = "unit_villager_1_sul",
+		scout = "unit_scout_1_sul",
+		king = "unit_king_1_sul",
+		scar_dock = "building_unit_naval_sul",
+		palisade_wall = "building_defense_palisade_sul",
+		palisade_gate = "building_defense_palisade_gate_sul",
+		monk = "unit_monk_2_sul",
+		monastery = "building_unit_religious_control_sul",
+		barracks = "building_unit_infantry_control_sul",
+		stable = "building_unit_cavalry_control_sul",
+		archery_range = "building_unit_ranged_control_sul",
+		siege_workshop = "building_unit_siege_control_sul",
+		scar_dock = "building_unit_naval_sul",	
+		house = "building_house_control_sul",	
+		blacksmith = "building_tech_unit_infantry_control_sul",
+		wonder_imperial_age = "building_wonder_age4_agra_fort_control_sul",
+		crossbow = "unit_crossbowman_3_sul",
+		stone_wall = "building_defense_wall_sul",
+		mining_camp = "building_econ_mining_camp_control_sul",
+		lumber_camp = "building_econ_wood_control_sul",
+		mill = "building_econ_food_control_sul",
+		arsenal = "building_tech_unit_ranged_control_sul"
+	},
+	malian = {
+		castle = "building_defense_keep_mal",
+		town_center_capital = "building_town_center_capital_mal",
+		town_center = "building_town_center_mal",
+		market = "building_econ_market_mal",
+		villager = "unit_villager_1_mal",
+		scout = "unit_scout_1_mal",
+		king = "unit_king_1_mal",
+		palisade_wall = "building_defense_palisade_mal",
+		palisade_gate = "building_defense_palisade_gate_mal",
+		monk = "unit_monk_3_mal",
+		monastery = "building_unit_religious_mal",
+		barracks = "building_unit_infantry_mal",
+		stable = "building_unit_cavalry_mal",
+		archery_range = "building_unit_ranged_mal",
+		siege_workshop = "building_unit_siege_mal",
+		scar_dock = "building_unit_naval_mal",	
+		house = "building_house_mal",	
+		blacksmith = "building_tech_unit_infantry_mal",
+		wonder_imperial_age = "building_wonder_age4_great_mosque_control_mal",
+		stone_wall = "building_defense_wall_mal",
+		mining_camp = "building_econ_mining_camp_mal",
+		lumber_camp = "building_econ_wood_mal",
+		mill = "building_econ_food_mal",
+		arsenal = "building_tech_unit_ranged_control_nrm"
+	},
+	ottoman = {
+		castle = "building_defense_keep_ott",
+		town_center_capital = "building_town_center_capital_ott",
+		town_center = "building_town_center_ott",
+		market = "building_econ_market_ott",
+		villager = "unit_villager_1_ott",
+		scout = "unit_scout_1_ott",
+		king = "unit_king_1_ott",
+		palisade_wall = "building_defense_palisade_ott",
+		palisade_gate = "building_defense_palisade_gate_ott",
+		monk = "unit_monk_3_ott",
+		monastery = "building_unit_religious_ott",
+		barracks = "building_unit_infantry_ott",
+		stable = "building_unit_cavalry_ott",
+		archery_range = "building_unit_ranged_ott",
+		siege_workshop = "building_unit_siege_ott",
+		scar_dock = "building_unit_naval_ott",	
+		house = "building_house_ott",	
+		blacksmith = "building_tech_unit_infantry_ott",
+		wonder_imperial_age = "building_wonder_age4_blue_mosque_ott",
+		stone_wall = "building_defense_wall_ott",
+		mining_camp = "building_econ_mining_camp_ott",
+		lumber_camp = "building_econ_wood_ott",
+		mill = "building_econ_food_ott",
+		arsenal = "building_tech_unit_ranged_control_lith"
+	},
+	-- Expansion
+	abbasid_ha_01 = {
+		springald_buildable = "unit_springald_3_buildable_abb_ha_01",
+		mangonel_buildable = "unit_mangonel_3_buildable_abb_ha_01",
+		castle = "building_defense_keep_control_abb_ha_01",
+		town_center_capital = "building_town_center_capital_abb_ha_01",
+		town_center = "building_town_center_abb_ha_01",
+		market = "building_econ_market_control_abb_ha_01",
+		villager = "unit_villager_1_abb_ha_01",
+		scout = "unit_scout_1_abb_ha_01",
+		king = "unit_king_1_abb_ha_01",
+		scar_dock = "building_unit_naval_abb_ha_01",
+		house_of_wisdom = "building_house_of_wisdom_control_abb_ha_01",
+		palisade_wall = "building_defense_palisade_abb_ha_01",
+		palisade_gate = "building_defense_palisade_gate_abb_ha_01",
+		monk = "unit_monk_3_cambulance_abb_ha_01",
+		monastery = "building_unit_religious_control_abb_ha_01",
+		barracks = "building_unit_infantry_control_abb_ha_01",
+		stable = "building_unit_cavalry_control_abb_ha_01",
+		archery_range = "building_unit_ranged_control_abb_ha_01",
+		siege_workshop = "building_unit_siege_control_abb_ha_01",
+		scar_dock = "building_unit_naval_abb_ha_01",		
+		house = "building_house_control_abb_ha_01",	
+		blacksmith = "building_tech_unit_infantry_control_abb_ha_01",
+		wonder_imperial_age = "building_wonder_age4_great_mosque_control_abb_ha_01",
+		crossbow = "unit_crossbowman_3_abb_ha_01",
+		stone_wall = "building_defense_wall_abb_ha_01",
+		mining_camp = "building_econ_mining_camp_control_abb_ha_01",
+		lumber_camp = "building_econ_wood_control_abb_ha_01",
+		mill = "building_econ_food_control_abb_ha_01",
+		arsenal = "building_tech_unit_ranged_control_abb_ha_01"
+	},
+	chinese_ha_01 = {
+		castle = "building_defense_keep_chi_ha_01",
+		town_center_capital = "building_town_center_capital_chi_ha_01",
+		town_center = "building_town_center_chi_ha_01",
+		market = "building_econ_market_control_chi_ha_01",
+		villager = "unit_villager_1_chi_ha_01",
+		scout = "unit_scout_1_chi_ha_01",
+		king = "unit_king_1_chi_ha_01",	
+		scar_dock = "building_unit_naval_chi_ha_01",	
+		palisade_wall = "building_defense_palisade_chi_ha_01",
+		palisade_gate = "building_defense_palisade_gate_chi_ha_01",
+		monk = "unit_monk_3_chi_ha_01",
+		monastery = "building_unit_religious_control_chi_ha_01",
+		barracks = "building_unit_infantry_control_chi_ha_01",
+		stable = "building_unit_cavalry_control_chi_ha_01",
+		archery_range = "building_unit_ranged_control_chi_ha_01",
+		siege_workshop = "building_unit_siege_control_chi_ha_01",
+		scar_dock = "building_unit_naval_chi_ha_01",	
+		house = "building_house_control_chi_ha_01",	
+		blacksmith = "building_tech_unit_infantry_control_chi_ha_01",	
+		wonder_imperial_age = "building_wonder_age4_forbidden_control_chi_ha_01",
+		crossbow = "unit_crossbowman_3_chi_ha_01",
+		stone_wall = "building_defense_wall_chi_ha_01",
+		mining_camp = "building_econ_mining_camp_control_chi_ha_01",
+		lumber_camp = "building_econ_wood_control_chi_ha_01",
+		mill = "building_econ_food_control_chi_ha_01",
+		arsenal = "building_tech_unit_ranged_control_chi_ha_01"
+	},
+	french_ha_01 = {
+		castle = "building_defense_keep_fre_ha_01",
+		town_center_capital = "building_town_center_capital_fre_ha_01",
+		town_center = "building_town_center_fre_ha_01",
+		market = "building_econ_market_control_fre_ha_01",
+		villager = "unit_villager_1_fre_ha_01",
+		scout = "unit_scout_1_fre_ha_01",
+		king = "unit_king_1_fre_ha_01",
+		scar_dock = "building_unit_naval_fre_ha_01",
+		palisade_wall = "building_defense_palisade_fre_ha_01",
+		palisade_gate = "building_defense_palisade_gate_fre_ha_01",
+		monk = "unit_monk_3_lan",
+		monastery = "building_unit_religious_control_fre_ha_01",
+		barracks = "building_unit_infantry_control_fre_ha_01",
+		stable = "building_unit_cavalry_control_fre_ha_01",
+		archery_range = "building_unit_ranged_control_fre_ha_01",
+		siege_workshop = "building_unit_siege_control_fre_ha_01",
+		scar_dock = "building_unit_naval_fre_ha_01",	
+		house = "building_house_control_fre_ha_01",	
+		blacksmith = "building_tech_unit_infantry_control_fre_ha_01",
+		wonder_imperial_age = "building_wonder_age4_la_grande_cathedral_fre_ha_01",
+		crossbow = "unit_crossbowman_3_fre_ha_01",
+		stone_wall = "building_defense_wall_fre_ha_01",
+		mining_camp = "building_econ_mining_camp_control_fre_ha_01",
+		lumber_camp = "building_econ_wood_control_fre_ha_01",
+		mill = "building_econ_food_control_fre_ha_01",
+		arsenal = "building_tech_unit_ranged_control_fre_ha_01"
+	},
+	hre_ha_01 = {
+		castle = "building_defense_keep_hre_ha_01",
+		town_center_capital = "building_town_center_capital_hre_ha_01",
+		town_center = "building_town_center_hre_ha_01",
+		town_center_landmark = "building_landmark_age3_hohenzollern_castle_hre_ha_01",
+		market = "building_econ_market_control_hre_ha_01",
+		villager = "unit_villager_1_hre_ha_01",
+		scout = "unit_scout_1_hre_ha_01",
+		king = "unit_king_1_hre_ha_01",
+		scar_dock = "building_unit_naval_hre_ha_01",
+		palisade_wall = "building_defense_palisade_hre_ha_01",
+		palisade_gate = "building_defense_palisade_gate_hre_ha_01",
+		monk = "unit_monk_1_hre_ha_01",
+		monastery = "building_unit_religious_control_hre_ha_01",
+		barracks = "building_unit_infantry_control_hre_ha_01",
+		stable = "building_unit_cavalry_control_hre_ha_01",
+		archery_range = "building_unit_ranged_control_hre_ha_01",
+		siege_workshop = "building_unit_siege_control_hre_ha_01",
+		scar_dock = "building_unit_naval_hre_ha_01",	
+		house = "building_house_control_hre_ha_01",
+		blacksmith = "building_tech_unit_infantry_control_hre_ha_01",	
+		wonder_imperial_age = "building_wonder_age4_glucksburg_castle_hre_ha_01",
+		crossbow = "unit_crossbowman_3_hre_ha_01",
+		stone_wall = "building_defense_wall_hre_ha_01",
+		mining_camp = "building_econ_mining_camp_control_hre_ha_01",
+		lumber_camp = "building_econ_wood_control_hre_ha_01",
+		mill = "building_econ_food_control_hre_ha_01",
+		arsenal = "building_tech_unit_ranged_control_hre_ha_01"
+	},
+	japanese = {
+		castle = "building_defense_keep_jpn",
+		town_center_capital = "building_town_center_capital_jpn",
+		town_center = "building_town_center_jpn",
+		market = "building_econ_market_jpn",
+		villager = "unit_villager_1_jpn",
+		scout = "unit_scout_1_jpn",
+		king = "unit_king_1_jpn",
+		palisade_wall = "building_defense_palisade_jpn",
+		palisade_gate = "building_defense_palisade_gate_jpn",
+		monk = "unit_monk_buddhist_3_jpn",
+		monastery = "building_unit_religious_buddhist_jpn",
+		barracks = "building_unit_infantry_jpn",
+		stable = "building_unit_cavalry_jpn",
+		archery_range = "building_unit_ranged_jpn",
+		siege_workshop = "building_unit_siege_jpn",
+		scar_dock = "building_unit_naval_jpn",	
+		house = "building_house_jpn",	
+		blacksmith = "building_tech_university_jpn",
+		wonder_imperial_age = "building_wonder_age4_nikko_toshogu_jpn",
+		stone_wall = "building_defense_wall_jpn",
+		mining_camp = "building_econ_mining_camp_jpn",
+		lumber_camp = "building_econ_wood_jpn",
+		mill = "building_house_jpn", -- house
+		arsenal = "building_tech_unit_ranged_control_nrm" -- placeholder
+	},
+	byzantine = {
+		castle = "building_defense_keep_byz",
+		town_center_capital = "building_town_center_capital_byz",
+		town_center = "building_town_center_byz",
+		market = "building_econ_market_control_byz",
+		villager = "unit_villager_1_byz",
+		scout = "unit_scout_1_byz",
+		king = "unit_king_1_byz",	
+		scar_dock = "building_unit_naval_byz",	
+		palisade_wall = "building_defense_palisade_byz",
+		palisade_gate = "building_defense_palisade_gate_byz",
+		monk = "unit_monk_2_byz",
+		monastery = "building_unit_religious_control_byz",
+		barracks = "building_unit_infantry_control_byz",
+		stable = "building_unit_cavalry_control_byz",
+		archery_range = "building_unit_ranged_control_byz",
+		siege_workshop = "building_unit_siege_control_byz",
+		scar_dock = "building_unit_naval_byz",	
+		house = "building_house_control_byz",	
+		blacksmith = "building_tech_unit_infantry_control_byz",	
+		wonder_imperial_age = "building_wonder_age4_hagia_sophia_byz",
+		crossbow = "unit_crossbowman_3_byz",
+		stone_wall = "building_defense_wall_byz",
+		mining_camp = "building_econ_mining_camp_control_byz",
+		lumber_camp = "building_econ_wood_control_byz",
+		mill = "building_econ_food_control_byz",
+		arsenal = "building_tech_unit_ranged_control_abb" -- placeholder
+	},
+	jin_dynasty = {
+		castle = "building_keep_3_jin",
+		town_center_capital = "building_town_center_capital_jin",
+		town_center = "building_town_center_2_jin",
+		market = "building_market_2_jin",
+		villager = "unit_mounted_villager_1_jin",
+		scout = "unit_scout_1_jin",
+		king = "unit_king_1_jin",
+		scar_dock = "building_dock_1_jin",
+		palisade_wall = "building_palisade_wall_jin",
+		palisade_gate = "building_palisade_gate_jin",
+		monk = "unit_monk_3_jin",
+		monastery = "building_monastery_3_jin",
+		barracks = "building_barracks_1_jin",
+		stable = "building_stable_2_jin",
+		archery_range = false,
+		siege_workshop = "building_machine_workshop_2_jin",
+		house = "building_house_1_jin",
+		blacksmith = "building_blacksmith_2_jin",
+		wonder_imperial_age = "building_wonder_4_jin",
+		crossbow = "unit_crossbowman_3_jin",
+		stone_wall = "building_stone_wall_jin",
+		mining_camp = "building_mining_camp_1_jin",
+		lumber_camp = "building_lumbercamp_1_jin",
+		mill = "building_mill_1_jin",
+		arsenal = false,
+	},
+}
+
+CBA_SIEGE_TABLE = {
+	
+	english = {
+		ram = "unit_ram_3_eng",
+		workshop_ram = "unit_workshop_ram_3_eng",
+		springald = "unit_springald_3_eng",
+		mangonel = "unit_mangonel_3_eng",
+		ribauldequin = "unit_ribauldequin_4_eng",
+		culverin = "unit_culverin_4_eng",
+		cannon = "unit_cannon_4_eng",
+		bombard = "unit_bombard_4_eng",
+		trebuchet_cw = "unit_trebuchet_4_cw_eng",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		scar_siegeworkshop = "building_unit_siege_control_eng",
+
+	},	
+	chinese = {
+		ram = "unit_ram_3_chi",
+		workshop_ram = "unit_workshop_ram_3_chi",
+		springald = "unit_springald_3_chi",
+		mangonel = "unit_mangonel_3_chi",
+		culverin = "unit_culverin_4_chi",
+		cannon = "unit_cannon_4_chi",
+		bombard = "unit_bombard_4_chi",
+		trebuchet_cw = "unit_trebuchet_4_cw_chi",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		scar_siegeworkshop = "building_unit_siege_control_chi",
+		nest_of_bees = "unit_nest_of_bees_4_chi",
+		nestofbees_clocktower_chi = "unit_nest_of_bees_4_clocktower_chi",
+		mangonel_clocktower_chi = "unit_mangonel_3_clocktower_chi",
+		springald_clocktower_chi = "unit_springald_3_clocktower_chi",
+		trebuchet_clocktower_chi = "unit_trebuchet_4_cw_clocktower_chi",
+		bombard_clocktower_chi = "unit_bombard_4_clocktower_chi",
+		ribauldequin = "unit_ribauldequin_4_nrm" -- Placeholder
+	},
+	french = {
+		workshop_ram = "unit_workshop_ram_3_fre",
+		ram = "unit_ram_3_fre",
+		springald = "unit_springald_3_fre",
+		mangonel = "unit_mangonel_3_fre",
+		ribauldequin = "unit_ribauldequin_4_fre",
+		culverin = "unit_culverin_4_fre",
+		cannon = "unit_cannon_4_fre",
+		bombard = "unit_bombard_4_fre",
+		trebuchet_cw = "unit_trebuchet_4_cw_fre",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		scar_siegeworkshop = "building_unit_siege_control_fre",
+		royal_cannon = "unit_cannon_4_royal_fre",
+		royal_culverin = "unit_culverin_4_royal_fre",
+		royal_ribauldequin = "unit_ribauldequin_4_royal_fre",
+	},
+	hre = {
+		workshop_ram = "unit_workshop_ram_3_hre",
+		ram = "unit_ram_3_hre",
+		springald = "unit_springald_3_hre",
+		mangonel = "unit_mangonel_3_hre",
+		ribauldequin = "unit_ribauldequin_4_hre",
+		culverin = "unit_culverin_4_hre",
+		cannon = "unit_cannon_4_hre",
+		bombard = "unit_bombard_4_hre",
+		trebuchet_cw = "unit_trebuchet_4_cw_hre",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		scar_siegeworkshop = "building_unit_siege_control_hre",
+
+	},
+	rus = {	
+		workshop_ram = "unit_workshop_ram_3_rus",
+		ram = "unit_ram_3_rus",
+		springald = "unit_springald_3_rus",
+		mangonel = "unit_mangonel_3_rus",
+		ribauldequin = "unit_ribauldequin_4_rus",
+		culverin = "unit_culverin_4_rus",
+		cannon = "unit_cannon_4_rus",
+		bombard = "unit_bombard_4_rus",
+		trebuchet_cw = "unit_trebuchet_4_cw_rus",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		scar_siegeworkshop = "building_unit_siege_control_rus",
+	},
+	abbasid = {
+		workshop_ram = "unit_workshop_ram_3_abb",
+		ram = "unit_ram_3_abb",
+		springald = "unit_springald_3_abb",
+		mangonel = "unit_mangonel_3_abb",
+		ribauldequin = "unit_ribauldequin_4_abb",
+		culverin = "unit_culverin_4_abb",
+		cannon = "unit_cannon_4_abb",
+		bombard = "unit_bombard_4_abb",
+		trebuchet_cw = "unit_trebuchet_4_cw_abb",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		--springald_buildable = "unit_springald_3_buildable_abb",
+		mangonel_buildable = "unit_mangonel_3_buildable_abb",
+		scar_siegeworkshop = "building_unit_siege_control_abb",
+
+	},
+	mongol = {
+		workshop_ram = "unit_workshop_ram_3_mon",
+		ram = "unit_ram_3_mon",
+		springald = "unit_springald_3_mon",
+		mangonel = "unit_mangonel_3_mon",
+		ribauldequin = "unit_ribauldequin_4_mon",
+		culverin = "unit_culverin_4_mon",
+		cannon = "unit_cannon_4_mon",
+		bombard = "unit_bombard_4_mon",
+		trebuchet_cw = "unit_trebuchet_4_cw_mon",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		--springald_buildable = "unit_springald_3_field_construct_mon",
+		mangonel_buildable = "unit_mangonel_3_field_construct_mon",
+		scar_siegeworkshop = "building_unit_siege_mon",
+		trebuchet_tr_buildable = "unit_trebuchet_4_tr_field_construct_mon",
+		trebuchet_cw_buildable = "unit_trebuchet_4_cw_field_construct_mon",	
+		trebuchet_cw_double = "unit_trebuchet_4_cw_double_mon",
+		trebuchet_tr_double = "unit_trebuchet_4_tr_double_mon",		
+		springald_double = "unit_springald_3_double_mon",
+		mangonel_double = "unit_mangonel_3_double_mon",
+		ribauldequin_double = "unit_ribauldequin_4_double_mon",
+		culverin_double = "unit_culverin_4_double_mon",
+		cannon_double = "unit_cannon_4_double_mon",
+		bombard_double = "unit_bombard_4_double_mon",
+		nest_of_bees = "unit_khaganate_nest_of_bees_4_mon",
+
+	},
+	sultanate = {
+		workshop_ram = "unit_workshop_ram_3_sul",
+		ram = "unit_ram_3_sul",
+		springald = "unit_springald_3_sul",
+		mangonel = "unit_mangonel_3_sul",
+		ribauldequin = "unit_ribauldequin_4_sul",
+		culverin = "unit_culverin_4_sul",
+		cannon = "unit_cannon_4_sul",
+		bombard = "unit_bombard_4_sul",
+		trebuchet_cw = "unit_trebuchet_4_cw_sul",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		scar_siegeworkshop = "building_unit_siege_control_sul", 
+
+	},
+	malian = {
+		workshop_ram = "unit_workshop_ram_3_mal",
+		ram = "unit_ram_3_mal",
+		springald = "unit_springald_3_mal",
+		mangonel = "unit_mangonel_3_mal",
+		ribauldequin = "unit_ribauldequin_4_mal",
+		culverin = "unit_culverin_4_mal",
+		cannon = "unit_cannon_4_mal",
+		bombard = "unit_bombard_4_mal",
+		trebuchet_cw = "unit_trebuchet_4_cw_mal",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		scar_siegeworkshop = "building_unit_siege_mal", 
+
+	},
+	ottoman = {
+		workshop_ram = "unit_workshop_ram_3_ott",
+		ram = "unit_ram_3_ott",
+		springald = "unit_springald_3_ott",
+		mangonel = "unit_mangonel_3_ott",
+		ribauldequin = "unit_ribauldequin_4_ott",
+		culverin = "unit_culverin_4_ott",
+		cannon = "unit_cannon_4_ott",
+		bombard = "unit_great_bombard_4_ott",
+		trebuchet_cw = "unit_trebuchet_4_cw_ott",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		scar_siegeworkshop = "building_unit_siege_ott", 
+		--great_bombard = "unit_great_bombard_4_ott"
+
+	},
+	-- Expansion
+	abbasid_ha_01 = {
+		workshop_ram = "unit_workshop_ram_3_abb_ha_01",
+		ram = "unit_ram_3_abb_ha_01",
+		springald = "unit_springald_3_abb_ha_01",
+		mangonel = "unit_mangonel_3_abb_ha_01",
+		ribauldequin = "unit_ribauldequin_4_abb_ha_01",
+		culverin = "unit_culverin_4_abb_ha_01",
+		cannon = "unit_cannon_4_abb_ha_01",
+		bombard = "unit_bombard_4_abb_ha_01",
+		trebuchet_cw = "unit_trebuchet_4_cw_abb_ha_01",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		--springald_buildable = "unit_springald_3_buildable_abb_ha_01",
+		mangonel_buildable = "unit_mangonel_3_buildable_abb_ha_01",
+		scar_siegeworkshop = "building_unit_siege_control_abb_ha_01",
+	},
+	chinese_ha_01 = {
+		ram = "unit_ram_3_chi",
+		workshop_ram = "unit_workshop_ram_3_chi_ha_01",
+		springald = "unit_springald_3_chi_ha_01",
+		mangonel = "unit_mangonel_3_chi_ha_01",
+		culverin = "unit_culverin_4_chi_ha_01",
+		cannon = "unit_cannon_4_chi_ha_01",
+		bombard = "unit_bombard_4_chi_ha_01",
+		trebuchet_cw = "unit_trebuchet_4_cw_chi_ha_01",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		scar_siegeworkshop = "building_unit_siege_control_chi_ha_01",
+		nest_of_bees = "unit_nest_of_bees_4_chi_ha_01",
+		ribauldequin = "unit_ribauldequin_4_nrm" -- Placeholder
+	},
+	french_ha_01 = {
+		workshop_ram = "unit_workshop_ram_3_fre_ha_01",
+		ram = "unit_ram_3_fre_ha_01",
+		springald = "unit_springald_3_fre",
+		mangonel = "unit_mangonel_3_fre",
+		ribauldequin = "unit_ribauldequin_4_fre",
+		culverin = "unit_culverin_4_fre",
+		cannon = "unit_cannon_4_fre",
+		bombard = "unit_bombard_4_fre",
+		trebuchet_cw = "unit_trebuchet_4_cw_fre",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		scar_siegeworkshop = "building_unit_siege_control_fre_ha_01",
+		royal_cannon = "unit_cannon_4_royal_fre_ha_01",
+		royal_culverin = "unit_culverin_4_royal_fre_ha_01",
+		royal_ribauldequin = "unit_ribauldequin_4_royal_fre_ha_01"
+	},
+	hre_ha_01 = {
+		workshop_ram = "unit_workshop_ram_3_hre_ha_01",
+		ram = "unit_ram_3_hre_ha_01",
+		springald = "unit_springald_3_hre_ha_01",
+		mangonel = "unit_mangonel_3_hre_ha_01",
+		ribauldequin = "unit_ribauldequin_4_hre_ha_01",
+		culverin = "unit_culverin_4_hre_ha_01",
+		cannon = "unit_cannon_4_hre_ha_01",
+		bombard = "unit_bombard_4_hre_ha_01",
+		trebuchet_cw = "unit_trebuchet_4_cw_hre_ha_01",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		scar_siegeworkshop = "building_unit_siege_control_hre_ha_01"
+	},
+	japanese = {	
+		workshop_ram = "unit_workshop_ram_3_jpn",
+		ram = "unit_ram_3_jpn",
+		springald = "unit_springald_3_jpn",
+		mangonel = "unit_mangonel_3_jpn",
+		ribauldequin = "unit_ribauldequin_4_jpn",
+		culverin = "unit_culverin_4_jpn",
+		cannon = "unit_cannon_4_jpn",
+		bombard = "unit_bombard_4_jpn",
+		trebuchet_cw = "unit_trebuchet_4_cw_jpn",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		scar_siegeworkshop = "building_unit_siege_jpn"
+	},
+	byzantine = {	
+		workshop_ram = "unit_workshop_fire_ram_3_byz",
+		ram = "unit_ram_3_byz",
+		springald = "unit_springald_3_byz",
+		mangonel = "unit_mangonel_3_byz",
+		ribauldequin = "unit_ribauldequin_4_byz",
+		culverin = "unit_culverin_4_byz",
+		cannon = "unit_cannon_4_byz",
+		bombard = "unit_bombard_4_byz",
+		trebuchet_cw = "unit_trebuchet_4_cw_byz",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		scar_siegeworkshop = "building_unit_siege_control_byz",
+		nest_of_bees = "unit_nest_of_bees_4_merc_byz"
+	},
+	jin_dynasty = {
+		workshop_ram = "unit_workshop_ram_3_jin",
+		ram = "unit_ram_3_jin",
+		springald = "unit_springald_3_jin",
+		mangonel = "unit_mangonel_3_jin",
+		ribauldequin = "unit_ribauldequin_4_jin",
+		culverin = "unit_culverin_4_jin",
+		cannon = "unit_cannon_4_jin",
+		bombard = "unit_bombard_4_jin",
+		trebuchet_cw = "unit_trebuchet_4_cw_jin",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon",
+		scar_siegeworkshop = "building_machine_workshop_2_jin"
+	},
+}
+
+-- ============================================================
+-- DLC RESOLUTION INFRASTRUCTURE
+-- ============================================================
+
+-- Toggle: set to true to enable verbose resolver logging
+DLC_DEBUG = false
+
+-- Maximum parent chain depth (prevents infinite recursion)
+DLC_RESOLVE_MAX_DEPTH = 4
+
+-- Parent map: DLC raceName → base civ key in AGS_ENTITY_TABLE
+-- Populated by RegisterDLCCiv(); do not edit directly.
+DLC_CIV_PARENT_MAP = {}
+
+-- Sparse override table: DLC_CIV_OVERRIDES[raceName][shortName] = attribName
+-- Only entries that DIFFER from parent need to be listed. Use false for "intentionally absent".
+DLC_CIV_OVERRIDES = {}
+
+-- Per-player resolved civ cache: player_id → resolved civ key
+DLC_PLAYER_CIV_CACHE = {}
+
+-- Track which profiles have been applied per player (idempotency guard)
+PLAYER_PROFILE_APPLIED = {}
+
+-- Debug logger (safe even if debug.scar import order varies)
+if DebugPrint_Resolver == nil then
+	function DebugPrint_Resolver(msg)
+		if DLC_DEBUG then
+			print("[DLC-DBG] " .. msg)
+		end
+	end
+end
+
+---RegisterDLCCiv: Register a DLC civ with parent inheritance.
+-- spec: {attribName, parent, overrides?}
+-- Override precedence: DLC_CIV_OVERRIDES[civ][key] > AGS_ENTITY_TABLE[resolved][key] > nil
+function RegisterDLCCiv(spec)
+	if spec.attribName == nil or spec.parent == nil then
+		error("[DLC] RegisterDLCCiv: attribName and parent are required.")
+	end
+	DLC_CIV_PARENT_MAP[spec.attribName] = spec.parent
+	if spec.overrides then
+		DLC_CIV_OVERRIDES[spec.attribName] = spec.overrides
+	end
+	DebugPrint_Resolver("RegisterDLCCiv: '" .. spec.attribName .. "' -> parent '" .. spec.parent .. "'")
+end
+
+-- DLC Civ Registrations (Knights of Cross and Rose)
+-- NOTE: HA_01 civs (abbasid_ha_01, chinese_ha_01, french_ha_01, hre_ha_01) are already
+-- full entries in AGS_ENTITY_TABLE/CBA_SIEGE_TABLE and resolve directly (no registration needed).
+RegisterDLCCiv({attribName = "mongol_ha_gol", parent = "mongol",
+	overrides = {palisade_wall = false, stone_wall = false, castle = false,
+		siege_workshop = "building_unit_siege_mon_ha_gol",
+		town_center_capital = "building_town_center_capital_mon_ha_gol"}})
+RegisterDLCCiv({attribName = "byzantine_ha_mac", parent = "byzantine",
+	overrides = {stone_wall = "building_defense_wall_byz_ha_mac",
+		palisade_wall = "building_defense_palisade_byz_ha_mac",
+		castle = "building_defense_keep_byz_ha_mac",
+		siege_workshop = "building_unit_siege_control_byz_ha_mac",
+		town_center_capital = "building_town_center_capital_byz_ha_mac"}})
+RegisterDLCCiv({attribName = "japanese_ha_sen", parent = "japanese",
+	overrides = {stone_wall = "building_defense_wall_jpn_ha_sen",
+		palisade_wall = "building_defense_palisade_jpn_ha_sen",
+		castle = "building_defense_keep_crow_discount_jpn_ha_sen",
+		siege_workshop = "building_unit_siege_jpn_ha_sen",
+		town_center_capital = "building_town_center_capital_jpn_ha_sen"}})
+RegisterDLCCiv({attribName = "sultanate_ha_tug", parent = "sultanate",
+	overrides = {stone_wall = "building_defense_wall_sul_ha_tug",
+		palisade_wall = "building_defense_palisade_sul_ha_tug",
+		castle = "building_defense_keep_control_sul_ha_tug",
+		siege_workshop = "building_unit_siege_control_sul_ha_tug",
+		town_center_capital = "building_town_center_capital_sul_ha_tug"}})
+RegisterDLCCiv({attribName = "lancaster", parent = "english",
+	overrides = {stone_wall = "building_defense_wall_lan",
+		palisade_wall = "building_defense_palisade_lan",
+		castle = "building_defense_keep_lan",
+		siege_workshop = "building_unit_siege_workshop_lan",
+		town_center_capital = "building_town_center_capital_lan"}})
+RegisterDLCCiv({attribName = "templar", parent = "hre",
+	overrides = {stone_wall = "building_defense_stone_wall_tem",
+		palisade_wall = "building_defense_palisade_wall_tem",
+		castle = "building_defense_fortress_tem",
+		siege_workshop = "building_siege_workshop_tem",
+		town_center_capital = "building_town_center_capital_tem"}})
+RegisterDLCCiv({attribName = "jin_dynasty", parent = "chinese"})
+
+-- Build reverse lookup used by disconnect conversion logic.
+-- Maps attribName -> AGS key (e.g., "building_unit_infantry_control_eng" -> "barracks").
+function _BuildReverseLookups()
+	BLUEPRINT_REVERSE_MAP = {}
+	for _, tbl in pairs(AGS_ENTITY_TABLE) do
+		for key, attrib in pairs(tbl) do
+			if type(attrib) == "string" then
+				BLUEPRINT_REVERSE_MAP[attrib] = key
+			end
+		end
+	end
+	for _, overrides in pairs(DLC_CIV_OVERRIDES) do
+		for key, attrib in pairs(overrides) do
+			if type(attrib) == "string" then
+				BLUEPRINT_REVERSE_MAP[attrib] = key
+			end
+		end
+	end
+end
+_BuildReverseLookups()
+
+---ResolveCivKey: Given a raceName, return a valid key in AGS_ENTITY_TABLE.
+-- Checks AGS directly first, then walks DLC_CIV_PARENT_MAP recursively.
+-- Returns nil if unresolvable (caller must handle).
+function ResolveCivKey(raceName, _depth)
+	if raceName == nil then return nil end
+	raceName = string.lower(raceName)
+	_depth = _depth or 0
+	if _depth > DLC_RESOLVE_MAX_DEPTH then
+		error("[DLC] ResolveCivKey: parent chain exceeded depth "
+			.. DLC_RESOLVE_MAX_DEPTH .. " for '" .. raceName
+			.. "'. Possible circular mapping.")
+	end
+	if AGS_ENTITY_TABLE[raceName] then
+		DebugPrint_Resolver("ResolveCivKey: '" .. raceName .. "' direct match")
+		return raceName
+	end
+	local parent = DLC_CIV_PARENT_MAP[raceName]
+	if parent then
+		DebugPrint_Resolver("ResolveCivKey: '" .. raceName .. "' -> parent '" .. parent .. "' (depth " .. tostring(_depth) .. ")")
+		return ResolveCivKey(parent, _depth + 1)
+	end
+	DebugPrint_Resolver("ResolveCivKey: '" .. raceName .. "' UNRESOLVABLE")
+	return nil
+end
+
+---GetPlayerCiv: Resolve and cache a player's civ key.
+-- Returns a valid AGS_ENTITY_TABLE key, or errors.
+function GetPlayerCiv(player_id)
+	if DLC_PLAYER_CIV_CACHE[player_id] then
+		return DLC_PLAYER_CIV_CACHE[player_id]
+	end
+	local raceName = string.lower(Player_GetRaceName(player_id))
+	local resolved = ResolveCivKey(raceName)
+	if resolved == nil then
+		error("[DLC] GetPlayerCiv: Unknown civilization '" .. raceName
+			.. "' for player " .. tostring(player_id)
+			.. ". Not in AGS_ENTITY_TABLE or DLC_CIV_PARENT_MAP.")
+	end
+	if resolved ~= raceName then
+		print("[DLC] Player " .. tostring(player_id) .. ": '" .. raceName
+			.. "' resolved via parent to '" .. resolved .. "'")
+	end
+	DLC_PLAYER_CIV_CACHE[player_id] = resolved
+	return resolved
+end
+
+---GetPlayerRawCiv: Return the original (possibly DLC) raceName, lowercased.
+function GetPlayerRawCiv(player_id)
+	return string.lower(Player_GetRaceName(player_id))
+end
+
+---IsCivFamily: Returns true if the player's resolved civ matches family.
+-- Example: IsCivFamily(player.id, "english") → true for lancaster too.
+function IsCivFamily(player_id, family)
+	return GetPlayerCiv(player_id) == family
+end
+
+---IsCivExact: Returns true if the player's raw raceName matches exactly.
+-- Example: IsCivExact(player.id, "abbasid_ha_01") → true only for Ayyubids.
+function IsCivExact(player_id, civ_name)
+	return string.lower(Player_GetRaceName(player_id)) == civ_name
+end
+
+---IsCivFamilyAny: Returns true if resolved civ matches any of the listed families.
+-- Example: IsCivFamilyAny(player.id, {"chinese", "mongol", "byzantine"})
+function IsCivFamilyAny(player_id, families)
+	local resolved = GetPlayerCiv(player_id)
+	for _, fam in ipairs(families) do
+		if resolved == fam then return true end
+	end
+	return false
+end
+
+---TryGetCivilizationEntity: Safe DLC-aware blueprint lookup.
+-- Returns nil instead of erroring when civ lacks the requested bp_type.
+function TryGetCivilizationEntity(player_civ, bp_type)
+	local raw = string.lower(player_civ)
+	if DLC_CIV_OVERRIDES[raw] and DLC_CIV_OVERRIDES[raw][bp_type] ~= nil then
+		if DLC_CIV_OVERRIDES[raw][bp_type] == false then return nil end
+		return BP_GetEntityBlueprint(DLC_CIV_OVERRIDES[raw][bp_type])
+	end
+	local resolved = ResolveCivKey(raw)
+	if resolved == nil then return nil end
+	local entry = AGS_ENTITY_TABLE[resolved]
+	if entry == nil then return nil end
+	local bp = entry[bp_type]
+	if bp == nil or bp == false then return nil end
+	return BP_GetEntityBlueprint(bp)
+end
+
+-- ============================================================
+-- RESTRICTION INFRASTRUCTURE
+-- ============================================================
+
+-- Nil-safe siege restriction handler.
+-- state: ITEM_LOCKED to lock, ITEM_DEFAULT to unlock.
+local function _ApplySiegeRestrictions(player, state)
+	local civ = string.lower(player.raceName)
+	local siege = CBA_SIEGE_TABLE[civ]
+	if siege == nil then
+		local resolved = ResolveCivKey(civ)
+		if resolved then siege = CBA_SIEGE_TABLE[resolved] end
+	end
+	if siege == nil then return end
+	local function _squad(key)
+		if siege[key] then Player_SetSquadProductionAvailability(player.id, BP_GetSquadBlueprint(siege[key]), state) end
+	end
+	local function _entity(key)
+		if siege[key] then Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint(siege[key]), state) end
+	end
+	-- Mangonel (all civs)
+	_squad(BP_SIEGE_MANGONEL)
+	-- Abbasid/Mongol family: field construct mangonel
+	if IsCivFamilyAny(player.id, {"abbasid", "mongol"}) then
+		_entity(BP_SIEGE_MANGONEL_BUILDABLE)
+	end
+	-- Chinese/Mongol/Byzantine family: nest of bees
+	if IsCivFamilyAny(player.id, {"chinese", "mongol", "byzantine"}) then
+		_squad(BP_SIEGE_NESTOFBEES)
+		if IsCivExact(player.id, "chinese") then
+			Player_SetSquadProductionAvailability(player.id, SBP.CHINESE.UNIT_NEST_OF_BEES_4_CLOCKTOWER_CHI, state)
+		end
+	end
+	-- Non-Chinese: ribauldequin
+	if not IsCivFamily(player.id, "chinese") then
+		_squad(BP_SIEGE_RIBAULDEQUIN)
+		if IsCivFamily(player.id, "french") then
+			_squad(BP_SIEGE_ROYAL_RIBAULDEQUIN)
+		end
+	end
+	-- Ayyubids: ram tower (exact match only)
+	if IsCivExact(player.id, "abbasid_ha_01") then
+		Player_SetEntityProductionAvailability(player.id, EBP.ABBASID_HA_01.UNIT_RAM_TOWER_3_ABB_HA_01, state)
+	end
+	-- Mongol family: double siege
+	if IsCivFamily(player.id, "mongol") then
+		_squad(BP_SIEGE_MANGONEL_DOUBLE)
+		_squad(BP_SIEGE_RIBAULDEQUIN_DOUBLE)
+	end
+	-- Byzantine base: outpost mangonel upgrade (IsCivExact to exclude DLC variants)
+	if IsCivExact(player.id, "byzantine") then
+		Player_SetUpgradeAvailability(player.id, UPG.BYZANTINE.UPGRADE_OUTPOST_MANGONEL_BYZ, state)
+	end
+end
+
+-- Data-driven landmark restriction tables (IsCivExact matching)
+-- Keep-producing landmarks restricted at Intermediate difficulty
+LANDMARK_KEEP_RESTRICTIONS = {
+	{civ = "english",      bp = "building_landmark_age3_windsor_castle_eng"},
+	{civ = "french",       bp = "building_landmark_age2_la_chateau_rouge_fre"},
+	{civ = "french_ha_01", bp = "building_landmark_age2_la_chateau_rouge_fre_ha_01"},
+	{civ = "hre",          bp = "building_landmark_age3_eltz_castle_hre"},
+	{civ = "hre_ha_01",    bp = "building_landmark_age3_eltz_castle_hre_ha_01"},
+	{civ = "japanese",     bp = "building_landmark_age3_treasure_jpn"},
+	{civ = "malian",       bp = "building_landmark_age3_landmarkf_mal"},
+	{civ = "ottoman",      bp = "building_landmark_age3_kilitbahir_castle_ott"},
+	{civ = "rus",          bp = "building_landmark_age3_spassakaya_tower_control_rus"},
+}
+
+-- Age 4 landmarks restricted at Absurd+ difficulty
+LANDMARK_AGE4_RESTRICTIONS = {
+	{civ = "hre",          bp = "building_landmark_age3_hohenzollern_castle_hre"},
+	{civ = "hre",          bp = "building_landmark_age3_eltz_castle_hre"},
+	{civ = "malian",       bp = "building_landmark_Age3_landmarke_mal"},
+	{civ = "malian",       bp = "building_landmark_Age3_landmarkf_mal"},
+	{civ = "ottoman",      bp = "building_landmark_age3_istanbul_observatory_ott"},
+	{civ = "ottoman",      bp = "building_landmark_age3_kilitbahir_castle_ott"},
+	{civ = "japanese",     bp = "building_landmark_age3_ozutsu_jpn"},
+	{civ = "japanese",     bp = "building_landmark_age3_treasure_jpn"},
+	{civ = "byzantine",    bp = "building_landmark_age3_eastern_merc_house_byz"},
+	{civ = "byzantine",    bp = "building_landmark_age3_western_merc_house_byz"},
+	{civ = "chinese_ha_01", bp = "building_landmark_age3_temple_of_the_sun_control_chi_ha_01"},
+	{civ = "chinese_ha_01", bp = "building_landmark_age3_library_chi_ha_01"},
+	{civ = "french_ha_01", bp = "building_landmark_age3_ecole_de_poudre_a_canon_fre_ha_01"},
+	{civ = "french_ha_01", bp = "building_landmark_age2_la_chateau_rouge_fre_ha_01"},
+	{civ = "hre_ha_01",    bp = "building_landmark_age3_eltz_castle_hre_ha_01"},
+	{civ = "hre_ha_01",    bp = "building_landmark_age3_hohenzollern_castle_hre_ha_01"},
+}
+
+---ApplyLandmarkRestrictions: Apply restrictions from a landmark table for a player.
+-- Uses IsCivFamily to apply restrictions to DLC variants via parent civ matching.
+function ApplyLandmarkRestrictions(player_id, landmark_table, state)
+	for _, entry in ipairs(landmark_table) do
+		if IsCivExact(player_id, entry.civ) or IsCivFamily(player_id, entry.civ) then
+			Player_SetEntityProductionAvailability(player_id, BP_GetEntityBlueprint(entry.bp), state)
+		end
+	end
+end
+
+---ApplyHouseOfWisdomRestrictions: Restrict House of Wisdom age-up wings.
+function ApplyHouseOfWisdomRestrictions(player_id, state)
+	if IsCivExact(player_id, "abbasid") then
+		Player_SetUpgradeAvailability(player_id, UPG.ABBASID.UPGRADE_ADD_CULTURE_WING_CASTLE, state)
+		Player_SetUpgradeAvailability(player_id, UPG.ABBASID.UPGRADE_ADD_TRADE_WING_CASTLE, state)
+		Player_SetUpgradeAvailability(player_id, UPG.ABBASID.UPGRADE_ADD_MILITARY_WING_CASTLE, state)
+		Player_SetUpgradeAvailability(player_id, UPG.ABBASID.UPGRADE_ADD_ECONOMY_WING_CASTLE, state)
+	end
+	if IsCivExact(player_id, "abbasid_ha_01") then
+		Player_SetUpgradeAvailability(player_id, UPG.ABBASID_HA_01.UPGRADE_ADD_CULTURE_WING_CASTLE_A_ABB_HA_01, state)
+		Player_SetUpgradeAvailability(player_id, UPG.ABBASID_HA_01.UPGRADE_ADD_CULTURE_WING_CASTLE_B_ABB_HA_01, state)
+		Player_SetUpgradeAvailability(player_id, UPG.ABBASID_HA_01.UPGRADE_ADD_TRADE_WING_CASTLE_A_ABB_HA_01, state)
+		Player_SetUpgradeAvailability(player_id, UPG.ABBASID_HA_01.UPGRADE_ADD_TRADE_WING_CASTLE_B_ABB_HA_01, state)
+		Player_SetUpgradeAvailability(player_id, UPG.ABBASID_HA_01.UPGRADE_ADD_ECONOMY_WING_CASTLE_A_ABB_HA_01, state)
+		Player_SetUpgradeAvailability(player_id, UPG.ABBASID_HA_01.UPGRADE_ADD_ECONOMY_WING_CASTLE_B_ABB_HA_01, state)
+		Player_SetUpgradeAvailability(player_id, UPG.ABBASID_HA_01.UPGRADE_ADD_MILITARY_WING_CASTLE_A_ABB_HA_01, state)
+		Player_SetUpgradeAvailability(player_id, UPG.ABBASID_HA_01.UPGRADE_ADD_MILITARY_WING_CASTLE_B_ABB_HA_01, state)
+	end
+end
+
+-- Restriction profile table
+Restriction_Profile = {
+
+	-- STARTING: Applied to all players during Mission_SetRestrictions
+	starting = {
+		description = "Mission start: walls removed, keep/siege locked (diff-scaled), age cap (Absurd+)",
+		apply = function(player)
+			-- [1] Disable Stone/Palisade walls (AI path issues) — capability-gated
+			local ebp_stone = TryGetCivilizationEntity(player.raceName, AGS_BP_STONEWALL)
+			if ebp_stone then
+				Player_SetEntityProductionAvailability(player.id, ebp_stone, ITEM_REMOVED)
+			end
+			local ebp_palisade = TryGetCivilizationEntity(player.raceName, AGS_BP_PALISADE)
+			if ebp_palisade then
+				Player_SetEntityProductionAvailability(player.id, ebp_palisade, ITEM_REMOVED)
+			end
+
+			-- [2] Starting upgrades (Default)
+			Player_CompleteUpgrade(player.id, UPG.COMMON.UPGRADE_SCOUT_FORESTER)
+
+			-- [3] Starting upgrades / Difficulty: Intermediate -
+			if DC.player_starting_upgrades_bonus then
+				Player_CompleteUpgrade(player.id, UPG.COMMON.UPGRADE_MELEE_DAMAGE_I)
+				Player_CompleteUpgrade(player.id, UPG.COMMON.UPGRADE_RANGED_ARMOR_I)
+				-- IsCivFamily: applies to parent civ and all DLC variants
+				if IsCivFamily(player.id, "english") then
+					Player_CompleteUpgrade(player.id, UPG.ENGLISH.UPGRADE_UNIT_MANATARMS_2_ENG)
+					Player_CompleteUpgrade(player.id, UPG.ENGLISH.UPGRADE_ARMOR_CLAD_ENG)
+				end
+				if IsCivFamily(player.id, "hre") then
+					Player_CompleteUpgrade(player.id, UPG.HRE.UPGRADE_MAN_AT_ARMS_TWO_HANDED_HRE)
+					Player_CompleteUpgrade(player.id, UPG.HRE.UPGRADE_INSPIRED_INFANTRY_HRE)
+				end
+			end
+
+			-- [4] Disable Ability: Conversion / Difficulty: Hard +
+			if DC.disable_conversion then
+				Player_SetAbilityAvailability(player.id, BP_GetAbilityBlueprint("monk_conversion"), ITEM_REMOVED)
+				if IsCivFamily(player.id, "abbasid") then
+					Player_SetAbilityAvailability(player.id, BP_GetAbilityBlueprint("monk_conversion_faith_abb"), ITEM_REMOVED)
+				end
+			end
+
+			-- [5] Keep Restriction
+			if DC.restrict_keep then
+				local ebp_keep = TryGetCivilizationEntity(player.raceName, AGS_BP_KEEP)
+				if ebp_keep then
+					Player_SetEntityProductionAvailability(player.id, ebp_keep, ITEM_REMOVED)
+				end
+				if IsCivFamily(player.id, "english") then
+					Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_age2_white_tower_eng"), ITEM_REMOVED)
+				end
+			end
+
+			-- [5b] Keep landmark restriction
+			if DC.restrict_keep_landmarks then
+				ApplyLandmarkRestrictions(player.id, LANDMARK_KEEP_RESTRICTIONS, ITEM_REMOVED)
+			end
+
+			-- [6] Siege Restriction
+			if DC.restrict_siege then
+				_ApplySiegeRestrictions(player, ITEM_LOCKED)
+			end
+
+			-- [7] Age 4 Restriction
+			if DC.restrict_age4 then
+				Player_SetMaximumAge(player.id, AGE_CASTLE)
+				ApplyLandmarkRestrictions(player.id, LANDMARK_AGE4_RESTRICTIONS, ITEM_REMOVED)
+				ApplyHouseOfWisdomRestrictions(player.id, ITEM_REMOVED)
+			end
+
+			-- [8] Workshop Restriction
+			if DC.restrict_workshop then
+				local ebp_workshop = TryGetCivilizationEntity(player.raceName, AGS_BP_WORKSHOP)
+				if ebp_workshop then
+					Player_SetEntityProductionAvailability(player.id, ebp_workshop, ITEM_LOCKED)
+				end
+			end
+
+			if DLC_DEBUG then
+				print(string.format("[PROFILE] 'starting' applied to player %s (tier=%s)", tostring(player.id), DC.label))
+			end
+		end
+	},
+}
+
+---ApplyRestrictionProfile: Unified entry point for restriction management.
+-- Idempotent: calling twice with same profile skips re-application.
+function ApplyRestrictionProfile(player, profile_name)
+	local profile = Restriction_Profile[profile_name]
+	if not profile then
+		print(string.format("[ERROR] ApplyRestrictionProfile: Unknown profile '%s'", tostring(profile_name)))
+		return false
+	end
+	if PLAYER_PROFILE_APPLIED[player.id] and PLAYER_PROFILE_APPLIED[player.id][profile_name] then
+		if DLC_DEBUG then
+			print(string.format("[DLC-DBG] ApplyRestrictionProfile: SKIPPED (already applied) player=%s profile=%s", tostring(player.id), profile_name))
+		end
+		return true
+	end
+	profile.apply(player)
+	if not PLAYER_PROFILE_APPLIED[player.id] then
+		PLAYER_PROFILE_APPLIED[player.id] = {}
+	end
+	PLAYER_PROFILE_APPLIED[player.id][profile_name] = true
+	return true
+end
+
+---_Validate_RestrictionCoverage: Startup check that DLC civs have overrides for restriction-relevant keys.
+function _Validate_RestrictionCoverage()
+	local restriction_keys = {AGS_BP_STONEWALL, AGS_BP_PALISADE, AGS_BP_KEEP, AGS_BP_WORKSHOP}
+	for dlc_civ, _ in pairs(DLC_CIV_PARENT_MAP) do
+		local resolved = ResolveCivKey(dlc_civ)
+		if resolved then
+			local base_entry = AGS_ENTITY_TABLE[resolved]
+			for _, key in ipairs(restriction_keys) do
+				local parent_has = base_entry and base_entry[key] ~= nil
+				local dlc_has_override = DLC_CIV_OVERRIDES[dlc_civ] and DLC_CIV_OVERRIDES[dlc_civ][key] ~= nil
+				if parent_has and not dlc_has_override then
+					print(string.format("[DLC-WARN] '%s' inherits '%s' from parent '%s' without override — restriction will target parent blueprint", dlc_civ, key, resolved))
+				end
+			end
+		end
+	end
+end
+
+-- Group types
+Unit_Types = {
+	
+	-- Allied units
+	
+	-- Start / Melee
+	start_player_melee = {
+		{type = "scar_horseman", numSquads = 5},
+		{type = "scar_spearman", numSquads = 15},
+		{type = "scar_scout", numSquads = 3},
+		
+	},
+	start_player_melee_inf = {
+		{type = "scar_manatarms", numSquads = 15},
+		{type = "scar_scout", numSquads = 3},
+		
+	},  
+	start_player_melee_cav = {
+		{type = "scar_knight", numSquads = 5},
+		{type = "scar_horseman", numSquads = 10},
+		{type = "scar_scout", numSquads = 3},
+		
+	},
+	start_player_melee_mal = {
+		{type = "scar_horseman", numSquads = 5},
+		{type = "scar_manatarms", numSquads = 15},
+		{type = "scar_scout", numSquads = 3},
+		
+	},
+	start_player_melee_abb = {
+		{type = "scar_camel_rider", numSquads = 10},
+		{type = "scar_scout", numSquads = 3},
+	},
+	-- Start / Ranged
+	start_player_ranged = {
+		{type = "scar_spearman", numSquads = 5},
+		{type = "scar_archer", numSquads = 15},
+		{type = "scar_scout", numSquads = 3},
+	},
+	start_player_ranged_mon = {
+		{type = "scar_horseman", numSquads = 5},
+		{type = "scar_horsearcher", numSquads = 10},
+		{type = "scar_scout", numSquads = 3},
+	}, 
+	start_player_ranged_rus = {
+		{type = "scar_horsearcher", numSquads = 10},
+		{type = "scar_scout", numSquads = 3},
+	},
+	start_player_ranged_abb = {
+		{type = "scar_camel_rider", numSquads = 5},
+		{type = "scar_camel_archer", numSquads = 10},
+		{type = "scar_scout", numSquads = 3},	
+	},
+	start_player_ranged_mal = {
+		{type = "scar_manatarms", numSquads = 6},
+		{type = "scar_javelin", numSquads = 14},
+		{type = "scar_scout", numSquads = 3},
+	}, 
+	start_player_ranged_chi = {
+		{type = "scar_spearman", numSquads = 8},
+		{type = "scar_repeater_crossbow", numSquads = 7},
+		{type = "scar_scout", numSquads = 3},
+	},
+
+	-- Faction based / Reinforcements
+	units_player_melee_reinforce = {
+		{type = "scar_horseman", numSquads = 5},
+		{type = "scar_spearman", numSquads = 15},
+		
+	}, -- When starting units below 0.3%
+	units_player_melee_reinforce_inf = {
+		{type = "scar_manatarms", numSquads = 4},
+		{type = "scar_spearman", numSquads = 6},
+		
+	}, 
+	units_player_melee_reinforce_cav = {
+		{type = "scar_horseman", numSquads = 7},
+		{type = "scar_knight", numSquads = 3},
+		
+	},
+	units_player_melee_reinforce_mal = {
+		{type = "scar_horseman", numSquads = 3},
+		{type = "scar_manatarms", numSquads = 7},
+		
+	},
+	
+	units_player_ranged_reinforce = {
+		{type = "scar_spearman", numSquads = 10},
+		{type = "scar_archer", numSquads = 10},
+		
+	},
+	units_player_ranged_reinforce_cav = {
+		{type = "scar_horseman", numSquads = 5},
+		{type = "scar_horsearcher", numSquads = 5},
+		
+	}, 
+	units_player_ranged_reinforce_mal = {
+		{type = "scar_manatarms", numSquads = 5},
+		{type = "scar_javelin", numSquads = 5},
+	}, 
+	units_player_ranged_reinforce_chi = {
+		{type = "scar_spearman", numSquads = 6},
+		{type = "scar_repeater_crossbow", numSquads = 4},
+		
+	},
+	units_player_ranged_reinforce_abb = {
+		{type = "scar_camel_archer", numSquads = 5},
+		{type = "scar_camel_rider", numSquads = 3},
+		
+	},
+	
+	-- Villager group
+	units_player_melee = {
+		{type = "scar_villager", numSquads = 10},
+		{type = "scar_spearman", numSquads = 20},
+	},  
+	units_player_ranged = {
+		{type = "scar_villager", numSquads = 10},
+		{type = "scar_archer", numSquads = 10},
+	}, 
+	-- Villager group / Faction based
+	units_player_melee_mal = {
+		{type = "scar_villager", numSquads = 10},
+		{type = "scar_manatarms", numSquads = 20},
+	},
+	units_player_ranged_mal = {
+		{type = "scar_villager", numSquads = 10},
+		{type = "scar_javelin", numSquads = 15},
+	},
+	units_player_ranged_chi = {
+		{type = "scar_villager", numSquads = 10},
+		{type = "scar_repeater_crossbow", numSquads = 10},
+	},
+	
+	-- Hostile units
+	units_camp = {
+		{type = "scar_manatarms", numSquads = 6},
+		{type = "scar_spearman", numSquads = 10},
+		{type = "scar_archer", numSquads = 10},
+	},
+	units_camp_hard = {
+		{type = "scar_manatarms", numSquads = 5},
+		{type = "scar_spearman", numSquads = 5},
+		{type = "scar_landsknecht", numSquads = 10},
+		{type = "scar_archer", numSquads = 10},
+	},
+	units_bridge_hard = {
+		{type = "scar_manatarms", numSquads = 10},
+		{type = "scar_landsknecht", numSquads = 10},
+		{type = "scar_crossbowman", numSquads = 10},
+	},
+	units_patrol = {
+		{type = "scar_manatarms", numSquads = 5},
+		{type = "scar_landsknecht", numSquads = 4},
+		{type = "scar_spearman", numSquads = 11},
+		{type = "scar_archer", numSquads = 5},
+	},
+	units_patrol_hard = {
+		{type = "scar_manatarms", numSquads = 5},
+		{type = "scar_landsknecht", numSquads = 5},
+		{type = "scar_spearman", numSquads = 10},
+		{type = "scar_archer", numSquads = 10},
+	},
+	units_cityguards = {
+		{type = "scar_manatarms", numSquads = 20},
+		{type = "scar_spearman", numSquads = 10},
+		{type = "scar_archer", numSquads = 10},
+	},
+	units_cityguards_hard = {
+		{type = "scar_manatarms", numSquads = 20},
+		{type = "scar_spearman", numSquads = 20},
+		{type = "scar_knight", numSquads = 10},
+		{type = "scar_handcannon", numSquads = 10},
+	},
+	units_cityguards_final = {
+		{type = "scar_manatarms", numSquads = 20},
+		{type = "scar_spearman", numSquads = 10},
+		{type = "scar_knight", numSquads = 10},
+	},
+	units_reinforcement_bridge = {
+		{type = "scar_horseman", numSquads = 10},
+		{type = "scar_spearman", numSquads = 20},
+		{type = "scar_landsknecht", numSquads = 10},
+		{type = "scar_archer", numSquads = 10},
+		{type = "scar_mangonel", numSquads = 2},
+	},
+	-- Blockade
+	units_ranged = {
+		{type = "scar_handcannon", numSquads = 10},
+		{type = "scar_mangonel", numSquads = 1},
+		
+	},
+	units_ranged_final = {
+		{type = "scar_handcannon", numSquads = 20},
+		{type = "scar_mangonel", numSquads = 2},
+		{type = "scar_bombard", numSquads = 1},
+		
+	},
+	
+	-- City Attack groups / HRE
+	wave_city_5m = {
+		{type = "scar_horseman", numSquads = 5},
+		{type = "scar_archer", numSquads = 5},
+		{type = "scar_spearman", numSquads = 10},
+	},
+	wave_city_10m_flank = {
+		{type = "scar_horseman", numSquads = 12},
+		{type = "scar_knight", numSquads = 3},
+	},
+	wave_city_10m = {
+		{type = "scar_horseman", numSquads = 5},
+		{type = "scar_archer", numSquads = 10},
+		{type = "scar_manatarms", numSquads = 10},
+		{type = "scar_spearman", numSquads = 15},
+	},
+	wave_city_15m = {
+		{type = "scar_crossbowman", numSquads = 10},
+		{type = "scar_landsknecht", numSquads = 5},
+		{type = "scar_spearman", numSquads = 20},
+		{type = "scar_manatarms", numSquads = 5},
+		{type = "scar_ram", numSquads = 3},
+		{type = "scar_mangonel", numSquads = 2},
+	},
+	wave_city_20m = {
+		{type = "scar_knight", numSquads = 10},
+		{type = "scar_horseman", numSquads = 20},
+	},
+	wave_city_25m = {
+		{type = "scar_manatarms", numSquads = 20},
+		{type = "scar_landsknecht", numSquads = 10},
+		{type = "scar_spearman", numSquads = 10},
+		{type = "scar_crossbowman", numSquads = 10},
+		{type = "scar_archer", numSquads = 10},
+		{type = "scar_mangonel", numSquads = 2},
+	},
+	wave_city_30m = {
+		{type = "scar_manatarms", numSquads = 20},
+		{type = "scar_knight", numSquads = 10},
+		{type = "scar_landsknecht", numSquads = 10},
+		{type = "scar_handcannon", numSquads = 10},
+		{type = "scar_ram", numSquads = 3},
+		{type = "scar_bombard", numSquads = 1},
+	},
+	wave_city_40m = {
+		{type = "scar_spearman", numSquads = 20},
+		{type = "scar_manatarms", numSquads = 20},
+		{type = "scar_landsknecht", numSquads = 20},
+		{type = "scar_knight", numSquads = 10},
+		{type = "scar_handcannon", numSquads = 10},
+		{type = "scar_ribauldequin", numSquads = 2},
+		{type = "scar_bombard", numSquads = 1},
+	},
+	wave_city_45m = {
+		{type = "scar_horseman", numSquads = 25},
+		{type = "scar_knight", numSquads = 15},
+	},
+	-- Checkpoint waves
+	wave_siege = {
+		{type = "scar_ribauldequin", numSquads = 2},
+		{type = "scar_bombard", numSquads = 1},
+		{type = "scar_manatarms", numSquads = 10},
+		{type = "scar_spearman", numSquads = 20},
+	},
+	wave_no_siege = {
+		{type = "scar_spearman", numSquads = 20},
+		{type = "scar_landsknecht", numSquads = 10},
+	},
+	wave_checkpoint = {
+		{type = "scar_spearman", numSquads = 10},
+		{type = "scar_archer", numSquads = 10},
+		{type = "scar_manatarms", numSquads = 5},
+	},
+	-- Capture Mine
+	wave_light = {
+		{type = "scar_spearman", numSquads = 10},
+		{type = "scar_archer", numSquads = 5},
+		{type = "scar_horseman", numSquads = 5},
+	},
+	
+}
+
+-- Precache age-gated squad blueprints during loading phase (before game world renders).
+-- Uses Scar_AddInit per Rogue campaign pattern: "Precaching resources must be done
+-- before the game loading completes." Called unconditionally for all risky variants
+-- since player civ data is unavailable at this stage.
+-- Covers STARTING and REINFORCEMENT units only (excludes enemy wave compositions).
+local function _PrecacheOnLoading()
+	local targets = {
+		-- DLC-only MAA variants (no _2 tier → red box at Feudal Age start)
+		"unit_manatarms_3_tem",
+		"unit_manatarms_3_mon_ha_gol",
+		"unit_manatarms_3_sul_ha_tug",
+		-- Knights: Age 3 units for all civs (used in start_player_melee_cav, reinforcements)
+		"unit_knight_3_abb",
+		"unit_knight_3_abb_ha_01",
+		"unit_knight_3_chi",
+		"unit_knight_3_chi_ha_01",
+		"unit_knight_3_eng",
+		"unit_knight_3_fre",
+		"unit_knight_3_hre",
+		"unit_knight_3_hre_ha_01",
+		"unit_knight_3_sul",
+		"unit_knight_3_sul_ha_tug",
+		"unit_horseman_3_mal",
+		"unit_knight_3_ott",
+		"unit_knight_3_mon",
+		"unit_knight_3_rus",
+		"unit_knight_3_jpn",
+		"unit_knight_3_jpn_ha_sen",
+		"unit_knight_3_byz",
+		"unit_knight_3_byz_ha_mac",
+		"unit_knight_3_lan",
+		"unit_knight_hospitaller_3_tem",
+		"unit_knight_templar_3_tem",
+		-- Abbasid-family Camel Rider (Age 3 unit used in Age 2 start composition)
+		"unit_camel_rider_3_abb",
+		-- Repeater Crossbow (Chinese family, Age 3 variants)
+		"unit_repeater_crossbowman_3_chi",
+		"unit_repeater_crossbowman_3_chi_ha_01",
+		-- Javelin (Malian, Age 3)
+		"unit_javelin_3_mal",
+		-- Monks: verified _3-tier variants
+		"unit_monk_3_abb",
+		"unit_monk_3_chi",
+		"unit_monk_3_eng",
+		"unit_monk_3_fre",
+		"unit_monk_3_mal",
+		"unit_monk_3_mon",
+		"unit_monk_3_ott",
+		"unit_monk_3_rus",
+		-- Monks: Japanese variants (both religious paths)
+		"unit_monk_buddhist_3_jpn",
+		"unit_monk_shinto_3_jpn",
+		-- Monks: DLC variants with verified _3 tier variants
+		"unit_monk_3_cambulance_abb_ha_01",
+		"unit_monk_3_mon_ha_gol",
+		"unit_monk_ikko_3_jpn_ha_sen",
+		"unit_monk_3_lan",
+		"unit_monk_3_tem",
+		"unit_monk_3_chi_ha_01",
+	}
+	local loaded = 0
+	local skipped = 0
+	for _, attrib in ipairs(targets) do
+		local ok, sbp = pcall(BP_GetSquadBlueprint, attrib)
+		if ok and sbp ~= nil then
+			Scar_PrecachePrematchResource(sbp)
+			loaded = loaded + 1
+		else
+			skipped = skipped + 1
+			print("[PRECACHE][WARN] Woodland: unresolved squad blueprint: " .. tostring(attrib))
+		end
+	end
+	print("[PRECACHE] Woodland: warmed " .. tostring(loaded) .. " age-gated squad blueprints; skipped " .. tostring(skipped) .. ".")
+end
+Scar_AddInit(_PrecacheOnLoading)
+
+-- Marker Compositions
+function Unit_Path_Data()
+	
+	-- Phase 1
+	patrol_mid_1 = {
+		mkr_patrol_mid_1,
+		mkr_patrol_mid_2,
+		mkr_patrol_mid_3,
+		mkr_patrol_mid_4,
+		mkr_patrol_mid_5,
+		mkr_patrol_mid_6, 
+	} -- Village
+	patrol_mid_2 = {
+		mkr_patrol_mid_6,
+		mkr_patrol_mid_5,
+		mkr_patrol_mid_4,
+		mkr_patrol_mid_3,
+		mkr_patrol_mid_2,
+		mkr_patrol_mid_1, 
+	} -- Village
+	patrol_mid_3 = {
+		mkr_patrol_mid_8,
+		mkr_patrol_mid_2,
+		mkr_patrol_mid_1,
+		mkr_patrol_mid_2,
+		mkr_patrol_mid_3,
+		mkr_patrol_mid_4,
+		mkr_patrol_mid_5,
+		mkr_patrol_mid_6,
+		mkr_patrol_mid_7,
+		mkr_patrol_mid_8, 		
+	} -- City > Village
+	patrol_mid_4 = {
+		mkr_patrol_mid_7,
+		mkr_patrol_mid_6,
+		mkr_patrol_mid_5,
+		mkr_patrol_mid_4,
+		mkr_patrol_mid_3,
+		mkr_patrol_mid_2,
+		mkr_patrol_mid_1, 
+		mkr_patrol_mid_2,
+		mkr_patrol_mid_8,
+		mkr_patrol_mid_7,
+	} -- City > Village
+	-- Phase 2
+	wave_1a = {
+		mkr_wave1_1a,
+		mkr_wave1_2,
+		mkr_wave1_3a,
+		mkr_wave1_4a,
+		mkr_wave1_5,
+		mkr_patrol_mid_2,
+		mkr_patrol_mid_1,
+		mkr_patrol_mid_2,
+		mkr_side1_position1,
+		mkr_tc_player1,
+		mkr_tc_player2,
+		mkr_spawn_food_1,
+		mkr_spawn_food_2,
+		mkr_spawn_1,
+		mkr_spawn_gold_1,
+		mkr_spawn_gold_2,
+		mkr_spawn_3,
+		mkr_tc_player3,
+		mkr_tc_player4,
+		mkr_spawn_food_4,
+		mkr_spawn_food_3,
+		mkr_side2_position2,
+		mkr_patrol_mid_5,
+		mkr_patrol_mid_4,
+		mkr_patrol_mid_3,
+		mkr_patrol_mid_2,
+		mkr_patrol_mid_1, 
+		mkr_wave1_1a,
+	} -- Main
+	wave_1b = {
+		mkr_wave1_1b,
+		mkr_wave1_2,
+		mkr_wave1_3b,
+		mkr_wave1_4b,
+		mkr_wave1_5,
+		mkr_patrol_mid_2,
+		mkr_patrol_mid_3,
+		mkr_patrol_mid_4,
+		mkr_patrol_mid_5,
+		mkr_patrol_mid_6,
+		mkr_patrol_mid_5,
+		mkr_side2_position1,
+		mkr_spawn_gold_2,
+		mkr_spawn_gold_1,
+		mkr_tc_player3,
+		mkr_tc_player4,
+		mkr_spawn_1,
+		mkr_tc_player1,
+		mkr_tc_player2,
+		mkr_spawn_food_2,
+		mkr_spawn_food_1,
+		mkr_side1_position2,
+		mkr_patrol_mid_2,
+		mkr_wave1_1b,
+	} -- Flank
+	wave_2a = {
+		mkr_wave2_1,
+		mkr_wave2_2a,
+		mkr_wave2_3a,
+		mkr_wave2_4a,
+		mkr_patrol_mid_6,
+		mkr_patrol_mid_5,
+		mkr_side2_position1,
+		mkr_tc_player3,
+		mkr_tc_player4,
+		mkr_spawn_food_3,
+		mkr_spawn_food_4,
+		mkr_spawn_3,
+		mkr_spawn_gold_2,
+		mkr_spawn_gold_1,
+		mkr_spawn_1,
+		mkr_spawn_food_2,
+		mkr_spawn_food_1,
+		mkr_side1_position2,
+		mkr_tc_player1,
+		mkr_tc_player2,
+		mkr_patrol_mid_2,
+		mkr_patrol_mid_1,
+		mkr_patrol_mid_2,
+		mkr_patrol_mid_3,
+		mkr_patrol_mid_4,
+		mkr_patrol_mid_5,
+		mkr_patrol_mid_6, 
+		mkr_wave2_1,
+	} -- Main
+	wave_2b = {
+		mkr_wave2_1,
+		mkr_wave2_2b,
+		mkr_wave2_3b,
+		mkr_wave2_4b,
+		mkr_patrol_mid_6,
+		mkr_patrol_mid_5,
+		mkr_patrol_mid_4,
+		mkr_patrol_mid_3,
+		mkr_patrol_mid_2,
+		mkr_patrol_mid_1,
+		mkr_patrol_mid_2,
+		mkr_side1_position1,
+		mkr_spawn_gold_1,
+		mkr_spawn_gold_2,
+		mkr_tc_player1,
+		mkr_tc_player2,
+		mkr_spawn_3,
+		mkr_spawn_food_4,
+		mkr_spawn_food_3,
+		mkr_side2_position2,
+		mkr_tc_player3,
+		mkr_tc_player4,
+		mkr_patrol_mid_5,
+		mkr_wave2_1,	
+	} -- Flank
+	-- PHase 3
+	patrol_city_1 = {
+		mkr_city_gate_3,
+		mkr_patrol_mid_8,
+		mkr_patrol_mid_7,
+		mkr_wave2_2b,
+		mkr_patrol_mid_7,
+		mkr_patrol_mid_8,
+		mkr_city_gate_3,
+	}
+	patrol_city_2 = {
+		mkr_wave2_2b,
+		mkr_patrol_mid_7,
+		mkr_patrol_mid_8,
+		mkr_city_gate_3,
+		mkr_patrol_mid_8,
+		mkr_patrol_mid_7,
+		mkr_wave2_2b,
+	}
+	wave_3a = {
+		mkr_city_gate_in1,
+		mkr_wave1_3a,
+		mkr_wave1_4a,
+		mkr_wave1_5,
+		mkr_patrol_mid_2,
+		mkr_patrol_mid_1,
+		mkr_patrol_mid_2,
+		mkr_side1_position1,
+		mkr_spawn_food_1,
+		mkr_spawn_food_2,
+		mkr_spawn_1,
+		mkr_spawn_gold_1,
+		mkr_spawn_gold_2,
+		mkr_spawn_3,
+		mkr_spawn_food_4,
+		mkr_spawn_food_3,
+		mkr_side2_position2,
+		mkr_patrol_mid_5,
+		mkr_patrol_mid_4,
+		mkr_patrol_mid_3,
+		mkr_patrol_mid_2,
+		mkr_patrol_mid_1, 
+		mkr_city_gate_in1,
+	} -- Main
+	wave_3b = {
+		mkr_city_gate_in2,
+		mkr_wave2_3a,
+		mkr_wave2_4a,
+		mkr_patrol_mid_6,
+		mkr_patrol_mid_5,
+		mkr_side2_position1,
+		mkr_spawn_food_3,
+		mkr_spawn_food_4,
+		mkr_spawn_3,
+		mkr_spawn_gold_2,
+		mkr_spawn_gold_1,
+		mkr_spawn_1,
+		mkr_spawn_food_2,
+		mkr_spawn_food_1,
+		mkr_side1_position2,
+		mkr_patrol_mid_2,
+		mkr_patrol_mid_1,
+		mkr_patrol_mid_2,
+		mkr_patrol_mid_3,
+		mkr_patrol_mid_4,
+		mkr_patrol_mid_5,
+		mkr_patrol_mid_6, 
+		mkr_city_gate_in2,
+	} -- Main
+	
+	
+	
+end -- Path needs to be called from this function first
+
+-- AI Difficulty selects upgrades for AI 
+function Difficulty_Phase1_Upgrades()
+	
+	-- Add upgrades to AI
+	if AI_Difficulty == 2 then 
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_UNIT_ARCHER_3)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_MELEE_ARMOR_I)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_MELEE_DAMAGE_I)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_RANGED_DAMAGE_I)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_RANGED_ARMOR_I)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_RANGED_ARMOR_I)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_TECH_UNIVERSITY_MURDER_HOLES_4)
+		
+	elseif AI_Difficulty >= 3 then 
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_UNIT_SPEARMAN_3)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_UNIT_ARCHER_3)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_UNIT_HORSEMAN_3)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_MELEE_ARMOR_II)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_MELEE_DAMAGE_II)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_RANGED_DAMAGE_II)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_RANGED_ARMOR_II)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_RANGED_ARMOR_II)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_TECH_UNIVERSITY_MURDER_HOLES_4)
+		
+	else
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_UNIT_SPEARMAN_2)
+	end 
+												
+end
+														
+-- AI Difficulty selects upgrades for AI 
+function Difficulty_Phase2_Upgrades()
+	
+	if AI_Difficulty == 2 then 
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_MELEE_ARMOR_II)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_MELEE_DAMAGE_II)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_RANGED_DAMAGE_II)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_RANGED_ARMOR_II)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_RANGED_ARMOR_II)
+		-- Faction: HRE
+		Player_CompleteUpgrade(player5, UPG.HRE.UPGRADE_UNIT_MANATARMS_3_HRE)
+		
+	elseif AI_Difficulty >= 3 then	
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_UNIT_SPEARMAN_4)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_UNIT_ARCHER_4)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_UNIT_HORSEMAN_4)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_MELEE_ARMOR_III)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_MELEE_DAMAGE_III)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_RANGED_DAMAGE_III)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_RANGED_ARMOR_III)
+		-- Faction: HRE
+		Player_CompleteUpgrade(player5, UPG.HRE.UPGRADE_UNIT_MANATARMS_3_HRE)
+		Player_CompleteUpgrade(player5, UPG.HRE.UPGRADE_RIVETED_CHAIN_ARMOUR_HRE)
+		Player_CompleteUpgrade(player5, UPG.HRE.UPGRADE_MAN_AT_ARMS_TWO_HANDED_HRE)
+	end
+	
+	-- 10 minute delay
+	Rule_AddOneShot(Difficulty_Phase3_Upgrades, 600)
+	
+end
+
+function Difficulty_Phase3_Upgrades()
+
+	if AI_Difficulty == 2 then				
+		--Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_UNIT_MANATARMS_4)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_MELEE_ARMOR_III)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_MELEE_DAMAGE_III)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_RANGED_DAMAGE_III)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_RANGED_ARMOR_III)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_UNIT_SPEARMAN_4)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_UNIT_ARCHER_4)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_UNIT_HORSEMAN_4)
+		Player_CompleteUpgrade(player5, UPG.HRE.UPGRADE_RIVETED_CHAIN_ARMOUR_HRE)
+		-- Faction: HRE
+		Player_CompleteUpgrade(player5, UPG.HRE.UPGRADE_MAN_AT_ARMS_TWO_HANDED_HRE)
+		
+	elseif AI_Difficulty >= 3 then	
+		-- Unit Upgrades
+		--Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_UNIT_MANATARMS_4)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_UNIT_KNIGHT_4)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_UNIT_CROSSBOWMAN_4)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_TECH_UNIVERSITY_BIOLOGY)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_RANGED_INCENDIARY)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_MANATARMS_ELITE_ARMY_TACTICS)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_SPEARMAN_ELITE_SPEAR_TACTICS)
+		-- Siege Upgrades
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_SIEGE_CHEMISTRY)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_SIEGE_ADJUSTABLE_CROSSBAR)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_SIEGE_WEAPON_SPEED)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_SIEGE_STEEL_BORE)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_SIEGE_WORKS)
+		-- Faction: HRE
+		Player_CompleteUpgrade(player5, UPG.HRE.UPGRADE_UNIT_MANATARMS_4_HRE)
+		Player_CompleteUpgrade(player5, UPG.HRE.UPGRADE_UNIT_LANDSKNECHT_4_HRE)
+		Player_CompleteUpgrade(player5, UPG.HRE.UPGRADE_LANDSKNECHT_CHARGE_DRILLS_HRE)
+		Player_CompleteUpgrade(player5, UPG.HRE.UPGRADE_MAN_AT_ARMS_MACES_HRE)
+		Player_CompleteUpgrade(player5, UPG.HRE.UPGRADE_KNIGHT_BARDING_HRE)
+		
+	elseif AI_Difficulty == 1 then	
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_UNIT_SPEARMAN_3)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_UNIT_ARCHER_3)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_UNIT_HORSEMAN_3)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_MELEE_ARMOR_I)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_MELEE_DAMAGE_I)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_RANGED_DAMAGE_I)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_RANGED_ARMOR_I)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_RANGED_ARMOR_I)
+	end
+end

@@ -1,0 +1,726 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — PlayerUI Diagnostics
+-- Three-phase diagnostic: Init → Data → UI
+-- Console commands:
+--   Debug_PlayerUI()          — Full 4-phase run (init + data + UI + ranking)
+--   Debug_PlayerUI_Data()     — Data-only snapshot (requires init phase passed)
+--   Debug_PlayerUI_UI()       — UI-only test (force show/refresh/hide cycle)
+--   Debug_PlayerUI_Ranking()  — Ranking system diagnostics (rank state, animation, stability)
+--
+-- Requires: cba_debug_core.scar, playerui/*.scar
+---------------------------------------------------------------------------------------------------
+
+local _SUITE = "PlayerUI"
+local _DELAY = 2
+
+---------------------------------------------------------------------------------------------------
+-- Phase 0: Initialization Diagnostics
+---------------------------------------------------------------------------------------------------
+
+function _Debug_PlayerUI_Phase0_Init()
+	_Debug_PhaseHeader(0, "Initialization")
+
+	-- T0.1: PLAYERUI_ENABLED flag
+	_Debug_RunTest("PLAYERUI_ENABLED is defined", function()
+		local val = PLAYERUI_ENABLED
+		return val ~= nil, "PLAYERUI_ENABLED=" .. tostring(val)
+	end)
+
+	-- T0.2: Force-enable if disabled (debug session)
+	if not PLAYERUI_ENABLED then
+		PLAYERUI_ENABLED = true
+		print("  [FIX] PLAYERUI_ENABLED forced to true for debug session")
+	end
+
+	-- T0.3: Call PlayerUI_OnInit if not yet initialized
+	_Debug_RunTest("PlayerUI_OnInit callable", function()
+		local exists = _Debug_FunctionExists("PlayerUI_OnInit")
+		return exists, exists and "function exists" or "MISSING — playerui.scar not loaded"
+	end)
+
+	local needs_init = (_PlayerUI_LocalPlayerId == nil)
+	if needs_init then
+		print("  [AUTO] _PlayerUI_LocalPlayerId is nil — calling PlayerUI_OnInit()")
+		local ok, err = pcall(PlayerUI_OnInit)
+		if not ok then
+			print("  [CRASH] PlayerUI_OnInit error: " .. tostring(err))
+		end
+	end
+
+	-- T0.4: Local player binding
+	_Debug_RunTest("Local player bound", function()
+		local lp = _PlayerUI_LocalPlayerId
+		if lp == nil then
+			return false, "_PlayerUI_LocalPlayerId is nil"
+		end
+		local pid = lp.PlayerID or lp
+		return pid ~= nil and pid > 0, "PlayerID=" .. tostring(pid)
+	end)
+
+	-- T0.5: Game_GetLocalPlayer returns valid player
+	_Debug_RunTest("Game_GetLocalPlayer valid", function()
+		local ok, lp = pcall(Game_GetLocalPlayer)
+		if not ok then
+			return false, "Game_GetLocalPlayer error: " .. tostring(lp)
+		end
+		local pid = lp and lp.PlayerID or nil
+		return pid ~= nil, "PlayerID=" .. tostring(pid)
+	end)
+
+	-- T0.6: All players list (includes AI)
+	_Debug_RunTest("All players detected", function()
+		local hp = _PlayerUI_HumanPlayers
+		if hp == nil then return false, "_PlayerUI_HumanPlayers is nil" end
+		local count = #hp
+		local names = {}
+		for i = 1, count do
+			names[i] = tostring(hp[i].playerName or "?")
+		end
+		return count > 0, count .. " players: " .. table.concat(names, ", ")
+	end)
+
+	-- T0.7: All players list (local + allies + enemies)
+	_Debug_RunTest("All players built", function()
+		local vp = _PlayerUI_AllPlayers
+		if vp == nil then return false, "_PlayerUI_AllPlayers is nil" end
+		local count = #vp
+		local details = {}
+		for i = 1, count do
+			local entry = vp[i]
+			local tag = " [ENEMY]"
+			if entry.isLocalPlayer then tag = " [LOCAL]"
+			elseif entry.isAlly then tag = " [ALLY]" end
+			details[i] = tostring(entry.playerName or "?") .. tag
+		end
+		return count > 0, count .. " players: " .. table.concat(details, ", ")
+	end)
+
+	-- T0.8: PlayerUiRuleSystem initialized
+	_Debug_RunTest("Rule system has player rules", function()
+		local rp = PlayerUiRuleSystem.RulesForPlayer
+		if rp == nil then return false, "RulesForPlayer is nil" end
+		local count = _Debug_CountKeys(rp)
+		return count > 0, count .. " player rule sets registered"
+	end)
+
+	-- T0.9: Rule interval active
+	_Debug_RunTest("_PlayerUI_RingRule scheduled", function()
+		local ok, exists = pcall(Rule_Exists, _PlayerUI_RingRule)
+		if not ok then return false, "Rule_Exists error: " .. tostring(exists) end
+		return exists, exists and "rule is running" or "rule NOT scheduled"
+	end)
+
+	-- T0.10: Initialization modules registered
+	_Debug_RunTest("Initialization modules registered", function()
+		local inits = PlayerUiInitialization.Initializables
+		if inits == nil then return false, "Initializables is nil" end
+		return #inits > 0, #inits .. " modules registered"
+	end)
+
+	-- T0.11: DataContext mappings built
+	_Debug_RunTest("DataContext mappings exist", function()
+		local m = PlayerUIDataContextMappings
+		if m == nil then return false, "PlayerUIDataContextMappings is nil" end
+		local lp = m.LocalPlayer
+		local idx = m.PlayersByIndex
+		return lp ~= nil, "LocalPlayer=" .. tostring(lp ~= nil) .. " Slots=" .. tostring(idx and #idx or 0)
+	end)
+
+	-- T0.12: TeamLeft / TeamRight data context arrays
+	_Debug_RunTest("TeamLeft and TeamRight bound", function()
+		local dc = PlayerUiDataContext
+		if dc == nil then return false, "PlayerUiDataContext is nil" end
+		local tl = dc.teamLeft
+		local tr = dc.teamRight
+		local leftCount = tl and #tl or 0
+		local rightCount = tr and #tr or 0
+		return leftCount > 0, "teamLeft=" .. leftCount .. " teamRight=" .. rightCount
+	end)
+
+	-- T0.13: Team globals are cardinality-consistent
+	_Debug_RunTest("Team split cardinality", function()
+		local all = _PlayerUI_AllPlayers
+		local left = _PlayerUI_TeamLeft
+		local right = _PlayerUI_TeamRight
+		if all == nil then return false, "_PlayerUI_AllPlayers is nil" end
+		if left == nil then return false, "_PlayerUI_TeamLeft is nil" end
+		if right == nil then return false, "_PlayerUI_TeamRight is nil" end
+		local ok = (#all == (#left + #right))
+		return ok, "all=" .. #all .. " left=" .. #left .. " right=" .. #right
+	end)
+
+	-- T0.14: Team split role integrity (left=local+ally, right=enemy)
+	_Debug_RunTest("Team split role integrity", function()
+		local left = _PlayerUI_TeamLeft
+		local right = _PlayerUI_TeamRight
+		if left == nil or right == nil then
+			return false, "team globals missing"
+		end
+
+		local leftLocalCount = 0
+		local leftBad = 0
+		for i = 1, #left do
+			local e = left[i]
+			if e.isLocalPlayer then leftLocalCount = leftLocalCount + 1 end
+			if not (e.isLocalPlayer or e.isAlly) then leftBad = leftBad + 1 end
+		end
+
+		local rightBad = 0
+		for i = 1, #right do
+			local e = right[i]
+			if not e.isEnemy then rightBad = rightBad + 1 end
+		end
+
+		local ok = (leftLocalCount == 1) and (leftBad == 0) and (rightBad == 0)
+		return ok, "leftLocal=" .. leftLocalCount .. " leftBad=" .. leftBad .. " rightBad=" .. rightBad
+	end)
+
+	_Debug_PhaseFooter(0, "Initialization")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase 1: Data Flow Diagnostics
+---------------------------------------------------------------------------------------------------
+
+function _Debug_PlayerUI_Phase1_Data()
+	_Debug_PhaseHeader(1, "Data Flow")
+
+	-- Force a data update tick
+	local update_ok, update_err = pcall(PlayerUI_UpdateDataContext)
+	_Debug_RunTest("PlayerUI_UpdateDataContext runs", function()
+		return update_ok, update_ok and "no error" or tostring(update_err)
+	end)
+
+	-- Check local player data context slot
+	local dc = PlayerUiDataContext
+	_Debug_RunTest("PlayerUiDataContext.localPlayer bound", function()
+		if dc == nil then return false, "PlayerUiDataContext is nil" end
+		if dc.localPlayer == nil then return false, "localPlayer is nil" end
+		return true, "localPlayer table exists"
+	end)
+
+	-- Population text
+	_Debug_RunTest("Population text populated", function()
+		local lp = dc and dc.localPlayer
+		if lp == nil then return false, "no localPlayer" end
+		local pop = lp.populationVsMaximumPopulation
+		return pop ~= nil and pop ~= "", "pop=" .. tostring(pop)
+	end)
+
+	-- Onslaught hides the local resource row, but the backing resource slots still exist.
+	_Debug_RunTest("Local resource row disabled for Onslaught", function()
+		local lp = dc and dc.localPlayer
+		if lp == nil then return false, "no localPlayer" end
+		local r = lp.resources and lp.resources.food
+		if r == nil then return false, "resources.food is nil" end
+		local fieldsOk = r.amount ~= nil and r.AmountFormatted ~= nil and r.workers ~= nil and r.income ~= nil
+		local hidden = lp.showResources == false
+		return hidden and fieldsOk, "showResources=" .. tostring(lp.showResources) .. " amount=" .. tostring(r.amount)
+	end)
+
+	_Debug_RunTest("All 4 resources present", function()
+		local lp = dc and dc.localPlayer
+		if lp == nil then return false, "no localPlayer" end
+		local r = lp.resources
+		if r == nil then return false, "resources is nil" end
+		local keys = {"food", "wood", "gold", "stone"}
+		local missing = {}
+		for _, k in ipairs(keys) do
+			if r[k] == nil then table.insert(missing, k) end
+		end
+		return #missing == 0, #missing == 0 and "all 4 present" or "missing: " .. table.concat(missing, ", ")
+	end)
+
+	-- Age icon
+	_Debug_RunTest("Age icon populated", function()
+		local lp = dc and dc.localPlayer
+		if lp == nil then return false, "no localPlayer" end
+		local icon = lp.ageIcon
+		return icon ~= nil and icon ~= "", "ageIcon=" .. tostring(icon)
+	end)
+
+	-- Worker/military population breakdown
+	_Debug_RunTest("Population composition tracked", function()
+		local lp = dc and dc.localPlayer
+		if lp == nil then return false, "no localPlayer" end
+		return lp.workerPopulation ~= nil, "workers=" .. tostring(lp.workerPopulation) .. " military=" .. tostring(lp.militaryPopulation) .. " siege=" .. tostring(lp.siegePopulation)
+	end)
+
+	-- Players array data context
+	_Debug_RunTest("Players array present", function()
+		local players = dc and dc.players
+		if players == nil then return false, "players is nil" end
+		local count = #players
+		if count == 0 then
+			return false, "0 players in data context"
+		end
+		local first_name = players[1] and players[1].name or "?"
+		return true, count .. " players, first=" .. tostring(first_name)
+	end)
+
+	-- Team split arrays
+	_Debug_RunTest("TeamLeft data bound", function()
+		local tl = dc and dc.teamLeft
+		if tl == nil then return false, "teamLeft is nil" end
+		local count = #tl
+		local first_name = tl[1] and tl[1].name or "?"
+		return count > 0, count .. " allies, first=" .. tostring(first_name)
+	end)
+
+	_Debug_RunTest("TeamRight data bound", function()
+		local tr = dc and dc.teamRight
+		if tr == nil then return false, "teamRight is nil" end
+		local count = #tr
+		return true, count .. " enemies"
+	end)
+
+	-- Enemy cards must remain sanitized in data flags
+	_Debug_RunTest("Enemy cards sanitized by flags", function()
+		local tr = dc and dc.teamRight
+		if tr == nil then return false, "teamRight is nil" end
+		for i = 1, #tr do
+			local p = tr[i]
+			if p.showStats or p.showResources or p.showUnits then
+				return false, "enemy index=" .. i .. " has forbidden flags"
+			end
+		end
+		return true, #tr .. " enemy cards sanitized"
+	end)
+
+	-- Left team cards: local full, allies summary
+	_Debug_RunTest("Left team visibility tiers", function()
+		local tl = dc and dc.teamLeft
+		if tl == nil then return false, "teamLeft is nil" end
+
+		local localOk = 0
+		local allyOk = 0
+		for i = 1, #tl do
+			local p = tl[i]
+			if p.isLocalPlayer then
+				if p.showStats and (not p.showResources) and (not p.showUnits) then
+					localOk = localOk + 1
+				end
+			elseif p.isAlly then
+				if p.showStats and (not p.showResources) and (not p.showUnits) then
+					allyOk = allyOk + 1
+				end
+			end
+		end
+
+		local ok = (localOk == 1) and (allyOk == (#tl - 1))
+		return ok, "localOk=" .. localOk .. " allyOk=" .. allyOk .. " allies=" .. (#tl - 1)
+	end)
+
+	-- Tracking modules responding
+	_Debug_RunTest("GameObjectRepository tracking", function()
+		local ok = PlayerUI_GameObjectRepository ~= nil
+		return ok, ok and "table exists" or "NIL — tracking not loaded"
+	end)
+
+	_Debug_RunTest("PopulationComposition tracking", function()
+		local ok = PlayerUI_PopulationComposition ~= nil
+		return ok, ok and "table exists" or "NIL — tracking not loaded"
+	end)
+
+	_Debug_PhaseFooter(1, "Data Flow")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase 2: UI Rendering Diagnostics
+---------------------------------------------------------------------------------------------------
+
+function _Debug_PlayerUI_Phase2_UI()
+	_Debug_PhaseHeader(2, "UI Rendering")
+
+	-- XAML templates loaded
+	_Debug_RunTest("HUD XAML template loaded", function()
+		return _PlayerUI_HudXaml ~= nil, _PlayerUI_HudXaml ~= nil and "loaded (" .. string.len(_PlayerUI_HudXaml) .. " chars)" or "NIL"
+	end)
+
+	_Debug_RunTest("Toggle button XAML loaded", function()
+		return _PlayerUI_ToggleButtonXaml ~= nil, _PlayerUI_ToggleButtonXaml ~= nil and "loaded" or "NIL"
+	end)
+
+	-- Structural XAML checks for the current Onslaught L/C/R layout
+	_Debug_RunTest("HUD XAML has left/right team content bindings", function()
+		if _PlayerUI_HudXaml == nil then return false, "_PlayerUI_HudXaml is nil" end
+		local hasLeft = string.find(_PlayerUI_HudXaml, "Content=\"{Binding [teamLeft]}\"", 1, true) ~= nil
+		local hasRight = string.find(_PlayerUI_HudXaml, "Content=\"{Binding [teamRight]}\"", 1, true) ~= nil
+		return hasLeft and hasRight, "teamLeft=" .. tostring(hasLeft) .. " teamRight=" .. tostring(hasRight)
+	end)
+
+	_Debug_RunTest("HUD XAML uses adaptive center column", function()
+		if _PlayerUI_HudXaml == nil then return false, "_PlayerUI_HudXaml is nil" end
+		local hasCenterAuto = string.find(_PlayerUI_HudXaml, "<ColumnDefinition Width=\"Auto\" />", 1, true) ~= nil
+		local hasCenterPanel = string.find(_PlayerUI_HudXaml, "ContentTemplate=\"{StaticResource PlayerUiCenterPanel}\"", 1, true) ~= nil
+		return hasCenterAuto and hasCenterPanel, "centerAuto=" .. tostring(hasCenterAuto) .. " centerPanel=" .. tostring(hasCenterPanel)
+	end)
+
+	_Debug_RunTest("HUD XAML avoids flat players row", function()
+		if _PlayerUI_HudXaml == nil then return false, "_PlayerUI_HudXaml is nil" end
+		local flatPlayersBinding = string.find(_PlayerUI_HudXaml, "ItemsSource=\"{Binding %[players%]}\"", 1) ~= nil
+		return not flatPlayersBinding, flatPlayersBinding and "legacy flat players binding found" or "no flat players binding"
+	end)
+
+	-- Toggle function exists
+	_Debug_RunTest("PlayerUI_Toggle function exists", function()
+		return _Debug_FunctionExists("PlayerUI_Toggle"), ""
+	end)
+
+	-- Normalize starting state for deterministic toggle assertions
+	_Debug_RunTest("Normalize HUD to collapsed", function()
+		if _PlayerUI_HudVisible == nil then
+			_PlayerUI_HudVisible = false
+		end
+		if _PlayerUI_HudVisible then
+			-- Bypass throttle so the normalize toggle isn't rejected on first run
+			_PlayerUI_LastToggleTime = -1
+			local ok, err = pcall(PlayerUI_Toggle)
+			if not ok then return false, "Toggle error: " .. tostring(err) end
+		end
+		return _PlayerUI_HudVisible == false, "HudVisible=" .. tostring(_PlayerUI_HudVisible)
+	end)
+
+	-- Show HUD
+	_Debug_RunTest("Show HUD (Toggle to visible)", function()
+		-- Reset throttle so toggle is not rejected (<0.3s since Normalize)
+		_PlayerUI_LastToggleTime = -1
+		local ok, err = pcall(PlayerUI_Toggle)
+		if not ok then return false, "Toggle error: " .. tostring(err) end
+		return _PlayerUI_HudVisible == true, "HudVisible=" .. tostring(_PlayerUI_HudVisible)
+	end)
+
+	-- Force data refresh + rebind (routes through sanitizer)
+	_Debug_RunTest("Force data update + rebind", function()
+		local ok1, err1 = pcall(PlayerUI_UpdateDataContext)
+		if not ok1 then return false, "UpdateDataContext error: " .. tostring(err1) end
+		local ok2, err2 = pcall(PlayerUI_ApplyDataContext)
+		if not ok2 then return false, "ApplyDataContext error: " .. tostring(err2) end
+		return true, "data updated and rebound"
+	end)
+
+	-- Event cue for visual confirmation
+	pcall(UI_CreateEventCue,
+		"[PlayerUI Debug] HUD Visible",
+		"Check: allies LEFT of timer, enemies RIGHT. Unit strip below center.",
+		"high_priority", "",
+		"sfx_ui_event_queue_high_priority_play",
+		8.0)
+
+	-- Hide HUD after brief delay
+	_Debug_RunTest("Hide HUD (Toggle to collapsed)", function()
+		-- Reset throttle so toggle is not rejected (<0.3s since Show test)
+		_PlayerUI_LastToggleTime = -1
+		local ok, err = pcall(PlayerUI_Toggle)
+		if not ok then return false, "Toggle error: " .. tostring(err) end
+		return _PlayerUI_HudVisible == false, "HudVisible=" .. tostring(_PlayerUI_HudVisible)
+	end)
+
+	_Debug_PhaseFooter(2, "UI Rendering")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Finish: Summary
+---------------------------------------------------------------------------------------------------
+
+function _Debug_PlayerUI_Finish()
+	local ok, gt = pcall(World_GetGameTime)
+	local elapsed = ok and gt or 0
+	elapsed = elapsed - (_cba_debug._playerui_start or 0)
+
+	local passed, total = 0, 0
+	for _, r in ipairs(_cba_debug.test_results) do
+		total = total + 1
+		if r.pass then passed = passed + 1 end
+	end
+
+	_Debug_EndMarker(_SUITE, passed, total, elapsed)
+
+	pcall(UI_CreateEventCue,
+		"[PlayerUI Debug] Complete",
+		passed .. "/" .. total .. " passed",
+		"high_priority", "",
+		"sfx_ui_event_queue_high_priority_play",
+		5.0)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Console Command 1: Full 3-phase diagnostic
+---------------------------------------------------------------------------------------------------
+
+function Debug_PlayerUI()
+	_cba_debug.enabled = true
+	_cba_debug.test_results = {}
+	_cba_debug.phase_results = {}
+	local ok, gt = pcall(World_GetGameTime)
+	_cba_debug._playerui_start = ok and gt or 0
+
+	print("")
+	print("[CBA_DEBUG] ===== PLAYERUI DIAGNOSTICS =====")
+	print("[CBA_DEBUG] 4 phases: Init → Data → UI → Ranking")
+	print("")
+
+	_Debug_PlayerUI_Phase0_Init()
+	_Debug_ScheduleNextPhase(_Debug_PlayerUI_Chain1, _DELAY, "Data Flow", _SUITE)
+end
+
+function _Debug_PlayerUI_Chain1()
+	_Debug_PlayerUI_Phase1_Data()
+	_Debug_ScheduleNextPhase(_Debug_PlayerUI_Chain2, _DELAY, "UI Rendering", _SUITE)
+end
+
+function _Debug_PlayerUI_Chain2()
+	_Debug_PlayerUI_Phase2_UI()
+	_Debug_ScheduleNextPhase(_Debug_PlayerUI_Chain3, _DELAY, "Ranking System", _SUITE)
+end
+
+function _Debug_PlayerUI_Chain3()
+	_Debug_PlayerUI_Phase3_Ranking()
+	_Debug_ScheduleNextPhase(_Debug_PlayerUI_Finish, 1, "Summary", _SUITE)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Console Command 2: Data-only snapshot (re-runnable)
+---------------------------------------------------------------------------------------------------
+
+function Debug_PlayerUI_Data()
+	_cba_debug.enabled = true
+	_cba_debug.test_results = {}
+	_cba_debug.phase_results = {}
+	local ok, gt = pcall(World_GetGameTime)
+	_cba_debug._playerui_start = ok and gt or 0
+
+	print("")
+	print("[CBA_DEBUG] ===== PLAYERUI DATA SNAPSHOT =====")
+
+	if _PlayerUI_LocalPlayerId == nil then
+		print("[CBA_DEBUG] [FAIL] Not initialized — run Debug_PlayerUI() first")
+		return
+	end
+
+	_Debug_PlayerUI_Phase1_Data()
+
+	local passed, total = 0, 0
+	for _, r in ipairs(_cba_debug.test_results) do
+		total = total + 1
+		if r.pass then passed = passed + 1 end
+	end
+	_Debug_EndMarker("PlayerUI_Data", passed, total, 0)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Console Command 3: UI-only test (force show/refresh/hide)
+---------------------------------------------------------------------------------------------------
+
+function Debug_PlayerUI_UI()
+	_cba_debug.enabled = true
+	_cba_debug.test_results = {}
+	_cba_debug.phase_results = {}
+	local ok, gt = pcall(World_GetGameTime)
+	_cba_debug._playerui_start = ok and gt or 0
+
+	print("")
+	print("[CBA_DEBUG] ===== PLAYERUI UI TEST =====")
+
+	if _PlayerUI_LocalPlayerId == nil then
+		print("[CBA_DEBUG] [FAIL] Not initialized — run Debug_PlayerUI() first")
+		return
+	end
+
+	_Debug_PlayerUI_Phase2_UI()
+
+	local passed, total = 0, 0
+	for _, r in ipairs(_cba_debug.test_results) do
+		total = total + 1
+		if r.pass then passed = passed + 1 end
+	end
+	_Debug_EndMarker("PlayerUI_UI", passed, total, 0)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase 3: Ranking System Diagnostics
+---------------------------------------------------------------------------------------------------
+
+function _Debug_PlayerUI_Phase3_Ranking()
+	_Debug_PhaseHeader(3, "Ranking System")
+
+	-- T3.1: Ranking state initialized
+	_Debug_RunTest("Ranking state initialized", function()
+		if _PlayerUI_RankState == nil then
+			return false, "_PlayerUI_RankState is nil — PlayerUI_Ranking_Init() not called"
+		end
+		local leftCount = _PlayerUI_RankState.teamLeft and #_PlayerUI_RankState.teamLeft or 0
+		local rightCount = _PlayerUI_RankState.teamRight and #_PlayerUI_RankState.teamRight or 0
+		return leftCount > 0, "teamLeft=" .. leftCount .. " teamRight=" .. rightCount
+	end)
+
+	-- T3.2: Rank entries have valid slot references
+	_Debug_RunTest("Rank entries have slot references", function()
+		if _PlayerUI_RankState == nil then return false, "state nil" end
+		local broken = 0
+		for _, teamKey in ipairs({"teamLeft", "teamRight"}) do
+			local state = _PlayerUI_RankState[teamKey]
+			if state ~= nil then
+				for i = 1, #state do
+					if state[i].slotRef == nil then broken = broken + 1 end
+				end
+			end
+		end
+		return broken == 0, broken == 0 and "all slots valid" or broken .. " broken refs"
+	end)
+
+	-- T3.3: Rank fields present in DataContext slots
+	_Debug_RunTest("Rank fields in DataContext slots", function()
+		local dc = PlayerUiDataContext
+		if dc == nil or dc.teamLeft == nil then return false, "data context missing" end
+		local slot = dc.teamLeft[1]
+		if slot == nil then return false, "no slot at teamLeft[1]" end
+		local fields = {"rankPosition", "rankChangeType", "isContested", "isTopPlayer", "rankTranslateY", "rankScale", "rankHighlightOpacity"}
+		local missing = {}
+		for _, f in ipairs(fields) do
+			if slot[f] == nil then table.insert(missing, f) end
+		end
+		return #missing == 0, #missing == 0 and "all 7 fields present" or "missing: " .. table.concat(missing, ", ")
+	end)
+
+	-- T3.4: Transition lock is not stuck
+	_Debug_RunTest("Transition lock not stuck", function()
+		return not _PlayerUI_RankTransitionLock, "lock=" .. tostring(_PlayerUI_RankTransitionLock)
+	end)
+
+	-- T3.5: Animation position API functional
+	_Debug_RunTest("Position animation API works", function()
+		local testKey = "_debug_test_pos"
+		PlayerUI_Animate_SetPosition(testKey, 34.0)
+		local val = PlayerUI_Animate_GetPosition(testKey)
+		local ok = math.abs(val - 34.0) < 0.01
+		-- Clean up
+		_PlayerUI_AnimPositions[testKey] = nil
+		return ok, "SetPosition(34) → GetPosition=" .. tostring(val)
+	end)
+
+	-- T3.6: Position target marks animation state dirty for the tick rule
+	_Debug_RunTest("Position target activates animation state", function()
+		local testKey = "_debug_test_pos2"
+		local prevDirty = _PlayerUI_AnimPositionsDirty
+		_PlayerUI_AnimPositionsDirty = false
+		PlayerUI_Animate_SetPosition(testKey, 100.0)
+		PlayerUI_Animate_SetPositionTarget(testKey, 0.0)
+		local entry = _PlayerUI_AnimPositions[testKey]
+		local dirty = _PlayerUI_AnimPositionsDirty == true
+		local hasTarget = entry ~= nil and entry.target == 0.0
+		-- Clean up
+		_PlayerUI_AnimPositions[testKey] = nil
+		_PlayerUI_AnimPositionsDirty = prevDirty or dirty
+		return dirty and hasTarget, "dirty=" .. tostring(dirty) .. " target=" .. tostring(entry and entry.target or nil)
+	end)
+
+	-- T3.7: Top player is correctly identified
+	_Debug_RunTest("Top player identified per team", function()
+		if _PlayerUI_RankState == nil then return false, "state nil" end
+		local results = {}
+		local invalid = {}
+		for _, teamKey in ipairs({"teamLeft", "teamRight"}) do
+			local state = _PlayerUI_RankState[teamKey]
+			if state ~= nil and #state > 0 then
+				local topCount = 0
+				local topName = "?"
+				for i = 1, #state do
+					if state[i].isTopPlayer then
+						topCount = topCount + 1
+						topName = tostring(state[i].slotRef and state[i].slotRef.name or "?")
+					end
+				end
+				if topCount ~= 1 then
+					table.insert(invalid, teamKey .. " count=" .. tostring(topCount))
+				end
+				table.insert(results, teamKey .. ": top=" .. topName .. " (count=" .. topCount .. ")")
+			end
+		end
+		local ok = #invalid == 0
+		if ok then
+			return true, table.concat(results, " | ")
+		end
+		return false, table.concat(invalid, ", ") .. " | " .. table.concat(results, " | ")
+	end)
+
+	-- T3.8: Stability constants are sane
+	_Debug_RunTest("Stability constants valid", function()
+		local threshold = _RANKING_STABILITY_THRESHOLD or 0
+		local cooldown = _RANKING_STABILITY_COOLDOWN or 0
+		local rowHeight = _RANKING_ROW_HEIGHT or 0
+		local ok = threshold > 0 and cooldown > 0 and rowHeight > 0
+		return ok, "threshold=" .. threshold .. " cooldown=" .. cooldown .. "s rowH=" .. rowHeight .. "px"
+	end)
+
+	-- T3.9: Force ranking update and check no crash
+	_Debug_RunTest("PlayerUI_Ranking_Update() runs", function()
+		local ok, err = pcall(PlayerUI_Ranking_Update)
+		return ok, ok and "no error" or tostring(err)
+	end)
+
+	-- T3.10: Debug commands callable
+	_Debug_RunTest("Debug commands exist", function()
+		local swap = type(PlayerUI_Ranking_DebugForceSwap) == "function"
+		local state = type(PlayerUI_Ranking_DebugPrintState) == "function"
+		local score = type(PlayerUI_Ranking_DebugSetScore) == "function"
+		local all = swap and state and score
+		return all, "swap=" .. tostring(swap) .. " state=" .. tostring(state) .. " score=" .. tostring(score)
+	end)
+
+	_Debug_PhaseFooter(3, "Ranking System")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Console Command 4: Ranking diagnostics (standalone)
+-- Usage: Debug_PlayerUI_Ranking()
+---------------------------------------------------------------------------------------------------
+
+function Debug_PlayerUI_Ranking()
+	_cba_debug.enabled = true
+	_cba_debug.test_results = {}
+	_cba_debug.phase_results = {}
+	local ok, gt = pcall(World_GetGameTime)
+	_cba_debug._playerui_start = ok and gt or 0
+
+	print("")
+	print("[CBA_DEBUG] ===== PLAYERUI RANKING DIAGNOSTICS =====")
+
+	if _PlayerUI_LocalPlayerId == nil then
+		print("[CBA_DEBUG] [FAIL] Not initialized — run Debug_PlayerUI() first")
+		return
+	end
+
+	_Debug_PlayerUI_Phase3_Ranking()
+
+	local passed, total = 0, 0
+	for _, r in ipairs(_cba_debug.test_results) do
+		total = total + 1
+		if r.pass then passed = passed + 1 end
+	end
+	_Debug_EndMarker("PlayerUI_Ranking", passed, total, 0)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Namespace Registration
+---------------------------------------------------------------------------------------------------
+if debug then
+	debug.playerUI.init    = Debug_PlayerUI
+	debug.playerUI.data    = Debug_PlayerUI_Data
+	debug.playerUI.ui      = Debug_PlayerUI_UI
+	debug.playerUI.ranking = Debug_PlayerUI_Ranking
+
+	--- System master: runs Init/Data/UI/Ranking phases then Animation diagnostics.
+	-- Async — chains via sub-orchestrator (EndMarker: "PlayerUI" → "PlayerUI_Anim").
+	function debug.playerUI.run()
+		_Debug_SubStart("PlayerUI_All")
+		_Debug_SubEnqueue(Debug_PlayerUI, "PlayerUI")
+		_Debug_SubEnqueue(Debug_PlayerUI_Anim, "PlayerUI_Anim")
+		print("")
+		print("[DEBUG] === PlayerUI System Master ===")
+		print("[DEBUG] 2 sub-suites: Init/Data/UI/Ranking → Animation")
+		_Debug_SubLaunch()
+	end
+
+	debug._register("playerui", debug.playerUI.run, "PlayerUI full diagnostic: init + data + UI + ranking + animation", 2)
+end

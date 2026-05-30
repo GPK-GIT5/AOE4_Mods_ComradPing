@@ -1,0 +1,967 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — Q&A Scenario Runner
+-- Simulates game scenarios and uses visual YES/NO confirmation to verify the outcome.
+-- Visual Q&A is used only where the result must be confirmed on screen:
+--   precache (HUD visible), resource delivery, unit spawning, leaver transfer.
+-- Each topic: simulate first, then ask a simple beginner-friendly question.
+--
+-- Branch: onslaught-v3.3
+-- Depends: cba_debug_core.scar, cba_debug_helpers.scar, cba_debug_ui_prompts.scar,
+--          cba_debug_spawn_sequences.scar
+--
+-- Topics:
+--   1. Resource Delivery          5. Siege Limit Enforcement
+--   2. Population Growth          6. Leaver System Transfer
+--   3. Reward Unit Spawn          7. Player Status HUD
+--   4. Building Limit Lock        8. Overall Screen Check
+--
+-- Entry Points:
+--   Debug_QADiagnostic()           — Run all 8 topics
+--   Debug_QADiagnostic_Topic(n)    — Run single topic (1-8)
+--   Debug_QADiagnosticStatus()     — Check progress
+---------------------------------------------------------------------------------------------------
+
+local _QA_SUITE_NAME = "QADiagnostic"
+
+local _qa = {
+	running = false,
+	current_topic = 0,
+	total_topics = 8,
+	results = {},
+	start_time = 0,
+	verdicts = {},
+	_leaver_q1_passed = false,
+}
+
+local _QA_TOPIC_NAMES = {
+	"Resource Delivery",
+	"Population Growth",
+	"Reward Unit Spawn",
+	"Building Limit Lock",
+	"Siege Limit Enforcement",
+	"Leaver System Transfer",
+	"Player Status HUD",
+	"Overall Screen Check",
+}
+
+---------------------------------------------------------------------------------------------------
+-- Topic 1: Resource Delivery
+-- Grants P1 a visible bump of food and gold. Asks if counters updated.
+---------------------------------------------------------------------------------------------------
+
+function _QA_Topic1_ResourceDelivery()
+	print("")
+	print("  ---- Q&A TOPIC 1: Resource Delivery ----")
+
+	if PLAYERS and #PLAYERS > 0 then
+		pcall(function()
+			local ok_f, cur_f = pcall(Player_GetResource, PLAYERS[1].id, RT_Food)
+			Player_SetResource(PLAYERS[1].id, RT_Food, (ok_f and cur_f or 0) + 1500)
+			local ok_g, cur_g = pcall(Player_GetResource, PLAYERS[1].id, RT_Gold)
+			Player_SetResource(PLAYERS[1].id, RT_Gold, (ok_g and cur_g or 0) + 1500)
+		end)
+		print("  [SIM] Added 1500 food and 1500 gold to P1")
+	end
+
+	Rule_AddOneShot(_QA_T1_Ask, 1.0)
+end
+
+function _QA_T1_Ask()
+	Debug_AskYesNo(
+		"P1 was just given extra food and gold. Did the food and gold numbers at the top of the screen go up?",
+		_QA_T1_OnAnswer, 0, 1,
+		"Expected: YES. Resource counters should update immediately when resources are added.")
+end
+
+function _QA_T1_OnAnswer(choice)
+	table.insert(_cba_debug.test_results, {
+		name = "[QA] Resources/counter_updated",
+		pass = (choice == 1),
+		detail = (choice == 1) and "Resource counters updated" or "REVIEW: resource counters may not have updated",
+	})
+	_qa.verdicts[1] = (choice == 1) and "PASS" or "FAIL"
+	if _qa._on_topic_complete then _qa._on_topic_complete() end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Topic 2: Population Growth
+-- Triggers a pop cap increase and asks if the number changed on screen.
+---------------------------------------------------------------------------------------------------
+
+function _QA_Topic2_PopulationGrowth()
+	print("")
+	print("  ---- Q&A TOPIC 2: Population Growth ----")
+
+	if PLAYERS and #PLAYERS > 0 then
+		local ok_cap, cap = pcall(Player_GetCurrentPopulationCap, PLAYERS[1].id, CT_Personnel)
+		print(string.format("  [STATE] P1 pop cap before: %s", ok_cap and tostring(cap) or "?"))
+	end
+
+	if type(AGS_IncreasePopulation) == "function" then
+		pcall(AGS_IncreasePopulation)
+		print("  [SIM] Triggered population cap increase")
+	else
+		print("  [INFO] AGS_IncreasePopulation not available — check counter manually")
+	end
+
+	-- Log tracked caps for all players so cross-civ equality is visible in the log.
+	if _AGS_AutoPop_Caps ~= nil and next(_AGS_AutoPop_Caps) ~= nil then
+		print("  [TRACKED CAPS]")
+		for i, player in ipairs(PLAYERS) do
+			local tracked = _AGS_AutoPop_Caps[player.id]
+			local ok_eff, effective = pcall(Player_GetCurrentPopulationCap, player.id, CT_Personnel)
+			print(string.format("    P%d [%s] tracked=%s effective=%s",
+				i, tostring(player.raceName or "?"),
+				tostring(tracked or "nil"),
+				ok_eff and tostring(effective) or "ERR"))
+		end
+	end
+
+	Rule_AddOneShot(_QA_T2_Ask, 1.5)
+end
+
+function _QA_T2_Ask()
+	Debug_AskYesNo(
+		"The population cap was just bumped up. Did the max population number (right-hand number in the population counter) go up?",
+		_QA_T2_OnAnswer, 0, 1,
+		"Expected: YES. The population cap increases automatically in CBA. If it did not change, the population growth system may not be running.")
+end
+
+function _QA_T2_OnAnswer(choice)
+	table.insert(_cba_debug.test_results, {
+		name = "[QA] Population/cap_increased",
+		pass = (choice == 1),
+		detail = (choice == 1) and "Pop cap increase visible" or "REVIEW: pop cap may not have increased",
+	})
+	_qa.verdicts[2] = (choice == 1) and "PASS" or "FAIL"
+	if _qa._on_topic_complete then _qa._on_topic_complete() end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Topic 3: Reward Unit Spawn
+-- Spawns 5 friendly units near P1 base to simulate a kill reward batch.
+-- Asks if the units appeared on the map.
+---------------------------------------------------------------------------------------------------
+
+function _QA_Topic3_RewardSpawn()
+	print("")
+	print("  ---- Q&A TOPIC 3: Reward Unit Spawn ----")
+
+	if PLAYERS and #PLAYERS > 0 then
+		local player = PLAYERS[1]
+		local pos = _Debug_GetPlayerSpawnAnchor(player)
+		if pos then
+			pcall(function()
+				local sbp = BP_GetSquadBlueprint("unit_spearman_1_eng")
+				if sbp then
+					UnitEntry_DeploySquads(player.id, SGroup_CreateUnique(), {{sbp = sbp, numSquads = 5}}, pos)
+					print("  [SIM] Spawned 5 friendly spearmen near P1 base (simulating reward batch)")
+				end
+			end)
+		else
+			print("  [SKIP] Could not find spawn anchor for P1")
+		end
+	end
+
+	Rule_AddOneShot(_QA_T3_Ask, 1.5)
+end
+
+function _QA_T3_Ask()
+	Debug_AskYesNo(
+		"A reward batch was just simulated for P1. Did around 5 friendly units appear near P1's base?",
+		_QA_T3_OnAnswer, 0, 1,
+		"Expected: YES. The kill reward system spawns units near the player's base. If nothing appeared, the spawn may have failed or the anchor position was not found.")
+end
+
+function _QA_T3_OnAnswer(choice)
+	table.insert(_cba_debug.test_results, {
+		name = "[QA] Rewards/units_spawned",
+		pass = (choice == 1),
+		detail = (choice == 1) and "Reward units visibly spawned" or "REVIEW: reward spawn may have failed",
+	})
+	_qa.verdicts[3] = (choice == 1) and "PASS" or "FAIL"
+	if _qa._on_topic_complete then _qa._on_topic_complete() end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Topic 4: Building Limit Lock
+-- Pushes P1 to the production building limit and applies the threshold.
+-- Asks if the build option is locked in the menu.
+---------------------------------------------------------------------------------------------------
+
+function _QA_Topic4_BuildingLimitLock()
+	print("")
+	print("  ---- Q&A TOPIC 4: Building Limit Lock ----")
+
+	local limit = AGS_GLOBAL_SETTINGS and AGS_GLOBAL_SETTINGS.MaximumProductionBuildings or 0
+	local current = PLAYERS and #PLAYERS > 0 and (PLAYERS[1].obj_buildingLimit_count or 0) or 0
+	print(string.format("  [STATE] P1 production buildings: %d / %d limit", current, limit))
+
+	if PLAYERS and #PLAYERS > 0 and limit > 0 and current < limit then
+		pcall(function()
+			PLAYERS[1].obj_buildingLimit_count = limit
+			if type(CBA_Options_BuildingLimit_ApplyThreshold) == "function" then
+				CBA_Options_BuildingLimit_ApplyThreshold(PLAYERS[1])
+			end
+		end)
+		print(string.format("  [SIM] Set P1 to building limit (%d) and applied threshold", limit))
+	else
+		print("  [STATE] P1 at or past building limit — skipping simulation")
+	end
+
+	Rule_AddOneShot(_QA_T4_Ask, 1.5)
+end
+
+function _QA_T4_Ask()
+	Debug_AskYesNo(
+		"P1 has hit the production building limit. Open the build menu and look for buildings like Barracks or Stables. Is the option to place more of them locked or greyed out?",
+		_QA_T4_OnAnswer, 0, 1,
+		"Expected: YES. The game should block more production buildings once the limit is hit. If not locked, limit enforcement may not be working.")
+end
+
+function _QA_T4_OnAnswer(choice)
+	table.insert(_cba_debug.test_results, {
+		name = "[QA] BuildLimit/ui_locked",
+		pass = (choice == 1),
+		detail = (choice == 1) and "Building limit lock visible in UI" or "REVIEW: building limit may not be enforced in UI",
+	})
+	_qa.verdicts[4] = (choice == 1) and "PASS" or "FAIL"
+	if _qa._on_topic_complete then _qa._on_topic_complete() end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Topic 5: Siege Limit Enforcement
+-- Spawns a mangonel for P1 and recounts. Asks if siege training is locked.
+---------------------------------------------------------------------------------------------------
+
+function _QA_Topic5_SiegeLimitEnforcement()
+	print("")
+	print("  ---- Q&A TOPIC 5: Siege Limit Enforcement ----")
+
+	local siege_limit = _buildingLimit and _buildingLimit.siege_limit or 0
+	local current = PLAYERS and #PLAYERS > 0 and (PLAYERS[1].siegeLimit_count or 0) or 0
+	print(string.format("  [STATE] P1 siege points: %d / %d limit", current, siege_limit))
+
+	if PLAYERS and #PLAYERS > 0 and siege_limit > 0 and current < siege_limit then
+		local player = PLAYERS[1]
+		local pos = _Debug_GetPlayerSpawnAnchor(player)
+		if pos then
+			pcall(function()
+				local sbp = BP_GetSquadBlueprint("unit_mangonel_3_eng")
+				if sbp then
+					UnitEntry_DeploySquads(player.id, SGroup_CreateUnique(), {{sbp = sbp, numSquads = 1}}, pos)
+					print("  [SIM] Spawned 1 mangonel for P1 (3 siege points)")
+				end
+			end)
+			if type(CBA_Options_SiegeLimit_Recount) == "function" then
+				pcall(CBA_Options_SiegeLimit_Recount, player)
+			end
+			if type(CBA_Options_SiegeLimit_ApplyThreshold) == "function" then
+				pcall(CBA_Options_SiegeLimit_ApplyThreshold, player)
+			end
+		end
+	else
+		print("  [STATE] P1 at or past siege limit — skipping spawn")
+	end
+
+	Rule_AddOneShot(_QA_T5_Ask, 2.0)
+end
+
+function _QA_T5_Ask()
+	Debug_AskYesNo(
+		"P1's siege point total is at or near the limit. Look at a production building that trains siege units. Is siege training locked or unavailable?",
+		_QA_T5_OnAnswer, 0, 1,
+		"Expected: YES. When the siege limit is hit, training more siege units should be blocked in the UI.")
+end
+
+function _QA_T5_OnAnswer(choice)
+	table.insert(_cba_debug.test_results, {
+		name = "[QA] SiegeLimit/training_locked",
+		pass = (choice == 1),
+		detail = (choice == 1) and "Siege limit enforced in UI" or "REVIEW: siege limit enforcement may not be visible",
+	})
+	_qa.verdicts[5] = (choice == 1) and "PASS" or "FAIL"
+	if _qa._on_topic_complete then _qa._on_topic_complete() end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Topic 6: Leaver System Transfer
+-- Transfers P2's resources to P1 (partial leaver simulation).
+-- Q1: did resources transfer visibly? Q2: are P2's units still on the map?
+---------------------------------------------------------------------------------------------------
+
+function _QA_Topic6_LeaverTransfer()
+	print("")
+	print("  ---- Q&A TOPIC 6: Leaver System Transfer ----")
+
+	if not (PLAYERS and #PLAYERS >= 2) then
+		print("  [SKIP] Need at least 2 players for leaver simulation")
+		_qa.verdicts[6] = "SKIP"
+		if _qa._on_topic_complete then _qa._on_topic_complete() end
+		return
+	end
+
+	local p1 = PLAYERS[1]
+	local p2 = PLAYERS[2]
+	_qa._leaver_q1_passed = false
+
+	pcall(function()
+		local ok_f, food = pcall(Player_GetResource, p2.id, RT_Food)
+		local ok_g, gold = pcall(Player_GetResource, p2.id, RT_Gold)
+		if ok_f and food > 0 then
+			local ok_c, cur = pcall(Player_GetResource, p1.id, RT_Food)
+			Player_SetResource(p1.id, RT_Food, (ok_c and cur or 0) + math.floor(food))
+			Player_SetResource(p2.id, RT_Food, 0)
+			print(string.format("  [SIM] Transferred %.0f food from P2 to P1", food))
+		end
+		if ok_g and gold > 0 then
+			local ok_c, cur = pcall(Player_GetResource, p1.id, RT_Gold)
+			Player_SetResource(p1.id, RT_Gold, (ok_c and cur or 0) + math.floor(gold))
+			Player_SetResource(p2.id, RT_Gold, 0)
+			print(string.format("  [SIM] Transferred %.0f gold from P2 to P1", gold))
+		end
+	end)
+
+	Rule_AddOneShot(_QA_T6_AskQ1, 1.0)
+end
+
+function _QA_T6_AskQ1()
+	Debug_AskYesNo(
+		"P2's resources were just moved to P1. Did P1's food and gold numbers go up?",
+		_QA_T6_OnQ1, 0, 1,
+		"Expected: YES. When a player leaves, their resources transfer to teammates. P1's counters should visibly increase.")
+end
+
+function _QA_T6_OnQ1(choice)
+	table.insert(_cba_debug.test_results, {
+		name = "[QA] Leaver/resources_transferred",
+		pass = (choice == 1),
+		detail = (choice == 1) and "Resource transfer visible" or "REVIEW: resource transfer may not have updated UI",
+	})
+	_qa._leaver_q1_passed = (choice == 1)
+	Rule_AddOneShot(_QA_T6_AskQ2, 1.0)
+end
+
+function _QA_T6_AskQ2()
+	Debug_AskYesNo(
+		"Look at the map around P2's area. Can you still see P2's units moving around or fighting? (They should stay active after a player leaves.)",
+		_QA_T6_OnQ2, 0, 1,
+		"Expected: YES. When a player leaves in CBA, their units stay on the map and keep fighting. They should not disappear.")
+end
+
+function _QA_T6_OnQ2(choice)
+	table.insert(_cba_debug.test_results, {
+		name = "[QA] Leaver/units_remain",
+		pass = (choice == 1),
+		detail = (choice == 1) and "Leaver units still active" or "REVIEW: leaver units may have been removed",
+	})
+	_qa.verdicts[6] = (_qa._leaver_q1_passed and choice == 1) and "PASS" or "FAIL"
+	if _qa._on_topic_complete then _qa._on_topic_complete() end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Topic 7: Player Status HUD
+-- No simulation needed. Asks if the player list shows active vs eliminated correctly.
+---------------------------------------------------------------------------------------------------
+
+function _QA_Topic7_PlayerStatusHUD()
+	print("")
+	print("  ---- Q&A TOPIC 7: Player Status HUD ----")
+
+	local active = 0
+	local eliminated = 0
+	if PLAYERS then
+		for _, player in ipairs(PLAYERS) do
+			local ok, is_elim = pcall(Core_IsPlayerEliminated, player.id)
+			if ok and is_elim then eliminated = eliminated + 1 else active = active + 1 end
+		end
+	end
+	print(string.format("  [STATE] Active: %d  Eliminated: %d", active, eliminated))
+
+	Debug_AskYesNo(
+		string.format("There are %d active player(s) and %d eliminated. Look at the player list or scoreboard in the HUD. Can you clearly see which players are still in the game?", active, eliminated),
+		_QA_T7_OnAnswer, 0, 1,
+		"Expected: YES. The HUD should clearly distinguish active players from eliminated ones.")
+end
+
+function _QA_T7_OnAnswer(choice)
+	table.insert(_cba_debug.test_results, {
+		name = "[QA] HUD/player_status_visible",
+		pass = (choice == 1),
+		detail = (choice == 1) and "Player status HUD working" or "REVIEW: player status display may have issues",
+	})
+	_qa.verdicts[7] = (choice == 1) and "PASS" or "FAIL"
+	if _qa._on_topic_complete then _qa._on_topic_complete() end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Topic 8: Overall Screen Check
+-- Final visual sanity check. Asks if the game screen looks correct overall.
+---------------------------------------------------------------------------------------------------
+
+function _QA_Topic8_OverallScreenCheck()
+	print("")
+	print("  ---- Q&A TOPIC 8: Overall Screen Check ----")
+
+	local ok_gt, gt = pcall(World_GetGameTime)
+	print(string.format("  [STATE] Game time: %s", ok_gt and string.format("%.0fs", gt) or "?"))
+	if PLAYERS then
+		for i, player in ipairs(PLAYERS) do
+			local ok_a, age = pcall(Player_GetCurrentAge, player.id)
+			local ok_f, food = pcall(Player_GetResource, player.id, RT_Food)
+			print(string.format("    P%d: Age=%s Food=%s", i,
+				ok_a and tostring(age) or "?",
+				ok_f and tostring(math.floor(food)) or "?"))
+		end
+	end
+
+	Debug_AskYesNo(
+		"Take a look at the whole screen. Does the game look normal? (Resource bars visible, units on the map, no missing UI panels, no obvious error messages.)",
+		_QA_T8_OnAnswer, 0, 1,
+		"Expected: YES. If anything looks off — missing panels, invisible units, wrong values — answer NO to flag it for investigation.")
+end
+
+function _QA_T8_OnAnswer(choice)
+	table.insert(_cba_debug.test_results, {
+		name = "[QA] Overall/screen_ok",
+		pass = (choice == 1),
+		detail = (choice == 1) and "Overall screen looks correct" or "REVIEW: something may be wrong with the display",
+	})
+	_qa.verdicts[8] = (choice == 1) and "PASS" or "FAIL"
+	if _qa._on_topic_complete then _qa._on_topic_complete() end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Topic Dispatch
+---------------------------------------------------------------------------------------------------
+
+local _QA_TOPIC_DISPATCH = {
+	[1] = _QA_Topic1_ResourceDelivery,
+	[2] = _QA_Topic2_PopulationGrowth,
+	[3] = _QA_Topic3_RewardSpawn,
+	[4] = _QA_Topic4_BuildingLimitLock,
+	[5] = _QA_Topic5_SiegeLimitEnforcement,
+	[6] = _QA_Topic6_LeaverTransfer,
+	[7] = _QA_Topic7_PlayerStatusHUD,
+	[8] = _QA_Topic8_OverallScreenCheck,
+}
+
+---------------------------------------------------------------------------------------------------
+-- Single Topic Runner
+---------------------------------------------------------------------------------------------------
+
+function Debug_QADiagnostic_Topic(n)
+	_cba_debug.enabled = true
+	n = n or 1
+
+	if n < 1 or n > _qa.total_topics then
+		print(string.format("[QA] Invalid topic %d (valid: 1-%d)", n, _qa.total_topics))
+		return
+	end
+
+	print("")
+	print("================================================================")
+	print(string.format("  Q&A SCENARIO RUNNER — Topic %d: %s", n, _QA_TOPIC_NAMES[n]))
+	print("================================================================")
+
+	local fn = _QA_TOPIC_DISPATCH[n]
+	if fn then fn() end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Full Diagnostic Runner
+---------------------------------------------------------------------------------------------------
+
+function Debug_QADiagnostic()
+	_cba_debug.enabled = true
+
+	local ok, gt = pcall(World_GetGameTime)
+	_qa.running = true
+	_qa.current_topic = 0
+	_qa.results = {}
+	_qa.verdicts = {}
+	_qa.start_time = ok and gt or 0
+
+	print("")
+	print("================================================================")
+	print("  CBA DEBUG — Q&A SCENARIO RUNNER (8 topics)")
+	print("  Simulates scenarios then asks visual confirmation questions")
+	print("  All prompts: YES/NO only, no auto-answer timer")
+	print("================================================================")
+
+	_QA_RunNextTopic()
+end
+
+function _QA_RunNextTopic()
+	if not _qa.running then return end
+
+	_qa.current_topic = _qa.current_topic + 1
+	local t = _qa.current_topic
+
+	if t > _qa.total_topics then
+		_QA_FinalReport()
+		return
+	end
+
+	print(string.format("\n[QA] >>> Topic %d / %d: %s", t, _qa.total_topics, _QA_TOPIC_NAMES[t]))
+
+	_qa._on_topic_complete = _QA_OnTopicComplete
+
+	local fn = _QA_TOPIC_DISPATCH[t]
+	if fn then
+		fn()
+	else
+		print("  [SKIP] No handler for topic " .. t)
+		_QA_OnTopicComplete()
+	end
+end
+
+function _QA_OnTopicComplete()
+	_qa._on_topic_complete = nil
+
+	if _cba_debug_prompts and _cba_debug_prompts.active then
+		Rule_AddInterval(_QA_WaitForPrompt, 1.0)
+	else
+		_Debug_ScheduleNextPhase(_QA_RunNextTopic, 2,
+			_QA_TOPIC_NAMES[_qa.current_topic + 1] or "FinalReport", _QA_SUITE_NAME)
+	end
+end
+
+function _QA_WaitForPrompt()
+	if _cba_debug_prompts and _cba_debug_prompts.active then
+		return
+	end
+	Rule_RemoveMe()
+	_Debug_ScheduleNextPhase(_QA_RunNextTopic, 2,
+		_QA_TOPIC_NAMES[_qa.current_topic + 1] or "FinalReport", _QA_SUITE_NAME)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Final Report
+---------------------------------------------------------------------------------------------------
+
+function _QA_FinalReport()
+	_qa.running = false
+
+	local ok, gt = pcall(World_GetGameTime)
+	local elapsed = (ok and _qa.start_time) and (gt - _qa.start_time) or 0
+
+	local total_passed = 0
+	local total_tests = 0
+	for _, r in ipairs(_cba_debug.test_results) do
+		local name = r.name or ""
+		if string.find(name, "^%[QA%]") then
+			total_tests = total_tests + 1
+			if r.pass then total_passed = total_passed + 1 end
+		end
+	end
+
+	print("")
+	print("================================================================")
+	print("  Q&A SCENARIO RUNNER — ALL 8 TOPICS COMPLETE")
+	print(string.format("  Elapsed: %.1fs", elapsed))
+	print("================================================================")
+
+	local pass_count = 0
+	for t = 1, _qa.total_topics do
+		local v = _qa.verdicts[t] or "N/A"
+		local mark = (v == "PASS") and "PASS" or (v == "SKIP") and "SKIP" or "FAIL"
+		if v == "PASS" then pass_count = pass_count + 1 end
+		print(string.format("    [%s] Topic %d: %s", mark, t, _QA_TOPIC_NAMES[t]))
+	end
+
+	print(string.format("  -------- RESULT: %d / %d topics passed --------", pass_count, _qa.total_topics))
+
+	_Debug_EndMarker(_QA_SUITE_NAME, total_passed, total_tests, elapsed)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Status
+---------------------------------------------------------------------------------------------------
+
+function Debug_QADiagnosticStatus()
+	if not _qa.running then
+		print("[QA] Not running.")
+		return
+	end
+	local ok, gt = pcall(World_GetGameTime)
+	local elapsed = ok and (gt - _qa.start_time) or 0
+	print(string.format("[QA] Topic %d/%d (%s) elapsed=%.1fs",
+		_qa.current_topic, _qa.total_topics,
+		_QA_TOPIC_NAMES[_qa.current_topic] or "?", elapsed))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Transfer Scenario QA Runner (Surrender / Elimination / Disconnect)
+-- Requested flow:
+--   1) Auto-age all players
+--   2) Spawn relevant units/buildings
+--   3) Camera snap to target before each prompt
+--   4) Validate precache with YES/NO before each scenario prompt
+--   5) Run surrender, elimination, and disconnect scenarios in sequence
+---------------------------------------------------------------------------------------------------
+
+local _qa_transfer = {
+	running = false,
+	target_surrender = nil,
+	target_elimination = nil,
+	target_disconnect = nil,
+	pending_next_fn = nil,
+	setup_done = false,
+	start_time = 0,
+}
+
+local _QA_TRANSFER_PRECACHE_KEYS = {
+	"barracks", "archery_range", "stable", "siege_workshop", "blacksmith",
+	"house", "town_center", "market", "university", "arsenal",
+	"monastery", "castle", "stone_wall", "palisade_wall", "palisade_gate", "scar_dock",
+}
+
+function _QA_Transfer_Record(name, pass, detail)
+	if _cba_debug and _cba_debug.test_results then
+		table.insert(_cba_debug.test_results, {
+			name = "[QA_TRANSFER] " .. (name or "unnamed"),
+			pass = pass == true,
+			detail = detail or "",
+		})
+	end
+end
+
+function _QA_Transfer_ComputePrecache()
+	if AGS_ENTITY_TABLE == nil then
+		return 0, 0, {"AGS_ENTITY_TABLE=nil"}
+	end
+
+	local resolved = 0
+	local total = 0
+	local failed = {}
+
+	for civ_name, civ_data in pairs(AGS_ENTITY_TABLE) do
+		if civ_name ~= "neutral" then
+			for _, key in ipairs(_QA_TRANSFER_PRECACHE_KEYS) do
+				local bp_name = civ_data[key]
+				if bp_name ~= nil and bp_name ~= false then
+					total = total + 1
+					local ok, ebp = pcall(BP_GetEntityBlueprint, bp_name)
+					if ok and ebp ~= nil then
+						resolved = resolved + 1
+					else
+						table.insert(failed, string.format("%s/%s", civ_name, key))
+					end
+				end
+			end
+		end
+	end
+
+	return resolved, total, failed
+end
+
+function _QA_Transfer_FindAliveCandidate(excluded)
+	excluded = excluded or {}
+	for i, player in ipairs(PLAYERS or {}) do
+		local is_excluded = excluded[i] == true
+		local is_alive = false
+		if not is_excluded and player ~= nil then
+			local ok_elim, is_elim = pcall(Core_IsPlayerEliminated, player.id)
+			is_alive = ok_elim and (not is_elim)
+		end
+		if is_alive then
+			return i
+		end
+	end
+	return nil
+end
+
+function _QA_Transfer_AutoAgeAllPlayers()
+	for i, player in ipairs(PLAYERS or {}) do
+		if player ~= nil then
+			pcall(CBA_AutoAge_SetMaximumAge, player.id, AGE_IMPERIAL)
+			pcall(Player_SetCurrentAge, player.id, AGE_IMPERIAL)
+		end
+	end
+	print("  [SETUP] Auto-aged all players to Imperial")
+	_QA_Transfer_Record("setup_auto_age", true, "All players set to AGE_IMPERIAL")
+end
+
+function _QA_Transfer_SpawnRelevantForPlayer(player_idx)
+	local player = PLAYERS and PLAYERS[player_idx]
+	if player == nil then return end
+
+	local pos = _Debug_GetPlayerSpawnAnchor(player)
+	if pos == nil then
+		print(string.format("  [SETUP] P%d has no spawn anchor", player_idx))
+		return
+	end
+
+	local civ = Player_GetRaceName(player.id)
+	local prefix = AGS_CIV_PREFIXES and AGS_CIV_PREFIXES[civ]
+	local suffix = nil
+	if prefix ~= nil then
+		suffix = string.sub(prefix, 1, -2)
+	end
+
+	-- Relevant units for transfer/conversion checks.
+	local unit_patterns = {
+		"unit_spearman_1_%s",
+		"unit_archer_2_%s",
+		"unit_horseman_2_%s",
+		"unit_mangonel_3_%s",
+	}
+
+	if suffix ~= nil then
+		for _, fmt in ipairs(unit_patterns) do
+			local sbp_name = string.format(fmt, suffix)
+			local ok_sbp, sbp = pcall(BP_GetSquadBlueprint, sbp_name)
+			if ok_sbp and sbp ~= nil then
+				pcall(function()
+					local sg = SGroup_CreateUnique()
+					UnitEntry_DeploySquads(player.id, sg, {{sbp = sbp, numSquads = 1}}, pos)
+				end)
+			end
+		end
+	end
+
+	-- Relevant buildings including walls/gates.
+	local building_keys = {
+		"barracks", "archery_range", "stable", "siege_workshop",
+		"stone_wall", "palisade_wall", "palisade_gate",
+	}
+
+	local bx = 0
+	for _, key in ipairs(building_keys) do
+		local ok_bp, ebp = pcall(AGS_GetCivilizationEntity, civ, key)
+		if ok_bp and ebp ~= nil then
+			local spawn_pos = World_Pos(pos.x + 10 + bx, pos.y, pos.z + 10)
+			local facing = World_Pos(spawn_pos.x + 4, spawn_pos.y, spawn_pos.z)
+			local ok_create, ent = pcall(Entity_CreateFacing, ebp, player.id, spawn_pos, facing, true)
+			if ok_create and ent ~= nil then
+				pcall(Entity_Spawn, ent)
+				pcall(Entity_ForceConstruct, ent)
+			end
+			bx = bx + 6
+		end
+	end
+
+	print(string.format("  [SETUP] Spawned relevant units/buildings for P%d (%s)", player_idx, civ))
+end
+
+function _QA_Transfer_PrepareSetup()
+	if _qa_transfer.setup_done then return end
+	_QA_Transfer_AutoAgeAllPlayers()
+	for i, _ in ipairs(PLAYERS or {}) do
+		_QA_Transfer_SpawnRelevantForPlayer(i)
+	end
+	_qa_transfer.setup_done = true
+	_QA_Transfer_Record("setup_spawn_relevant", true, "Spawned relevant units/buildings for alive players")
+end
+
+function _QA_Transfer_AskPrecacheYesNo(player_idx, scenario_label, next_fn_name)
+	local resolved, total, failed = _QA_Transfer_ComputePrecache()
+	local fail_count = #failed
+	local detail = string.format("Precache resolved %d/%d, failed=%d. Continue %s scenario?", resolved, total, fail_count, scenario_label)
+
+	_qa_transfer.pending_next_fn = next_fn_name
+
+	pcall(Debug_FocusPlayer, player_idx)
+	Debug_AskYesNo(
+		string.format("%s: Precache status check for target P%d. Is this acceptable?", scenario_label, player_idx),
+		_QA_Transfer_OnPrecacheAnswer,
+		0,
+		1,
+		detail
+	)
+end
+
+function _QA_Transfer_OnPrecacheAnswer(choice)
+	local pass = (choice == 1)
+	_QA_Transfer_Record("precache_yesno", pass, pass and "User accepted precache status" or "User rejected precache status")
+
+	local next_name = _qa_transfer.pending_next_fn
+	_qa_transfer.pending_next_fn = nil
+	if next_name ~= nil and _G[next_name] ~= nil then
+		_G[next_name]()
+	else
+		print("[QA_TRANSFER] Missing next function after precache prompt")
+		_QA_Transfer_Finalize()
+	end
+end
+
+function Debug_QADiagnostic_TransferScenarios(surrender_idx, elimination_idx, disconnect_idx)
+	_cba_debug.enabled = true
+
+	local excluded = {}
+	local s = surrender_idx or _QA_Transfer_FindAliveCandidate(excluded)
+	if s ~= nil then excluded[s] = true end
+	local e = elimination_idx or _QA_Transfer_FindAliveCandidate(excluded)
+	if e ~= nil then excluded[e] = true end
+	local d = disconnect_idx or _QA_Transfer_FindAliveCandidate(excluded)
+
+	if s == nil or e == nil or d == nil then
+		print("[QA_TRANSFER] Need at least 3 alive players (or provide explicit indices)")
+		return
+	end
+
+	_qa_transfer.running = true
+	_qa_transfer.target_surrender = s
+	_qa_transfer.target_elimination = e
+	_qa_transfer.target_disconnect = d
+	_qa_transfer.pending_next_fn = nil
+	_qa_transfer.setup_done = false
+
+	local ok, gt = pcall(World_GetGameTime)
+	_qa_transfer.start_time = ok and gt or 0
+
+	print("")
+	print("================================================================")
+	print("  CBA DEBUG — QA TRANSFER SCENARIOS")
+	print("  Sequence: setup -> surrender -> elimination -> disconnect")
+	print("  Each scenario: camera snap -> YES/NO precache -> scenario prompt")
+	print("================================================================")
+	print(string.format("  Targets: surrender=P%d elimination=P%d disconnect=P%d", s, e, d))
+
+	_QA_Transfer_PrepareSetup()
+	_Debug_ScheduleNextPhase(_QA_Transfer_RunSurrenderPrecheck, 1.5, "Surrender", "QATransfer")
+end
+
+function _QA_Transfer_RunSurrenderPrecheck()
+	if not _qa_transfer.running then return end
+	_QA_Transfer_AskPrecacheYesNo(_qa_transfer.target_surrender, "Surrender", "_QA_Transfer_DoSurrender")
+end
+
+function _QA_Transfer_DoSurrender()
+	if not _qa_transfer.running then return end
+	local idx = _qa_transfer.target_surrender
+	pcall(Debug_FocusPlayer, idx)
+	if type(Debug_ForceSurrender) == "function" then
+		pcall(Debug_ForceSurrender, idx)
+	else
+		local p = PLAYERS and PLAYERS[idx]
+		if p ~= nil then pcall(Core_SetPlayerDefeated, p.id, Annihilation_LoserPresentation, WR_SURRENDER) end
+	end
+	_Debug_ScheduleNextPhase(_QA_Transfer_PromptSurrenderOutcome, 2.0, "SurrenderPrompt", "QATransfer")
+end
+
+function _QA_Transfer_PromptSurrenderOutcome()
+	if not _qa_transfer.running then return end
+	local idx = _qa_transfer.target_surrender
+	pcall(Debug_FocusPlayer, idx)
+	Debug_AskYesNo(
+		string.format("Surrender scenario: did P%d surrender and transfer behavior look correct?", idx),
+		_QA_Transfer_OnSurrenderOutcome,
+		0,
+		1,
+		"YES if assets transfer/cleanup looked correct; NO if behavior looked wrong."
+	)
+end
+
+function _QA_Transfer_OnSurrenderOutcome(choice)
+	_QA_Transfer_Record("surrender_outcome", choice == 1, (choice == 1) and "Confirmed" or "Rejected")
+	_Debug_ScheduleNextPhase(_QA_Transfer_RunEliminationPrecheck, 1.0, "Elimination", "QATransfer")
+end
+
+function _QA_Transfer_RunEliminationPrecheck()
+	if not _qa_transfer.running then return end
+	_QA_Transfer_AskPrecacheYesNo(_qa_transfer.target_elimination, "Elimination", "_QA_Transfer_DoElimination")
+end
+
+function _QA_Transfer_DoElimination()
+	if not _qa_transfer.running then return end
+	local idx = _qa_transfer.target_elimination
+	pcall(Debug_FocusPlayer, idx)
+	if type(Debug_ForceEliminatePlayer) == "function" then
+		pcall(Debug_ForceEliminatePlayer, idx)
+	else
+		local p = PLAYERS and PLAYERS[idx]
+		if p ~= nil then pcall(Core_SetPlayerDefeated, p.id, Annihilation_LoserPresentation, WR_ANNIHILATION) end
+	end
+	_Debug_ScheduleNextPhase(_QA_Transfer_PromptEliminationOutcome, 2.0, "EliminationPrompt", "QATransfer")
+end
+
+function _QA_Transfer_PromptEliminationOutcome()
+	if not _qa_transfer.running then return end
+	local idx = _qa_transfer.target_elimination
+	pcall(Debug_FocusPlayer, idx)
+	Debug_AskYesNo(
+		string.format("Elimination scenario: did P%d elimination and transfer behavior look correct?", idx),
+		_QA_Transfer_OnEliminationOutcome,
+		0,
+		1,
+		"YES if elimination + transfer behavior matched expectations; NO if not."
+	)
+end
+
+function _QA_Transfer_OnEliminationOutcome(choice)
+	_QA_Transfer_Record("elimination_outcome", choice == 1, (choice == 1) and "Confirmed" or "Rejected")
+	_Debug_ScheduleNextPhase(_QA_Transfer_RunDisconnectPrecheck, 1.0, "Disconnect", "QATransfer")
+end
+
+function _QA_Transfer_RunDisconnectPrecheck()
+	if not _qa_transfer.running then return end
+	_QA_Transfer_AskPrecacheYesNo(_qa_transfer.target_disconnect, "Disconnect", "_QA_Transfer_DoDisconnect")
+end
+
+function _QA_Transfer_DoDisconnect()
+	if not _qa_transfer.running then return end
+	local idx = _qa_transfer.target_disconnect
+	pcall(Debug_FocusPlayer, idx)
+	local p = PLAYERS and PLAYERS[idx]
+	if p ~= nil then
+		pcall(Core_SetPlayerDefeated, p.id, Annihilation_LoserPresentation, WR_ELIMINATION)
+	end
+	_Debug_ScheduleNextPhase(_QA_Transfer_PromptDisconnectOutcome, 2.0, "DisconnectPrompt", "QATransfer")
+end
+
+function _QA_Transfer_PromptDisconnectOutcome()
+	if not _qa_transfer.running then return end
+	local idx = _qa_transfer.target_disconnect
+	pcall(Debug_FocusPlayer, idx)
+	Debug_AskYesNo(
+		string.format("Disconnect scenario: did P%d disconnect/elimination transfer behavior look correct?", idx),
+		_QA_Transfer_OnDisconnectOutcome,
+		0,
+		1,
+		"YES if disconnect transfer looked correct; NO if assets were lost or behavior was wrong."
+	)
+end
+
+function _QA_Transfer_OnDisconnectOutcome(choice)
+	_QA_Transfer_Record("disconnect_outcome", choice == 1, (choice == 1) and "Confirmed" or "Rejected")
+	_QA_Transfer_Finalize()
+end
+
+function _QA_Transfer_Finalize()
+	if not _qa_transfer.running then return end
+	_qa_transfer.running = false
+
+	local ok, gt = pcall(World_GetGameTime)
+	local elapsed = (ok and _qa_transfer.start_time) and (gt - _qa_transfer.start_time) or 0
+
+	local total = 0
+	local pass = 0
+	for _, r in ipairs(_cba_debug.test_results or {}) do
+		if string.find(r.name or "", "^%[QA_TRANSFER%]") then
+			total = total + 1
+			if r.pass then pass = pass + 1 end
+		end
+	end
+
+	print("")
+	print("================================================================")
+	print("  QA TRANSFER SCENARIOS COMPLETE")
+	print(string.format("  Result: %d/%d checks passed", pass, total))
+	print(string.format("  Elapsed: %.1fs", elapsed))
+	print("================================================================")
+
+	_Debug_EndMarker("QATransferScenarios", pass, total, elapsed)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Namespace Registration
+---------------------------------------------------------------------------------------------------
+if debug then
+	debug.qa.run       = Debug_QADiagnostic
+	debug.qa.topic     = Debug_QADiagnostic_Topic
+	debug.qa.status    = Debug_QADiagnosticStatus
+	debug.qa.transfers = Debug_QADiagnostic_TransferScenarios
+	debug._register("qa", Debug_QADiagnostic, "8-topic visual Q&A verification (resources, pop, rewards, HUD)", 3)
+end

@@ -1,0 +1,352 @@
+-- Difficulty check / Thanks to AGameAnx		
+function GetAIDifficulty(player)
+	local AIPlayerNames = {
+		[Loc_ToAnsi(1309)] = 0,     -- A.I. Easy
+		[Loc_ToAnsi(1310)] = 1,     -- A.I. Intermediate
+		[Loc_ToAnsi(1311)] = 2,     -- A.I. Hard
+		[Loc_ToAnsi(1312)] = 3,     -- A.I. Hardest
+		[Loc_ToAnsi(11250912)] = 4, -- A.I. Redicilous
+		[Loc_ToAnsi(11250913)] = 5, -- A.I. Outrageous
+		[Loc_ToAnsi(11250914)] = 6, -- A.I. Absurd
+	}
+	-- Strip number prefix from display name (e.g., "5 A.I. Absurd" -> "A.I. Absurd")
+	local display_name = Loc_ToAnsi(Player_GetDisplayName(player))
+	local clean_name = string.match(display_name, "^%d+%s+(.+)") or display_name
+	return AIPlayerNames[clean_name] or 2
+end
+
+-- ============================================================
+-- DIFFICULTY CONFIGURATION — Woodland Co-op Scenario
+-- ============================================================
+--
+-- This file centralizes EVERY difficulty setting so you can
+-- tune the scenario without touching any game-logic files.
+--
+-- HOW IT WORKS
+--   1. The game reads the AI difficulty selected in lobby.
+--   2. Difficulty_Init() picks the matching tier below and
+--      stores it in the global "DC" (Difficulty Config).
+--   3. All game logic reads from DC instead of raw numbers.
+--
+-- HOW TO EDIT
+--   Find the tier you want to change (Easy, Intermediate, …)
+--   and adjust the values inside it. Each field has a comment
+--   explaining what it does. Save the file and test in-game.
+--
+-- TIER REFERENCE
+--   0 = Easy          Beginner-friendly, no restrictions
+--   1 = Intermediate  Baseline difficulty (≈ TIER_DEFAULTS)
+--   2 = Hard          Conversion disabled, siege locked, breach waves
+--   3 = Hardest       Harder units, fewer resources, shorter timers
+--   4 = Ridiculous    Age 4 locked, minimal resources
+--   5 = Outrageous    No reinforcements
+--   6 = Absurd        Workshop locked, everything maxed
+--
+-- ============================================================
+
+-- ---------------------------------------------------------
+-- _MergeTier: Shallow-copy TIER_DEFAULTS, then overlay.
+-- Returns a complete tier table ready for DC consumption.
+-- ---------------------------------------------------------
+local function _MergeTier(overrides)
+	local tier = {}
+	for k, v in pairs(TIER_DEFAULTS) do
+		tier[k] = v
+	end
+	for k, v in pairs(overrides) do
+		tier[k] = v
+	end
+	return tier
+end
+
+-- ============================================================
+-- TIER_DEFAULTS — INTERMEDIATE BASELINE
+--
+-- This block defines INTERMEDIATE difficulty (Tier 1).
+-- All tiers override only the fields that differ from this baseline.
+-- Every field used in Difficulty_Config is defined here.
+-- ============================================================
+TIER_DEFAULTS = {
+
+	-- ===== RESOURCES (granted per player after gold camp capture) =====
+	starting_food                           = 2500,      -- Food per player
+	starting_gold                           = 2000,      -- Gold per player
+	starting_wood                           = 750,       -- Wood per player
+
+	-- ===== TIMERS =====
+	seize_city_timer                        = 4800,      -- Main countdown (seconds)
+	prepare_defences_timer                  = 300,       -- Warning before waves (seconds, rule fires +30)
+
+	-- ===== PLAYER RESTRICTIONS (Restriction_Profile at start) =====
+	player_starting_upgrades_bonus          = true,      -- Grant free melee/ranged upgrades
+	disable_conversion                      = false,     -- Block monk conversion ability
+	restrict_keep                           = true,      -- Lock keep building
+	restrict_keep_landmarks                 = true,      -- Lock keep-producing landmarks
+	restrict_siege                          = true,      -- Lock siege units (mangonel, etc.)
+	restrict_age4                           = false,     -- Cap max age to Castle, lock Age 4
+	restrict_workshop                       = false,     -- Lock siege workshop building
+
+	-- ===== PHASE TRANSITIONS =====
+	abbasid_easy_mangonel                   = true,      -- Unlock mangonel for Abbasid with siege engineers
+
+	-- ===== ENEMY SETUP (starting area) =====
+	camp_strength                           = "easy",    -- "easy" | "hard" gold camp guards
+	checkpoint_strength                     = "easy",    -- "easy" | "hard" bridge checkpoint units
+	patrol_strength                         = "easy",    -- "easy" | "hard" village patrol units
+
+	-- ===== PLAYER REINFORCEMENTS (army respawn below 30%) =====
+	player_reinforcements                   = true,      -- Enable reinforcement respawn rule
+	reinforcement_pre_capture               = true,      -- Allow deploy before bridge capture
+
+	-- ===== ATTACK WAVES (Phase 2, ~5–45 min) =====
+	waves_5min_flank                        = true,      -- Extra flank wave at 5 min
+	waves_late_25_30                        = true,      -- Add 25/30 min waves
+	waves_hard_40_45                        = false,     -- Add 40/45 min waves
+	waves_hardest_extra                     = false,     -- Extra waves at 20/35/45 min
+	hard_waves_siege                        = false,     -- Siege waves in Phase 3
+	hard_waves_infantry                     = false,     -- Extra infantry in Phase 3
+
+	-- ===== BREACH (Phase 3 wall breach) =====
+	breach_reinforcements                   = false,     -- Spawn breach wall reinforcements
+}
+
+-- ============================================================
+-- TIER OVERRIDES
+-- ============================================================
+Difficulty_Config = {
+
+-- ===========================================
+-- TIER 0: EASY
+-- ===========================================
+[0] = _MergeTier({
+	label                                   = "Easy",
+
+	-- ===== RESOURCES (granted per player after gold camp capture) =====
+	starting_food                           = 3500,      -- Food per player
+	starting_gold                           = 3000,      -- Gold per player
+	starting_wood                           = 1500,      -- Wood per player
+	
+	-- ===== PLAYER RESTRICTIONS =====
+	restrict_keep                           = false,
+	restrict_keep_landmarks                 = false,
+	restrict_siege                          = false,
+
+	-- ===== ATTACK WAVES =====
+	waves_5min_flank                        = false,
+	waves_late_25_30                        = false,
+}),
+
+-- ===========================================
+-- TIER 1: INTERMEDIATE
+-- ===========================================
+[1] = _MergeTier({
+	label                                   = "Intermediate",
+
+	-- All values match TIER_DEFAULTS
+}),
+
+-- ===========================================
+-- TIER 2: HARD
+-- ===========================================
+[2] = _MergeTier({
+	label                                   = "Hard",
+
+	-- ===== TIMERS =====
+	seize_city_timer                        = 3600,
+
+	-- ===== PLAYER RESTRICTIONS =====
+	player_starting_upgrades_bonus          = false,
+	disable_conversion                      = true,
+	restrict_keep_landmarks                 = false,
+
+	-- ===== PHASE TRANSITIONS =====
+	abbasid_easy_mangonel                   = false,
+
+	-- ===== ATTACK WAVES =====
+	waves_hard_40_45                        = true,
+	hard_waves_siege                        = true,
+
+	-- ===== BREACH =====
+	breach_reinforcements                   = true,
+}),
+
+-- ===========================================
+-- TIER 3: HARDEST
+-- ===========================================
+[3] = _MergeTier({
+	label                                   = "Hardest",
+
+	-- ===== RESOURCES =====
+	starting_food                           = 2000,
+	starting_gold                           = 2000,
+
+	-- ===== TIMERS =====
+	seize_city_timer                        = 3600,
+	prepare_defences_timer                  = 180,
+
+	-- ===== PLAYER RESTRICTIONS =====
+	player_starting_upgrades_bonus          = false,
+	disable_conversion                      = true,
+	restrict_keep_landmarks                 = false,
+
+	-- ===== PHASE TRANSITIONS =====
+	abbasid_easy_mangonel                   = false,
+
+	-- ===== ENEMY SETUP =====
+	camp_strength                           = "hard",
+	checkpoint_strength                     = "hard",
+	patrol_strength                         = "hard",
+
+	-- ===== PLAYER REINFORCEMENTS =====
+	reinforcement_pre_capture               = false,
+
+	-- ===== ATTACK WAVES =====
+	waves_hard_40_45                        = true,
+	waves_hardest_extra                     = true,
+	hard_waves_siege                        = true,
+	hard_waves_infantry                     = true,
+
+	-- ===== BREACH =====
+	breach_reinforcements                   = true,
+}),
+
+-- ===========================================
+-- TIER 4: RIDICULOUS
+-- ===========================================
+[4] = _MergeTier({
+	label                                   = "Ridiculous",
+
+	-- ===== RESOURCES =====
+	starting_food                           = 2000,
+	starting_gold                           = 1500,
+
+	-- ===== TIMERS =====
+	seize_city_timer                        = 3600,
+	prepare_defences_timer                  = 180,
+
+	-- ===== PLAYER RESTRICTIONS =====
+	player_starting_upgrades_bonus          = false,
+	disable_conversion                      = true,
+	restrict_keep_landmarks                 = false,
+	restrict_age4                           = true,
+
+	-- ===== PHASE TRANSITIONS =====
+	abbasid_easy_mangonel                   = false,
+
+	-- ===== ENEMY SETUP =====
+	camp_strength                           = "hard",
+	checkpoint_strength                     = "hard",
+	patrol_strength                         = "hard",
+
+	-- ===== PLAYER REINFORCEMENTS =====
+	reinforcement_pre_capture               = false,
+
+	-- ===== ATTACK WAVES =====
+	waves_hard_40_45                        = true,
+	waves_hardest_extra                     = true,
+	hard_waves_siege                        = true,
+	hard_waves_infantry                     = true,
+
+	-- ===== BREACH =====
+	breach_reinforcements                   = true,
+}),
+
+-- ===========================================
+-- TIER 5: OUTRAGEOUS
+-- ===========================================
+[5] = _MergeTier({
+	label                                   = "Outrageous",
+
+	-- ===== RESOURCES =====
+	starting_food                           = 1500,
+	starting_gold                           = 1350,
+
+	-- ===== TIMERS =====
+	seize_city_timer                        = 3600,
+	prepare_defences_timer                  = 180,
+
+	-- ===== PLAYER RESTRICTIONS =====
+	player_starting_upgrades_bonus          = false,
+	disable_conversion                      = true,
+	restrict_keep_landmarks                 = false,
+	restrict_age4                           = true,
+
+	-- ===== PHASE TRANSITIONS =====
+	abbasid_easy_mangonel                   = false,
+
+	-- ===== ENEMY SETUP =====
+	camp_strength                           = "hard",
+	checkpoint_strength                     = "hard",
+	patrol_strength                         = "hard",
+
+	-- ===== PLAYER REINFORCEMENTS =====
+	player_reinforcements                   = false,
+	reinforcement_pre_capture               = false,
+
+	-- ===== ATTACK WAVES =====
+	waves_hard_40_45                        = true,
+	waves_hardest_extra                     = true,
+	hard_waves_siege                        = true,
+	hard_waves_infantry                     = true,
+
+	-- ===== BREACH =====
+	breach_reinforcements                   = true,
+}),
+
+-- ===========================================
+-- TIER 6: ABSURD
+-- ===========================================
+[6] = _MergeTier({
+	label                                   = "Absurd",
+
+	-- ===== RESOURCES =====
+	starting_food                           = 1500,
+	starting_gold                           = 1350,
+
+	-- ===== TIMERS =====
+	seize_city_timer                        = 3600,
+	prepare_defences_timer                  = 180,
+
+	-- ===== PLAYER RESTRICTIONS =====
+	player_starting_upgrades_bonus          = false,
+	disable_conversion                      = true,
+	restrict_keep_landmarks                 = false,
+	restrict_age4                           = true,
+	restrict_workshop                       = true,
+
+	-- ===== PHASE TRANSITIONS =====
+	abbasid_easy_mangonel                   = false,
+
+	-- ===== ENEMY SETUP =====
+	camp_strength                           = "hard",
+	checkpoint_strength                     = "hard",
+	patrol_strength                         = "hard",
+
+	-- ===== PLAYER REINFORCEMENTS =====
+	player_reinforcements                   = false,
+	reinforcement_pre_capture               = false,
+
+	-- ===== ATTACK WAVES =====
+	waves_hard_40_45                        = true,
+	waves_hardest_extra                     = true,
+	hard_waves_siege                        = true,
+	hard_waves_infantry                     = true,
+
+	-- ===== BREACH =====
+	breach_reinforcements                   = true,
+}),
+
+} -- end Difficulty_Config
+
+-- ============================================================
+-- Difficulty_Init: Call once after AI_Difficulty is set.
+-- Sets the global DC (Difficulty Config) to the active tier.
+-- ============================================================
+function Difficulty_Init()
+	DC = Difficulty_Config[AI_Difficulty]
+	if DC == nil then
+		print(string.format("[DIFFICULTY] WARNING: No config for tier %d, falling back to Hard (2)", AI_Difficulty))
+		DC = Difficulty_Config[2]
+	end
+	print(string.format("[DIFFICULTY] Initialized: %s (tier %d)", DC.label, AI_Difficulty))
+end

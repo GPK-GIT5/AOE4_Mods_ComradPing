@@ -1,0 +1,369 @@
+---------------------------------------------------------------------------------------------------
+-- CBA AI Player — Debug: Status & Track
+-- Console commands for live runtime status output and unified telemetry tracker.
+-- Origin: cba_ai_player.scar lines 3894–3991, 4525–4694
+---------------------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------
+-- Console: CBA_AIPlayer_Status()
+-----------------------------------------------------------------------
+
+function CBA_AIPlayer_Status()
+	if #_ai_players == 0 then
+		_AI_DebugLog(1, "[AI_PLAYER] No AI players active.")
+		return
+	end
+
+	print("================================================================")
+	print("  CBA AI PLAYER STATUS")
+	print("================================================================")
+
+	if _AI_DEBUG_EXTERNAL_LOCK then
+		print(string.format("  ** External lock ACTIVE (reason=%s) — AI rules suppressed **",
+			tostring(_AI_DEBUG_EXTERNAL_LOCK_REASON)))
+	else
+		print("  External lock: OFF")
+	end
+	print("")
+
+	for _, player in ipairs(_ai_players) do
+		local ai = player.ai
+		local player_civ = Player_GetRaceName(player.id)
+		local pop = Player_GetCurrentPopulation(player.id, CT_Personnel)
+		local pop_cap = Player_GetCurrentPopulationCap(player.id, CT_Personnel)
+		local staging = ai.staging_sg and SGroup_CountSpawned(ai.staging_sg) or 0
+		local army_count = #ai.armies
+		local total_army_units = 0
+		for _, a in ipairs(ai.armies) do
+			if a.sg then total_army_units = total_army_units + SGroup_CountSpawned(a.sg) end
+		end
+
+		print(string.format("  %s [%s] Age %d | Pop %d/%d | Buildings %d | Staging %d | Armies %d (%d units)",
+			ai.label or "P?", player_civ, Player_GetCurrentAge(player.id),
+			pop, pop_cap, ai.total_buildings, staging, army_count, total_army_units))
+		print(string.format("    Buildings: barracks=%d archery=%d stable=%d siege=%d",
+			ai.buildings.barracks.count, ai.buildings.archery_range.count,
+			ai.buildings.stable.count, ai.buildings.siege_workshop.count))
+		local prod_ready = 0
+		for _, egs in pairs(ai.production_egroups) do prod_ready = prod_ready + #egs end
+		print(string.format("    Zones: primary=%d/%d secondary=%d/%d | Production-ready=%d",
+			ai.primary_zone_count, _AI_PRIMARY_ZONE_MAX,
+			ai.secondary_zone_count, _AI_SECONDARY_ZONE_MAX,
+			prod_ready))
+		print(string.format("    Spawned: inf=%d rng=%d cav=%d siege=%d | Scouts=%s | Outposts=%d",
+			ai.spawned.infantry, ai.spawned.ranged, ai.spawned.cavalry, ai.spawned.siege,
+			tostring(ai.scouts_deployed), ai.outpost_count))
+		local patrol_count = ai.patrol_sg and SGroup_CountSpawned(ai.patrol_sg) or 0
+		local vill_count = ai.villager_sg and SGroup_CountSpawned(ai.villager_sg) or 0
+		local free_teams = _AI_CountFreeTeams(player)
+		local busy_teams = math.max(0, #ai.villager_teams - free_teams)
+		local queue_no_entity = 0
+		for _, entry in ipairs(ai.construction_queue) do
+			if entry.entity == nil and not entry.completed then
+				queue_no_entity = queue_no_entity + 1
+			end
+		end
+		print(string.format("    Patrol: %d units (rallying=%s, timeouts=%d, bad_wp=%d) | Villagers: %d",
+			patrol_count, tostring(ai.patrol_rallying or false),
+			ai.patrol_rally_timeouts or 0, ai.patrol_invalid_waypoints or 0,
+			vill_count))
+		print(string.format("    PatrolCtrl: source=%s hold_for=%.1fs",
+			tostring(ai.patrol_last_order_source or "none"),
+			math.max(0, (ai.patrol_order_hold_until or 0) - World_GetGameTime())))
+		print(string.format("    Construction: queue=%d no_entity=%d free_teams=%d busy_teams=%d",
+			#ai.construction_queue, queue_no_entity, free_teams, busy_teams))
+		print(string.format("    Threshold: %d | Eliminated: %s",
+			ai.squad_threshold, tostring(_AI_IsEliminated(player))))
+		if ai.native_ai ~= nil then
+			print(string.format("    NativeAI: disabled=%s apply_count=%d last_apply=%.1fs reason=%s",
+				tostring(ai.native_ai.disabled == true), ai.native_ai.apply_count or 0,
+				ai.native_ai.last_apply_at or -1,
+				tostring(ai.native_ai.last_reason or "")))
+		end
+		if ai.economy ~= nil then
+			print(string.format("    Economy: suppressed=%s apply_count=%d last_apply=%.1fs reason=%s drift_alerts=%d",
+				tostring(ai.economy.suppressed == true), ai.economy.apply_count or 0,
+				ai.economy.last_apply_at or -1,
+				tostring(ai.economy.last_reason or ""),
+				ai.economy.drift_alerts or 0))
+		end
+		if ai.telemetry then
+			local t = ai.telemetry
+			print(string.format("    Telemetry: attempts=%d ok=%d fail=%d abandon=%d forced=%d blocked=%d",
+				t.build_attempts, t.build_successes, t.build_failures,
+				t.build_abandoned, t.build_forced, t.build_blocked))
+			print(string.format("    Telemetry: queue_created=%d queue_done=%d queue_abandon=%d queue_destroyed=%d sanity_drops=%d prod_dead_skips=%d",
+				t.queue_entries_created or 0,
+				t.queue_terminal_completed or 0,
+				t.queue_terminal_abandoned or 0,
+				t.queue_terminal_destroyed or 0,
+				t.queue_sanity_drops or 0,
+				t.production_dead_skips or 0))
+			local rt_assign_avg = 0
+			if (t.team_release_to_assign_samples or 0) > 0 then
+				rt_assign_avg = (t.team_release_to_assign_total or 0) / t.team_release_to_assign_samples
+			end
+			print(string.format("    Telemetry: team_assign=%d team_release=%d release_to_assign_avg=%.2fs park_orders=%d park_suppressed=%d",
+				t.team_assignments or 0,
+				t.team_releases or 0,
+				rt_assign_avg,
+				t.villager_park_orders or 0,
+				t.villager_park_suppressed or 0))
+			print(string.format("    Telemetry: patrol_orders=%d patrol_suppressed=%d patrol_assault_joins=%d",
+				t.patrol_orders or 0,
+				t.patrol_orders_suppressed or 0,
+				t.patrol_assault_joins or 0))
+			print(string.format("    Telemetry: units_produced=%d armies=%d ally_redirects=%d ally_support=%d",
+				t.units_produced, t.armies_dispatched, t.ally_redirects, t.ally_support_sent))
+		end
+	end
+
+	print("================================================================")
+end
+
+-----------------------------------------------------------------------
+-- Helper: count entries in a hash table (for Track blacklist count)
+-----------------------------------------------------------------------
+
+function _AI_Count(tbl)
+	if type(tbl) ~= "table" then return 0 end
+	local n = 0
+	for _ in pairs(tbl) do n = n + 1 end
+	return n
+end
+
+-----------------------------------------------------------------------
+-- Telemetry snapshot helpers
+-----------------------------------------------------------------------
+
+function _AI_CopyTelemetry(src)
+	if src == nil then return {} end
+	local copy = {}
+	for k, v in pairs(src) do
+		if type(v) == "number" then copy[k] = v end
+	end
+	return copy
+end
+
+function _AI_TelemetryDeltas(cur, prev)
+	if prev == nil then return nil end
+	local d = {}
+	for k, v in pairs(cur) do
+		if type(v) == "number" then
+			d[k] = v - (prev[k] or 0)
+		end
+	end
+	return d
+end
+
+function _AI_DFmt(d, key)
+	if d == nil then return "" end
+	local v = d[key] or 0
+	if v == 0 then return "" end
+	return string.format(" (+%d)", v)
+end
+
+-----------------------------------------------------------------------
+-- Console: CBA_AIPlayer_Track()
+-- Unified tracker with delta telemetry.
+-----------------------------------------------------------------------
+
+function CBA_AIPlayer_Track()
+	local now = World_GetGameTime()
+	_ai_track_call_count = _ai_track_call_count + 1
+
+	if #_ai_players == 0 then
+		print("[AI_TRACK] No AI players active.")
+		return
+	end
+
+	print("================================================================")
+	print("  CBA AI PLAYER TRACKER")
+	print(string.format("  Call #%d | Game time: %.1fs | Real delta: %.1fs",
+		_ai_track_call_count, now,
+		_ai_track_snapshot and (now - _ai_track_snapshot.time) or 0))
+	print("================================================================")
+
+	if _AI_DEBUG_EXTERNAL_LOCK then
+		print(string.format("  ** External lock ACTIVE (reason=%s) **", tostring(_AI_DEBUG_EXTERNAL_LOCK_REASON)))
+	end
+
+	local new_snapshot = { time = now, players = {} }
+
+	for _, player in ipairs(_ai_players) do
+		local ai = player.ai
+		if ai == nil then goto next_track end
+		local t = ai.telemetry or {}
+		local label = ai.label or "P?"
+		local player_civ = Player_GetRaceName(player.id)
+		local pop = Player_GetCurrentPopulation(player.id, CT_Personnel)
+		local pop_cap = Player_GetCurrentPopulationCap(player.id, CT_Personnel)
+		local age = Player_GetCurrentAge(player.id)
+		local eliminated = _AI_IsEliminated(player)
+
+		local prev_t = _ai_track_snapshot and _ai_track_snapshot.players[label] or nil
+		local delta = _AI_TelemetryDeltas(t, prev_t)
+
+		new_snapshot.players[label] = _AI_CopyTelemetry(t)
+
+		print("")
+		print(string.format("  ── %s [%s] Age %d | Pop %d/%d | Eliminated=%s ──",
+			label, player_civ, age, pop, pop_cap, tostring(eliminated)))
+
+		-- Section 1: Building & Zone State
+		local prod_ready = 0
+		for _, egs in pairs(ai.production_egroups) do prod_ready = prod_ready + #egs end
+		print(string.format("  [Buildings] total=%d barracks=%d archery=%d stable=%d siege=%d prod_ready=%d",
+			ai.total_buildings,
+			ai.buildings.barracks.count, ai.buildings.archery_range.count,
+			ai.buildings.stable.count, ai.buildings.siege_workshop.count,
+			prod_ready))
+		print(string.format("  [Zones] primary=%d/%d secondary=%d/%d",
+			ai.primary_zone_count, _AI_PRIMARY_ZONE_MAX,
+			ai.secondary_zone_count, _AI_SECONDARY_ZONE_MAX))
+
+		-- Section 2: Construction Queue
+		local queue_size = #ai.construction_queue
+		local q_no_ent, q_stale, q_high_issue = 0, 0, 0
+		for _, entry in ipairs(ai.construction_queue) do
+			if entry.entity == nil and not entry.completed then q_no_ent = q_no_ent + 1 end
+			if entry.queued_at and (now - entry.queued_at) > _AI_CONSTRUCT_STALE_TIMEOUT then q_stale = q_stale + 1 end
+			if (entry.issue_count or 0) >= 3 then q_high_issue = q_high_issue + 1 end
+		end
+		print(string.format("  [Queue] entries=%d no_entity=%d stale=%d high_issue=%d blacklisted_positions=%d",
+			queue_size, q_no_ent, q_stale, q_high_issue,
+			_AI_Count(ai.stale_pos_blacklist)))
+		if queue_size > 0 then
+			for i, entry in ipairs(ai.construction_queue) do
+				local ok_p, p = false, -1
+				local ok_alive, alive = false, false
+				local ok_uc, uc = false, false
+				if entry.entity ~= nil then
+					ok_p, p = pcall(Entity_GetBuildingProgress, entry.entity)
+					ok_alive, alive = pcall(Entity_IsAlive, entry.entity)
+					ok_uc, uc = pcall(Entity_IsUnderConstruction, entry.entity)
+				end
+				local age_s = entry.queued_at and (now - entry.queued_at) or -1
+				print(string.format("    [%d] %-12s prog=%.2f alive=%s uc=%s issues=%d age=%.1fs team=%s",
+					i, entry.type_key or "?",
+					ok_p and p or -1,
+					tostring(ok_alive and alive or false),
+					tostring(ok_uc and uc or false),
+					entry.issue_count or 0, age_s,
+					entry.assigned_team and entry.assigned_team.sg_name or "none"))
+			end
+		end
+
+		-- Section 3: Villager Teams
+		local vill_count = ai.villager_sg and SGroup_CountSpawned(ai.villager_sg) or 0
+		local free_teams = _AI_CountFreeTeams(player)
+		local busy_teams = math.max(0, #ai.villager_teams - free_teams)
+		print(string.format("  [Villagers] count=%d teams=%d free=%d busy=%d",
+			vill_count, #ai.villager_teams, free_teams, busy_teams))
+
+		-- Section 4: Army & Patrol State
+		local staging = ai.staging_sg and SGroup_CountSpawned(ai.staging_sg) or 0
+		local army_count = #ai.armies
+		local total_army_units = 0
+		for _, a in ipairs(ai.armies) do
+			if a.sg then total_army_units = total_army_units + SGroup_CountSpawned(a.sg) end
+		end
+		local patrol_count = ai.patrol_sg and SGroup_CountSpawned(ai.patrol_sg) or 0
+		local hold_for = math.max(0, (ai.patrol_order_hold_until or 0) - now)
+		print(string.format("  [Military] staging=%d armies=%d(%d units) patrol=%d threshold=%d",
+			staging, army_count, total_army_units, patrol_count, ai.squad_threshold))
+		print(string.format("  [Patrol] source=%s hold_for=%.1fs rallying=%s timeouts=%d",
+			tostring(ai.patrol_last_order_source or "none"), hold_for,
+			tostring(ai.patrol_rallying or false), ai.patrol_rally_timeouts or 0))
+
+		-- Section 5: Spawned Units
+		print(string.format("  [Spawned] inf=%d rng=%d cav=%d siege=%d scouts=%s outposts=%d",
+			ai.spawned.infantry, ai.spawned.ranged, ai.spawned.cavalry, ai.spawned.siege,
+			tostring(ai.scouts_deployed), ai.outpost_count))
+
+		-- Section 6: Economy & Native AI
+		if ai.economy then
+			print(string.format("  [Economy] suppressed=%s applies=%d drift_alerts=%d",
+				tostring(ai.economy.suppressed), ai.economy.apply_count, ai.economy.drift_alerts or 0))
+		end
+		if ai.native_ai then
+			print(string.format("  [NativeAI] disabled=%s applies=%d",
+				tostring(ai.native_ai.disabled == true), ai.native_ai.apply_count or 0))
+		end
+
+		-- Section 7: Telemetry (absolute + delta)
+		print(string.format("  [Build] attempts=%d%s ok=%d%s fail=%d%s abandon=%d%s forced=%d%s blocked=%d%s",
+			t.build_attempts, _AI_DFmt(delta, "build_attempts"),
+			t.build_successes, _AI_DFmt(delta, "build_successes"),
+			t.build_failures, _AI_DFmt(delta, "build_failures"),
+			t.build_abandoned, _AI_DFmt(delta, "build_abandoned"),
+			t.build_forced, _AI_DFmt(delta, "build_forced"),
+			t.build_blocked, _AI_DFmt(delta, "build_blocked")))
+		print(string.format("  [QueueFlow] created=%d%s done=%d%s abandon=%d%s destroyed=%d%s sanity=%d%s",
+			t.queue_entries_created or 0, _AI_DFmt(delta, "queue_entries_created"),
+			t.queue_terminal_completed or 0, _AI_DFmt(delta, "queue_terminal_completed"),
+			t.queue_terminal_abandoned or 0, _AI_DFmt(delta, "queue_terminal_abandoned"),
+			t.queue_terminal_destroyed or 0, _AI_DFmt(delta, "queue_terminal_destroyed"),
+			t.queue_sanity_drops or 0, _AI_DFmt(delta, "queue_sanity_drops")))
+		local rt_avg = 0
+		if (t.team_release_to_assign_samples or 0) > 0 then
+			rt_avg = (t.team_release_to_assign_total or 0) / t.team_release_to_assign_samples
+		end
+		print(string.format("  [TeamFlow] assign=%d%s release=%d%s avg_reassign=%.2fs park=%d%s park_suppress=%d%s",
+			t.team_assignments or 0, _AI_DFmt(delta, "team_assignments"),
+			t.team_releases or 0, _AI_DFmt(delta, "team_releases"),
+			rt_avg,
+			t.villager_park_orders or 0, _AI_DFmt(delta, "villager_park_orders"),
+			t.villager_park_suppressed or 0, _AI_DFmt(delta, "villager_park_suppressed")))
+		print(string.format("  [Patrol] orders=%d%s suppress=%d%s assault_joins=%d%s",
+			t.patrol_orders or 0, _AI_DFmt(delta, "patrol_orders"),
+			t.patrol_orders_suppressed or 0, _AI_DFmt(delta, "patrol_orders_suppressed"),
+			t.patrol_assault_joins or 0, _AI_DFmt(delta, "patrol_assault_joins")))
+		print(string.format("  [Combat] produced=%d%s dispatched=%d%s ally_redirect=%d%s ally_support=%d%s",
+			t.units_produced, _AI_DFmt(delta, "units_produced"),
+			t.armies_dispatched, _AI_DFmt(delta, "armies_dispatched"),
+			t.ally_redirects, _AI_DFmt(delta, "ally_redirects"),
+			t.ally_support_sent, _AI_DFmt(delta, "ally_support_sent")))
+
+		-- Section 8: Warnings
+		local warnings = {}
+		if q_stale > 0 then table.insert(warnings, string.format("%d stale queue entries", q_stale)) end
+		if q_high_issue > 0 then table.insert(warnings, string.format("%d entries with 3+ reissues", q_high_issue)) end
+		if (ai.economy and ai.economy.suppressed ~= true) then table.insert(warnings, "economy NOT suppressed") end
+		if vill_count == 0 and queue_size > 0 then table.insert(warnings, "0 villagers but queue not empty") end
+		if staging > ai.squad_threshold * 2 then table.insert(warnings, string.format("staging overflow (%d > 2x threshold)", staging)) end
+		if (t.queue_sanity_drops or 0) > 3 then table.insert(warnings, string.format("high sanity drops (%d)", t.queue_sanity_drops)) end
+		if (ai.economy and (ai.economy.drift_alerts or 0) > 0) then table.insert(warnings, string.format("economy drift alerts (%d)", ai.economy.drift_alerts)) end
+		if #warnings > 0 then
+			print("  [WARNINGS]")
+			for _, w in ipairs(warnings) do
+				print("    !! " .. w)
+			end
+		end
+
+		-- Section 9: Recent Build Timeline (last 5 events)
+		if ai.build_timeline and #ai.build_timeline > 0 then
+			local sorted = {}
+			for _, ev in ipairs(ai.build_timeline) do
+				if ev ~= nil then table.insert(sorted, ev) end
+			end
+			table.sort(sorted, function(a, b) return (a.seq or 0) < (b.seq or 0) end)
+			local start_idx = math.max(1, #sorted - 4)
+			print("  [RecentTimeline]")
+			for i = start_idx, #sorted do
+				local ev = sorted[i]
+				print(string.format("    [%3d] t=%.1fs %-16s %s %s",
+					ev.seq or 0, ev.time or 0, ev.event or "?", ev.type_key or "?", ev.detail or ""))
+			end
+		end
+
+		::next_track::
+	end
+
+	_ai_track_snapshot = new_snapshot
+
+	print("")
+	print("================================================================")
+	print(string.format("  /TRACK (call #%d at %.1fs)", _ai_track_call_count, now))
+	print("================================================================")
+end

@@ -1,0 +1,70 @@
+# Auto-changelog state file (local machine only)
+changelog/.last-auto-run
+
+# Node dependencies
+node_modules/
+npm-debug.log*
+
+# OS / Editor artifacts
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
+
+# Build / cache outputs
+__pycache__/
+*.pyc
+*.pyo
+
+# AoE4 mod build artifacts
+*.tmp
+*.bak
+
+# ============================================================
+# Gamemodes — keep only .scar, .locdb, .csv
+# ============================================================
+
+# Mod package archives
+Gamemodes/**/*.aoe4mod
+Gamemodes/**/*.sga
+
+# Mod metadata / project files
+Gamemodes/**/*.rdo
+Gamemodes/**/*.burnproj
+Gamemodes/**/*.pdn
+
+# Images / icons
+Gamemodes/**/*.png
+
+# Generated / binary / cache folders
+Gamemodes/**/cache/
+Gamemodes/**/archives/
+Gamemodes/**/.aoe4/
+
+# Documentation (not source code)
+Gamemodes/**/docs/
+
+# ============================================================
+# Scenarios — keep only .scar, .locdb, .csv
+# ============================================================
+
+# Map editor binary / data files
+Scenarios/**/*.scenario
+Scenarios/**/*.events
+Scenarios/**/*.prefabdata
+Scenarios/**/*.info
+Scenarios/**/*.rrtex
+
+# Override config files (audio, impass, metadata, softmapedge, etc.)
+Scenarios/**/*.override
+
+# Map editor exclusion and layer marker files
+Scenarios/**/*.exclude
+Scenarios/**/*.layer
+
+# ============================================================
+# Temporary/ — ephemeral content (caches, generated stats, debug outputs, discarded runs)
+# ============================================================
+Temporary/
+

@@ -1,0 +1,343 @@
+-----------------------------------------------------------------------
+-- PlayerUI: Entry Point
+-- Registers the PlayerUI module for live multiplayer HUD.
+-- Disabled by default behind PLAYERUI_ENABLED flag.
+-- Excludes replays (observer UI handles those).
+-- Includes all players (human and AI) with tiered data depth.
+-----------------------------------------------------------------------
+
+-- Settings & constants (loaded first, no dependencies)
+import("PlayerUI/playerui_settings.scar")
+import("PlayerUI/playerui_constants.scar")
+
+-- Core data context table
+import("PlayerUI/playerui_datacontext.scar")
+
+-- Lifecycle framework
+import("PlayerUI/playerui_initialization.scar")
+
+-- Data gathering rule system
+import("PlayerUI/playerui_rulesystem.scar")
+
+-- Tracking modules
+import("PlayerUI/tracking/tracking_gameobjectrepository.scar")
+import("PlayerUI/tracking/tracking_populationcomposition.scar")
+import("PlayerUI/tracking/tracking_ownedsquads.scar")
+import("PlayerUI/tracking/tracking_reliclocations.scar")
+import("PlayerUI/tracking/tracking_agingupprogress.scar")
+import("PlayerUI/tracking/tracking_queuedstuff.scar")
+
+-- Data context initialization
+import("PlayerUI/uidatacontext/initialize_datacontext.scar")
+
+-- Animated number transitions (smooth increments between data refreshes)
+import("PlayerUI/playerui_animate.scar")
+
+-- Ranking system (rank stability, FLIP animations, contested state)
+import("PlayerUI/playerui_ranking.scar")
+
+-- UI update bridge (data -> XAML binding)
+import("PlayerUI/playerui_updateui.scar")
+
+-- XAML templates
+import("PlayerUI/xaml/playerui_hud.scar")
+import("PlayerUI/xaml/playerui_togglebutton.scar")
+
+-----------------------------------------------------------------------
+-- Module registration
+-----------------------------------------------------------------------
+
+Core_RegisterModule("PlayerUI")
+
+local _playerui_print = print
+local function print(...)
+	local message = tostring(select(1, ...))
+	if type(PlayerUI_ShouldPrintMessage) ~= "function" or PlayerUI_ShouldPrintMessage(message) then
+		_playerui_print(...)
+	end
+end
+
+-----------------------------------------------------------------------
+-- OnInit: build player lists, create UI elements, start collapsed
+-----------------------------------------------------------------------
+
+function PlayerUI_OnInit()
+	print("[PLAYERUI] OnInit: PLAYERUI_ENABLED=" .. tostring(PLAYERUI_ENABLED))
+
+	if not PLAYERUI_ENABLED then
+		print("[PLAYERUI] OnInit: disabled — early return")
+		return
+	end
+
+	if UI_IsReplay() then
+		print("[PLAYERUI] OnInit: replay detected — early return")
+		return
+	end
+
+	-- Build player list with relationship flags (all players including AI)
+	_PlayerUI_LocalPlayerId = Game_GetLocalPlayer()
+	print("[PLAYERUI] OnInit: localPlayerId=" .. tostring(_PlayerUI_LocalPlayerId))
+
+	local localEntries = {}
+	local allyEntries = {}
+	local enemyEntries = {}
+	local totalPlayers = World_GetPlayerCount()
+	print("[PLAYERUI] OnInit: World_GetPlayerCount=" .. tostring(totalPlayers))
+	for i = 1, totalPlayers do
+		local player = World_GetPlayerAt(i)
+		local isLocal = (player == _PlayerUI_LocalPlayerId)
+		local isAlly = (not isLocal) and (Player_ObserveRelationship(player, _PlayerUI_LocalPlayerId) == R_ALLY)
+		local isEnemy = (not isLocal) and (not isAlly)
+		local entry = {
+			id = player,
+			playerName = Player_GetDisplayName(player),
+			race = Player_GetRace(player),
+			isEliminated = false,
+			isLocalPlayer = isLocal,
+			isAlly = isAlly,
+			isEnemy = isEnemy,
+		}
+		if isLocal then
+			table.insert(localEntries, entry)
+		elseif isAlly then
+			table.insert(allyEntries, entry)
+		else
+			table.insert(enemyEntries, entry)
+		end
+	end
+
+	-- Sort: local player first, then allies, then enemies
+	_PlayerUI_AllPlayers = {}
+	for _, e in ipairs(localEntries) do table.insert(_PlayerUI_AllPlayers, e) end
+	for _, e in ipairs(allyEntries) do table.insert(_PlayerUI_AllPlayers, e) end
+	for _, e in ipairs(enemyEntries) do table.insert(_PlayerUI_AllPlayers, e) end
+
+	-- Team-split globals for data context initialization
+	_PlayerUI_TeamLeft = {}
+	for _, e in ipairs(localEntries) do table.insert(_PlayerUI_TeamLeft, e) end
+	for _, e in ipairs(allyEntries) do table.insert(_PlayerUI_TeamLeft, e) end
+	_PlayerUI_TeamRight = enemyEntries
+
+	-- Backward-compat aliases for rule system, tracking, and init framework
+	_PlayerUI_HumanPlayers = _PlayerUI_AllPlayers
+	_PlayerUI_VisiblePlayers = _PlayerUI_AllPlayers
+
+	print("[PLAYERUI] OnInit: allPlayers=" .. #_PlayerUI_AllPlayers .. " (local=" .. #localEntries .. " allies=" .. #allyEntries .. " enemies=" .. #enemyEntries .. ")")
+	print("[PLAYERUI] OnInit: teamLeft=" .. #_PlayerUI_TeamLeft .. " teamRight=" .. #_PlayerUI_TeamRight)
+	if #_PlayerUI_AllPlayers == 0 then
+		print("[PLAYERUI] OnInit: no players found — early return")
+		return
+	end
+
+	-- Bind rule-system UI update/apply hooks only once.
+	if not _PlayerUI_DataRulesRegistered then
+		PlayerUiRuleSystem:AddUpdateUiDataContextRule(PlayerUI_UpdateDataContext)
+		PlayerUiRuleSystem:AddApplyUiDataContextRule(PlayerUI_ApplyDataContext)
+		_PlayerUI_DataRulesRegistered = true
+	end
+
+	-- Initialize rule system and tracking modules
+	PlayerUiRuleSystem:Initialize()
+	PlayerUiInitialization:Initialize()
+	if PlayerUI_ResetEliminationPresentationState ~= nil then
+		PlayerUI_ResetEliminationPresentationState()
+	end
+	PlayerUI_InitializeDataContext()
+	PlayerUI_Animate_Init()
+	PlayerUI_Ranking_Init()
+
+	-- Create button data contexts
+	_PlayerUI_ToggleButtonDataContext = {
+		command = UI_CreateCommand("PlayerUI_Toggle"),
+	}
+	_PlayerUI_SwapIncomeButtonDataContext = {
+		command = UI_CreateCommand("PlayerUI_SwapResourceWithIncomePerMinute"),
+	}
+
+	-- Add UI elements to the screen
+	local selectedHudXaml = _PlayerUI_HudXaml
+	if PlayerUI_Settings.EnableMinimalSafeHudXaml ~= false then
+		selectedHudXaml = _PlayerUI_HudXaml_MinimalSafe
+		print("[PLAYERUI] OnInit: HUD template=minimal-safe")
+	else
+		print("[PLAYERUI] OnInit: HUD template=full")
+	end
+
+	UI_AddChild("ScarDefault", "XamlPresenter", "PlayerUIToggleButton", {
+		IsHitTestVisible = true,
+		Xaml = _PlayerUI_ToggleButtonXaml,
+		DataContext = UI_CreateDataContext(_PlayerUI_ToggleButtonDataContext),
+	})
+	UI_AddChild("ScarDefault", "XamlPresenter", "PlayerUISwapIncomeButton", {
+		IsHitTestVisible = true,
+		Xaml = _PlayerUI_SwapIncomeButtonXaml,
+		DataContext = UI_CreateDataContext(_PlayerUI_SwapIncomeButtonDataContext),
+	})
+	UI_AddChild("ScarDefault", "XamlPresenter", "PlayerUIHud", {
+		IsHitTestVisible = false,
+		Xaml = selectedHudXaml,
+		DataContext = UI_CreateDataContext(PlayerUiDataContext),
+	})
+	PlayerUI_UpdateDataContext()
+	PlayerUI_ApplyDataContext()
+
+	-- Leave HUD Visible for pre-warm: the WPF renderer needs at least one
+	-- layout/render pass on the full template tree before it can safely
+	-- transition between Collapsed and Visible.  The deferred collapse
+	-- happens in PlayerUI_PresetFinalize (~1 s later).
+	_PlayerUI_HudVisible = false
+	_PlayerUI_PreWarmPending = true
+	print("[PLAYERUI] OnInit: complete — HUD created (pre-warm visible), " .. #_PlayerUI_AllPlayers .. " players")
+end
+
+-----------------------------------------------------------------------
+-- PresetFinalize: collapse HUD after the render engine has pre-warmed
+-- the full XAML template tree. If auto-show is enabled, schedule a
+-- deferred toggle via the safe PlayerUI_Toggle path (V2/V3 sanitizer).
+--
+-- The HUD MUST be collapsed here first — the initial UI_CreateDataContext
+-- gives WPF a raw table reference, and the sanitizer's strip→push→restore
+-- cycle leaves unbound numerics visible to the renderer on subsequent
+-- layout passes while the element stays Visible.
+-----------------------------------------------------------------------
+
+function PlayerUI_PresetFinalize()
+	if not _PlayerUI_PreWarmPending then
+		return
+	end
+	_PlayerUI_PreWarmPending = false
+
+	-- Sanitize DataContext so the WPF bridge has clean bindings.
+	if PlayerUI_ApplyDataContext ~= nil then
+		pcall(PlayerUI_ApplyDataContext)
+	end
+
+	-- Always collapse first — the pre-warm Visible state is only safe for
+	-- a single render pass; keeping it Visible exposes unbound numerics.
+	if PlayerUI_Settings.EnableToggleCrashGuard ~= false then
+		local ok, err = pcall(UI_SetPropertyValue, "PlayerUIHud", "Visibility", "Collapsed")
+		if not ok then
+			print("[PLAYERUI] PresetFinalize: collapse failed: " .. tostring(err))
+			return
+		end
+	else
+		UI_SetPropertyValue("PlayerUIHud", "Visibility", "Collapsed")
+	end
+	print("[PLAYERUI] PresetFinalize: HUD collapsed after pre-warm")
+
+	-- Hide toggle button until DataContext is fully populated.  Toggling
+	-- the HUD before the first Ring Rule cycle completes crashes D3D
+	-- (per-slot fields like workerPopulation/score/tResources are nil),
+	-- so the button is restored only after AutoShow's readiness gate.
+	pcall(UI_SetPropertyValue, "PlayerUIToggleButton", "Visibility", "Collapsed")
+	pcall(UI_SetPropertyValue, "PlayerUIToggleButton", "IsHitTestVisible", false)
+
+	-- Auto-show: wait until the first Ring Rule cycle has completed so
+	-- per-slot DataContext fields (workerPopulation, score, allMilitary,
+	-- tResources, etc.) are fully populated before the HUD becomes
+	-- Visible.  Without this gate the renderer evaluates bindings against
+	-- nil per-slot fields and crashes D3D ~1s later when FastRefreshRule
+	-- triggers a re-evaluation.  This is the actual init-order bug; the
+	-- previous fixed 0.5s delay just happened to cross the FastRefresh
+	-- tick before any RingRule had populated entity-derived fields.
+	if PlayerUI_Settings.EnableAutoShow ~= false then
+		Rule_AddInterval(_PlayerUI_AutoShow_PollReady, 0.5)
+		_PlayerUI_AutoShow_PollStartGameTime = nil  -- captured on first tick
+		print("[PLAYERUI] PresetFinalize: auto-show armed — polling for first Ring Rule cycle")
+	end
+end
+
+-----------------------------------------------------------------------
+-- Auto-show: poll for readiness signal (first Ring Rule completion).
+-- Falls back to 12s safety timeout if the rule somehow never fires.
+-----------------------------------------------------------------------
+
+_PLAYERUI_AUTOSHOW_SAFETY_TIMEOUT = 12.0
+
+function _PlayerUI_AutoShow_PollReady()
+	-- Already shown? Stop polling.
+	if _PlayerUI_HudVisible then
+		Rule_RemoveMe()
+		return
+	end
+
+	local ok_time, gameTime = pcall(World_GetGameTime)
+	if not ok_time or gameTime == nil then
+		return  -- try again next tick
+	end
+
+	if _PlayerUI_AutoShow_PollStartGameTime == nil then
+		_PlayerUI_AutoShow_PollStartGameTime = gameTime
+	end
+
+	local waited = gameTime - _PlayerUI_AutoShow_PollStartGameTime
+	local ringReady = (_PlayerUI_FirstRingRuleCompleted == true)
+	local timedOut  = waited >= _PLAYERUI_AUTOSHOW_SAFETY_TIMEOUT
+
+	if ringReady or timedOut then
+		Rule_RemoveMe()
+		print("[PLAYERUI] AutoShow: ready — ringComplete=" .. tostring(ringReady)
+			.. " waited=" .. string.format("%.1f", waited)
+			.. "s gameTime=" .. string.format("%.1f", gameTime))
+		_PlayerUI_AutoShow_DeferredToggle()
+	end
+end
+
+function _PlayerUI_AutoShow_DeferredToggle()
+	if _PlayerUI_HudVisible then
+		print("[PLAYERUI] AutoShow: already visible — skipping")
+		return
+	end
+	-- Diagnostic: dump key DataContext field state at toggle moment so
+	-- we can see exactly what WPF will receive on first render.
+	if _PlayerUI_AutoShow_DiagnoseContext ~= nil then
+		pcall(_PlayerUI_AutoShow_DiagnoseContext)
+	end
+	-- Reset throttle so the toggle isn't rejected
+	_PlayerUI_LastToggleTime = -1
+	print("[PLAYERUI] AutoShow: invoking PlayerUI_Toggle")
+	local ok, err = pcall(PlayerUI_Toggle)
+	if ok then
+		print("[PLAYERUI] AutoShow: toggle complete — hudVisible=" .. tostring(_PlayerUI_HudVisible))
+	else
+		print("[PLAYERUI] AutoShow: toggle failed: " .. tostring(err))
+	end
+
+	-- Reveal toggle button now that the DataContext is fully populated
+	-- and the first safe HUD show has completed.  Players can now toggle
+	-- without risking the early-init D3D crash.
+	pcall(UI_SetPropertyValue, "PlayerUIToggleButton", "IsHitTestVisible", true)
+	pcall(UI_SetPropertyValue, "PlayerUIToggleButton", "Visibility", "Visible")
+	print("[PLAYERUI] AutoShow: toggle button revealed")
+end
+
+-- Diagnostic: inspect per-slot field population to confirm RingRule
+-- has actually populated the fields the XAML binds against.
+function _PlayerUI_AutoShow_DiagnoseContext()
+	local ctx = PlayerUiDataContext
+	if ctx == nil then
+		print("[PLAYERUI_DIAG] PlayerUiDataContext is nil")
+		return
+	end
+	local function nilCount(arr, fields)
+		if arr == nil then return "nil-array" end
+		local missing = {}
+		for _, f in ipairs(fields) do
+			local n = 0
+			for i = 1, #arr do
+				if arr[i] == nil or arr[i][f] == nil then n = n + 1 end
+			end
+			if n > 0 then table.insert(missing, f .. "=" .. tostring(n) .. "/" .. #arr) end
+		end
+		if #missing == 0 then return "all-populated/" .. #arr end
+		return table.concat(missing, ",")
+	end
+	local probedFields = { "killScore", "score", "workerPopulation", "allMilitaryPopulation",
+		"siegePopulation", "color", "civColorString", "name" }
+	print("[PLAYERUI_DIAG] teamLeft: " .. nilCount(ctx.teamLeft, probedFields))
+	print("[PLAYERUI_DIAG] teamRight: " .. nilCount(ctx.teamRight, probedFields))
+	print("[PLAYERUI_DIAG] AllPlayersSummary.CombinedKillScore=" .. tostring(ctx.AllPlayersSummary and ctx.AllPlayersSummary.CombinedKillScore))
+	print("[PLAYERUI_DIAG] rewardProgress_max=" .. tostring(ctx.rewardProgress_max) .. " rewardProgress_current=" .. tostring(ctx.rewardProgress_current))
+	print("[PLAYERUI_DIAG] rewardIcons.count=" .. tostring(ctx.rewardIcons and #ctx.rewardIcons))
+	print("[PLAYERUI_DIAG] firstRingRuleCompleted=" .. tostring(_PlayerUI_FirstRingRuleCompleted))
+end

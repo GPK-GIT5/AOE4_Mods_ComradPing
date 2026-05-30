@@ -1,0 +1,270 @@
+---------------------------------------------------------------------------------------------------
+-- Authors:
+-- Relic
+-- Woprock
+--
+-- Description:
+-- Team balance system. Redistributes population, medic pop, resources, production limits,
+-- and auto-rates when a player is defeated, keeping surviving allies competitive.
+---------------------------------------------------------------------------------------------------
+
+AGS_TEAM_BALANCE_MODULE = "AGS_TeamBalance"
+AGS_TEAM_BALANCE_TEAM_BONUS = {}
+AGS_TEAM_BALANCE_MEDIC_BONUS = {}
+
+-- Round n up to the nearest multiple of 5 (e.g. 22→25, 43→45, 50→50).
+function _CeilTo5(n)
+	return math.ceil(n / 5) * 5
+end
+
+---------------------------------------------------------------------------------------------------
+-- Delegates:
+---------------------------------------------------------------------------------------------------
+Core_RegisterModule(AGS_TEAM_BALANCE_MODULE)	
+
+function AGS_TeamBalance_UpdateModuleSettings()
+	AGS_Print("AGS_TeamBalance_UpdateModuleSettings")
+	if AGS_GLOBAL_SETTINGS.MaintainTeamBalance == AGS_GS_TEAM_BALANCE_NONE then
+		Core_UnregisterModule(AGS_TEAM_BALANCE_MODULE)
+	end
+end
+
+function AGS_TeamBalance_OnPlayerDefeated(player, reason)	
+	AGS_Print("AGS_TeamBalance_OnPlayerDefeated")
+	AGS_TeamBalance_UpdateTeam(player)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Functions:
+---------------------------------------------------------------------------------------------------
+
+function AGS_TeamBalance_UpdateTeam(player)
+	-- Get allies and verify that we can still give someone this player pop.
+	local allies = AGS_Teams_GetStaticTeamAliveMembers(player.AGS_Team.allies)
+	-- Fallback: if static-team state is stale, rebuild allies from live relationships.
+	local rel_allies = {}
+	for _, p in ipairs(PLAYERS) do
+		if p.id ~= player.id and not Core_IsPlayerEliminated(p.id)
+			and Player_ObserveRelationship(p.id, player.id) == R_ALLY then
+			table.insert(rel_allies, p)
+		end
+	end
+	if #rel_allies > #allies then
+		allies = rel_allies
+	end
+	local allies_count = #allies
+	if allies_count <= 0 then
+		return
+	end
+	
+	if AGS_GLOBAL_SETTINGS.MaintainTeamBalance >= AGS_GS_TEAM_BALANCE_POPULATION then
+		AGS_TeamBalance_UpdateTeamPopulation(player, allies, allies_count)
+		-- Medic pop redistribution disabled: MaximumMedicPopulation serves as
+		-- the siege-limit ceiling only; no medic_cap modifier is applied.
+		-- AGS_TeamBalance_UpdateTeamMedicPopulation(player, allies, allies_count)
+	end
+	
+	if AGS_GLOBAL_SETTINGS.MaintainTeamBalance >= AGS_GS_TEAM_BALANCE_RESOURCES then
+		AGS_TeamBalance_UpdateTeamResources(player, allies, allies_count)
+	end
+	
+	-- All limit scaling (+25% per leaver, ALWAYS active on player defeat)
+	-- Cap scaling is infrastructure that runs regardless of team balance mode.
+	AGS_TeamBalance_UpdateAllLimits(player, allies, allies_count)
+	-- Refresh restrictions so raised limits take effect immediately
+	for _, ally in pairs(allies) do
+		if type(CBA_Options_RevalidateAll) == "function" then
+			CBA_Options_RevalidateAll(ally)
+		end
+	end
+	
+	-- Auto-rate scaling — use total alive players (not just allies on this team)
+	-- because _mod.resource_amount and _mod.pop_cap_incease_on_interval are global.
+	if AGS_GLOBAL_SETTINGS.MaintainTeamBalance >= AGS_GS_TEAM_BALANCE_POPULATION then
+		local total_alive = 0
+		for _, p in ipairs(PLAYERS) do
+			if not Core_IsPlayerEliminated(p.id) then total_alive = total_alive + 1 end
+		end
+		AGS_TeamBalance_UpdateAutoRates(total_alive)
+		if type(AGS_PopulationAutomatic_ReconcileCapDrift) == "function" then
+			AGS_PopulationAutomatic_ReconcileCapDrift()
+		end
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Population Redistribution (integer division + ceiling)
+---------------------------------------------------------------------------------------------------
+
+function AGS_TeamBalance_UpdateTeamPopulation(player, allies, allies_count)
+	-- Get current bonus from this module for this team.
+	local current_per_player_bonus = 0
+	if AGS_TEAM_BALANCE_TEAM_BONUS[player.AGS_Team.index] ~= nil then
+		current_per_player_bonus = AGS_TEAM_BALANCE_TEAM_BONUS[player.AGS_Team.index]
+	end
+	-- Get his current pop capacity and his current bonus. Then split it between all allies.
+	local pop_value = AGS_GLOBAL_SETTINGS.MaximumPopulation + current_per_player_bonus
+	local pop_per_ally = _CeilTo5(pop_value / allies_count)
+	for _, ally in pairs(allies) do
+		-- Enforce ceiling
+		local current_cap = Player_GetCurrentPopulationCap(ally.id, CT_Personnel)
+		local effective_share = math.min(pop_per_ally, AGS_TEAM_BALANCE_MAX_POP - current_cap)
+		if effective_share > 0 then
+			AGS_TeamBalance_IncreaseMaxCapPopulation(ally, effective_share)
+			AGS_TeamBalance_IncreaseCapPopulation(ally, effective_share)
+		end
+	end
+	-- Update last value for this team
+	AGS_TEAM_BALANCE_TEAM_BONUS[player.AGS_Team.index] = current_per_player_bonus + pop_per_ally
+end
+
+---------------------------------------------------------------------------------------------------
+-- Medic Pop Redistribution (mirrors personnel logic for CT_Medic)
+---------------------------------------------------------------------------------------------------
+
+function AGS_TeamBalance_UpdateTeamMedicPopulation(player, allies, allies_count)
+	local current_medic_bonus = 0
+	if AGS_TEAM_BALANCE_MEDIC_BONUS[player.AGS_Team.index] ~= nil then
+		current_medic_bonus = AGS_TEAM_BALANCE_MEDIC_BONUS[player.AGS_Team.index]
+	end
+	local medic_value = (AGS_GLOBAL_SETTINGS.MaximumMedicPopulation or 0) + current_medic_bonus
+	if medic_value <= 0 then return end
+	local medic_per_ally = _CeilTo5(medic_value / allies_count)
+	if medic_per_ally <= 0 then return end
+	for _, ally in pairs(allies) do
+		Modifier_ApplyToPlayer(
+			Modifier_Create(MAT_Player, "medic_cap_player_modifier", MUT_Addition, false, medic_per_ally, ""),
+			ally.id, 0
+		)
+	end
+	AGS_TEAM_BALANCE_MEDIC_BONUS[player.AGS_Team.index] = current_medic_bonus + medic_per_ally
+end
+
+---------------------------------------------------------------------------------------------------
+-- Resource Redistribution
+---------------------------------------------------------------------------------------------------
+
+function AGS_TeamBalance_UpdateTeamResources(player, allies, allies_count)
+	local food_per_ally = _CeilTo5(Player_GetResource(player.id, RT_Food) / allies_count)
+	local wood_per_ally = _CeilTo5(Player_GetResource(player.id, RT_Wood) / allies_count)
+	local gold_per_ally = _CeilTo5(Player_GetResource(player.id, RT_Gold) / allies_count)
+	local stone_per_ally = _CeilTo5(Player_GetResource(player.id, RT_Stone) / allies_count)
+	-- Gift resources to each player.
+	for _, ally in pairs(allies) do 
+		Player_GiftResource(ally.id, RT_Food, food_per_ally)
+		Player_GiftResource(ally.id, RT_Wood, wood_per_ally)
+		Player_GiftResource(ally.id, RT_Gold, gold_per_ally)
+		Player_GiftResource(ally.id, RT_Stone, stone_per_ally)
+	end	
+end
+
+---------------------------------------------------------------------------------------------------
+-- All Limits Scaling (per-leaver flat bonuses + absorbed-siege headroom)
+--
+-- Issue 2 fix: previously siege_bonus was a flat ceil(MaximumMedicPopulation * 0.125)
+-- = +2 with default 15. When a leaver carrying ~8 siege transferred to a recipient
+-- already near cap, post-merge siegeLimit_count exceeded teamBalance_siegeLimit and
+-- CBA_Options_SiegeLimit_ApplyThreshold locked ALL siege production blueprints
+-- (Springald, Mangonel, Trebuchet, Culverin, civ-uniques) on the recipient.
+--
+-- Fix: scale siege/ram/siegeTower bumps by the leaver's actual absorbed footprint
+-- (siegeLimit_count + siegeLimit_pending, etc.) divided across surviving allies.
+-- Always at least the flat 12.5% floor so non-siege leavers still grant headroom.
+-- See KI-LEAVER-002 in .github/instructions/coding/known-issues.instructions.md.
+---------------------------------------------------------------------------------------------------
+
+function AGS_TeamBalance_UpdateAllLimits(player, allies, allies_count)
+	-- All bonuses reduced to 12.5% of base (was 25%) for gentler scaling, consistent with pop +50→+25.
+	local prod_bonus = math.ceil((AGS_GLOBAL_SETTINGS.MaximumProductionBuildings or 15) * 0.125)
+	local siege_floor = math.ceil((AGS_GLOBAL_SETTINGS.MaximumMedicPopulation or 15) * 0.125)
+	local ram_floor = math.ceil((RAM_LIMIT_MAX or 5) * 0.125)
+	local st_floor = math.ceil((SIEGE_TOWER_LIMIT_MAX or 5) * 0.125)
+	local ws_bonus = math.ceil((AGS_GLOBAL_SETTINGS.MaximumSiegeWorkshop or 2) * 0.125)
+	local op_bonus = math.ceil(20 * 0.125)
+	-- Per-leaver pop increment: +25 (was +50) for gentler scaling.
+	local pop_bonus = 25
+
+	-- Compute leaver's absorbed-asset footprint so each ally gets headroom for the
+	-- share they will inherit. Phase 4+5 of the leaver pipeline transfers all
+	-- siege/ram/siegeTower squads to allies; without matching cap headroom the
+	-- post-transfer recount will lock per-civ siege production.
+	local denom = math.max(1, allies_count)
+	local victim_siege = 0
+	local victim_ram = 0
+	local victim_st = 0
+	if type(player) == "table" then
+		victim_siege = (player.siegeLimit_count or 0) + (player.siegeLimit_pending or 0)
+		victim_ram = (player.ramLimit_count or 0) + (player.ramLimit_pending or 0)
+		victim_st = (player.siegeTowerLimit_count or 0) + (player.siegeTowerLimit_pending or 0)
+	end
+	local siege_share = math.ceil(victim_siege / denom)
+	local ram_share = math.ceil(victim_ram / denom)
+	local st_share = math.ceil(victim_st / denom)
+	local siege_bonus = math.max(siege_floor, siege_share)
+	local ram_bonus = math.max(ram_floor, ram_share)
+	local st_bonus = math.max(st_floor, st_share)
+
+	for _, ally in pairs(allies) do
+		ally.teamBalance_prodLimit = (ally.teamBalance_prodLimit or AGS_GLOBAL_SETTINGS.MaximumProductionBuildings) + prod_bonus
+		ally.teamBalance_siegeLimit = (ally.teamBalance_siegeLimit or AGS_GLOBAL_SETTINGS.MaximumMedicPopulation or 15) + siege_bonus
+		ally.teamBalance_ramLimit = (ally.teamBalance_ramLimit or RAM_LIMIT_MAX or 5) + ram_bonus
+		ally.teamBalance_siegeTowerLimit = (ally.teamBalance_siegeTowerLimit or SIEGE_TOWER_LIMIT_MAX or 5) + st_bonus
+		ally.teamBalance_workshopLimit = (ally.teamBalance_workshopLimit or AGS_GLOBAL_SETTINGS.MaximumSiegeWorkshop or 2) + ws_bonus
+		ally.teamBalance_outpostLimit = (ally.teamBalance_outpostLimit or 20) + op_bonus
+		ally.teamBalance_popBonus = (ally.teamBalance_popBonus or 0) + pop_bonus
+		pcall(AGS_TeamBalance_IncreaseCapPopulation, ally, pop_bonus)
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Auto-Rate Scaling (proportional to player loss)
+---------------------------------------------------------------------------------------------------
+
+function AGS_TeamBalance_UpdateAutoRates(current_alive_count)
+	if _mod == nil then return end
+	local start_count = _mod.start_player_count or 1
+	if start_count <= 0 then start_count = 1 end
+	if current_alive_count <= 0 then current_alive_count = 1 end
+	
+	-- Scale resource amount (only for numeric fixed amounts, not "unlimited"/"disabled")
+	if type(_mod._base_resource_amount) == "number" and _mod._base_resource_amount > 0 then
+		_mod.resource_amount = math.floor(_mod._base_resource_amount * start_count / current_alive_count)
+	end
+	
+	-- Scale population interval increase
+	local base_pop = _mod._base_pop_interval_amount or 0
+	if base_pop > 0 then
+		_mod.pop_cap_incease_on_interval = math.floor(base_pop * start_count / current_alive_count)
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Population Modifier Helpers
+--
+-- KI-LEAVER-003: Team-balance pop bumps must update the auto-pop tracked baseline
+-- (_AGS_AutoPop_Caps) and clear any pending soft-correction (_AGS_AutoPop_Corrections),
+-- otherwise AGS_PopulationAutomatic_ReconcileCapDrift sees the new modifier as drift
+-- (delta = tracked - effective < 0) and applies a negative correction within ≤5s
+-- (and immediately via the explicit reconcile call at the end of Phase 7), silently
+-- reverting the leaver bonus. The cap is also clamped at AGS_TEAM_BALANCE_MAX_POP so
+-- the tracked baseline never exceeds the engine ceiling.
+---------------------------------------------------------------------------------------------------
+
+function AGS_TeamBalance_IncreaseCapPopulation(player, pop_size)
+	if pop_size == nil or pop_size == 0 then return end
+	Modifier_ApplyToPlayer(Modifier_Create(MAT_Player, "personnel_cap_player_modifier", MUT_Addition, false, pop_size, ""), player.id, 0)
+	-- Sync auto-pop tracked baseline so the reconciler treats the bump as authoritative.
+	if _AGS_AutoPop_Caps ~= nil then
+		local tracked = _AGS_AutoPop_Caps[player.id] or 0
+		local ceiling = AGS_TEAM_BALANCE_MAX_POP or tracked + pop_size
+		_AGS_AutoPop_Caps[player.id] = math.min(tracked + pop_size, ceiling)
+	end
+	if _AGS_AutoPop_Corrections ~= nil then
+		_AGS_AutoPop_Corrections[player.id] = 0
+	end
+end
+
+function AGS_TeamBalance_IncreaseMaxCapPopulation(player, pop_size)
+	if pop_size == nil or pop_size == 0 then return end
+	Modifier_ApplyToPlayer(Modifier_Create(MAT_Player, "max_personnel_cap_player_modifier", MUT_Addition, false, pop_size, ""), player.id, 0)
+end

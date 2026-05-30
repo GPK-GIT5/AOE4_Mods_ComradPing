@@ -1,0 +1,186 @@
+--[[ 
+-----------------------------------------------------------------------
+Onslaught 
+by Comrad Ping 
+-----------------------------------------------------------------------
+Credits      / Assets used
+
+Kzoacn       / Castle Blood Automatic
+Woprock      / Advanced Game Settings
+Tommy        / Day & Night Cycle
+Skirp & Hank / Automatic Population (gameplay\ags_population_auto.scar)
+-----------------------------------------------------------------------
+]]
+-----------------------------------------------------------------------
+-- Imported Scripts
+-----------------------------------------------------------------------
+-- Cheat support for dev mode.
+--import("gameplay/cheat.scar") 
+-- Import Utility Scripts
+import("ScarUtil.scar")							-- Contains game helper functions
+-----------------------------------------------------------------------
+-- Core Onslaught stack
+-----------------------------------------------------------------------
+import("cba.scar")                          -- Kill Rewards (also imports official annihilation + onslaught_annihilation_patches + official wonder)
+
+-- Onslaught-only imports not owned by cba.scar.
+import("gameplay/ags_auto_age.scar")
+import("gameplay/options/Unlimited_Resources_Balance.scar")  -- Production time penalties for high-power units under Unlimited Resources
+
+-- UI/Win conditions are loaded by cba.scar.
+-- import("AGS/gameplay/ags_special_population_ui.scar") -- REMOVED: replaced by ags_limits_ui.scar (imported in cba.scar)
+
+local _onslaught_print = print
+local function print(...)
+	local message = tostring(select(1, ...))
+	if string.find(message, "^%[TRACE%]") or string.find(message, "^%[CBA%]") then
+		if type(Onslaught_ShouldLogTrace) == "function" and Onslaught_ShouldLogTrace() then
+			_onslaught_print(...)
+		end
+		return
+	end
+	_onslaught_print(...)
+end
+
+
+-----------------------------------------------------------------------
+-- Data
+-----------------------------------------------------------------------
+
+-- Global data table that can be referenced in script functions (e.g. _mod.module = "Mod")
+_mod = {
+	module = "Mod",
+	--is_diplomacy_enabled = false,
+	--is_tribute_enabled = true,
+	debug = false,
+	options = {},
+	icons = {
+		objective = "icons\\races\\common\\buildings\\keep",
+		--objectivekills = "icons\\races\\common\\victory_conditions\\victory_condition_conquest",
+		
+	},
+	speed = {						-- modifier multipliers / AGS Game/Unit rates
+		setspeed = 1,
+		build = 1,
+		repair = 1,
+		gather = 1,		
+		upgrade = 1,
+		production = 1,
+		modifiers = {},
+	},
+	-- From CBA S/H
+	pop_cap = AGS_GLOBAL_SETTINGS.MaximumPopulation,
+	pop_cap_incease_on_interval = 25,
+	pop_start = AGS_GLOBAL_SETTINGS.MinimumPopulation,
+	pop_interval = 150,
+	pop_interval_text = "150 seconds",
+	
+}
+
+-- Some functions can be prepended with "Mod_" to be called automatically as part of the scripting framework
+Core_RegisterModule(_mod.module)
+
+-----------------------------------------------------------------------
+-- Scripting framework 
+-----------------------------------------------------------------------
+
+-- Called during load as part of the game setup sequence
+function Mod_OnGameSetup()
+	Setup_GetWinConditionOptions(_mod.options)
+	-- Lobby Options (economy section parsed by shared helper)
+	CBA_Economy_ParseOptions()
+	-- AGS
+	AGS_Print("AGS_Cardinal_OnGameSetup")
+	local options = { }
+	Setup_GetWinConditionOptions(options)
+	Core_CallDelegateFunctions("SetupSettings", options)
+	Core_CallDelegateFunctions("AdjustSettings")
+	AGS_Print(AGS_GLOBAL_SETTINGS)
+	Core_CallDelegateFunctions("UpdateModuleSettings")
+end
+
+-- Called before initialization, preceding other module OnInit functions
+function Mod_PreInit()
+	--[[ Diplomacy & Tribute / Disabled
+	Core_CallDelegateFunctions("DiplomacyEnabled", false)
+	Core_CallDelegateFunctions("TributeEnabled", false)]]
+	
+end
+
+-- Called on match initialization before handing control to the player
+function Mod_OnInit() 
+	if AGS_GLOBAL_SETTINGS.CBA_Rewards == "onslaught" or AGS_GLOBAL_SETTINGS.CBA_Rewards == "arena"  then
+		CBA_Rewards_FindKeep()
+	end
+
+		
+	-- Store the local player so we can reference them later
+	localPlayer = Core_GetPlayersTableEntry(Game_GetLocalPlayer())
+	-- Set player behaviour when eliminated
+	_allow_spectators = true
+	-- From Advanced Game Script
+	Core_CallDelegateFunctions("EarlyInitializations")
+	-- CALLING FUNCTIONS
+	CBA_Economy_SetFOW()
+	CBA_Economy_SetStartingResources("onslaught")
+	CBA_Economy_RemoveGaia()
+	Religious_UpdateConditions(_mod)
+	
+	-- NOTE: Safe sacred site lookup (handles maps without beacons)
+	egroup = EGroup_Create("sites")
+	World_GetAllNeutralEntities(egroup)
+	EGroup_Filter(egroup,"special_beacon",FILTER_KEEP)
+	if EGroup_Count(egroup) > 0 then
+		local site =  EGroup_GetEntityAt(egroup, 1)
+		_CBA.center = Entity_GetPosition(site)
+		print("[CBA] Sacred site found, center set")
+	else
+		_CBA.center = World_Pos(0, 0, 0)
+		print("[CBA] No sacred sites found, using map center (0,0,0)")
+	end
+	
+	
+	
+	
+end
+
+-- OnInit invokes custom handle for AGS modules.
+function Mod_PostInit()
+	AGS_Print("AGS_Cardinal_PostInit")
+	Core_CallDelegateFunctions("LateInitializations")	
+end
+
+-- Preset is safe state for anything that should be done before start. Such as additional entities, vision etc.
+function Mod_Preset() 	
+	AGS_Print("AGS_Cardinal_Preset")	
+	Core_CallDelegateFunctions("PresetInitialize")
+	Core_CallDelegateFunctions("PresetExecute")
+	Core_CallDelegateFunctions("PresetFinalize")
+end
+		
+-- PreStart is followed by 1 frame delay with normal Start.
+function Mod_PreStart()
+	AGS_Print("AGS_Cardinal_PreStart")
+	Core_CallDelegateFunctions("PrepareStart")
+end
+
+-- Called after initialization is done when game is fading up from black
+function Mod_Start()
+	-- Setup the player's objective UI by calling the below function directly
+	Core_CallDelegateFunctions("OnStarting")
+	Core_CallDelegateFunctions("OnPlay")
+	if type(statechange) == "function" then
+		statechange()
+		Rule_AddInterval(statechange, 600)
+	else
+		print("[TRACE] Day/night cycle disabled: statechange() not loaded")
+	end
+end
+
+-----------------------------------------------------------------------
+-- Mod Functions
+-----------------------------------------------------------------------
+
+-- Economy helpers (Mod_RemoveGaia, Mod_setStartingResources, Mod_SetFOW)
+-- moved to gameplay/cba_economy.scar
+

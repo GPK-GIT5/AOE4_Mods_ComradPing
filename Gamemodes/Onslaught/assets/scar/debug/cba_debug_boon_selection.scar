@@ -1,0 +1,216 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — Boon Selection UI
+-- Console commands for testing the BoonSelection panel.
+-- Requires boonui/boon_selection.scar to be loaded.
+--
+-- Console commands:
+--   BoonDebug_ShowTestPanel()           — Show panel with 3 test choices
+--   BoonDebug_ShowCiv("templar","feudal") — Show any special civ's choices for a tier
+--   BoonDebug_ShowTemplar("feudal")     — Show Templar commandery choices for a tier
+--   BoonDebug_ShowAbbasid("feudal")     — Show Abbasid wing choices for a tier
+--   BoonDebug_ShowAyyubid("feudal")     — Show Ayyubid wing choices for a tier
+--   BoonDebug_ShowGoldenHorde("feudal") — Show Golden Horde tent choices for a tier
+--   BoonDebug_ShowChosenFamilies()      — Print chosen wing families for local player
+--   BoonDebug_ToggleLeftoverAutocomplete() — Toggle auto-complete for leftover wings
+--   BoonDebug_ForceSelect(n)            — Force-select option n while panel is open
+--   BoonDebug_Hide()                    — Force-hide the panel
+--   BoonDebug_StressToggle(n)           — Rapid show/hide n times (D3D crash test)
+---------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------
+-- Test panel with generic choices
+---------------------------------------------------------------------------------------------------
+
+function BoonDebug_ShowTestPanel()
+	BoonSelection_Show({
+		title = "[TEST] Choose a Boon",
+		subtitle = "This is a debug test panel with 3 sample choices.",
+		choices = {
+			{
+				title = "Gold Rush",
+				unit = "+500 Gold",
+				desc = "Instantly grants 500 gold to your treasury.",
+				icon = "pack://application:,,,/WPFGUI;component/icons/resources/resource_gold.png",
+			},
+			{
+				title = "Timber Harvest",
+				unit = "+500 Wood",
+				desc = "Instantly grants 500 wood to your stockpile.",
+				icon = "pack://application:,,,/WPFGUI;component/icons/resources/resource_wood.png",
+			},
+			{
+				title = "Stone Quarry",
+				unit = "+500 Stone",
+				desc = "Instantly grants 500 stone to your reserves.",
+				icon = "pack://application:,,,/WPFGUI;component/icons/resources/resource_stone.png",
+			},
+		},
+		on_select = function(choice_index)
+			print(string.format("[BOON_DEBUG] Test panel selected option %d", choice_index))
+		end,
+		timeout = 15,
+		default_choice = 1,
+	})
+end
+
+---------------------------------------------------------------------------------------------------
+-- Show any special civ's choices for a given tier (unified dispatcher)
+---------------------------------------------------------------------------------------------------
+
+function BoonDebug_ShowCiv(civ_name, tier_name)
+	civ_name = civ_name or "templar"
+	tier_name = tier_name or "feudal"
+
+	-- Find local player for filtered wing preview
+	local local_player_id = nil
+	if PLAYERS ~= nil then
+		for _, player in ipairs(PLAYERS) do
+			if player.isLocal then
+				local_player_id = player.id
+				break
+			end
+		end
+	end
+
+	local choices, title, subtitle = BoonSelection_GetChoicesForCiv(civ_name, tier_name, local_player_id)
+	if choices == nil or #choices == 0 then
+		print(string.format("[BOON_DEBUG] No choices for civ=%s tier=%s", tostring(civ_name), tostring(tier_name)))
+		return
+	end
+
+	BoonSelection_Show({
+		title = title,
+		subtitle = subtitle,
+		choices = choices,
+		on_select = function(choice_index)
+			local chosen = choices[choice_index]
+			if chosen then
+				print(string.format("[BOON_DEBUG] %s %s choice: %d — %s (%s)",
+					civ_name, tier_name, choice_index, chosen.title, tostring(chosen.upgrade)))
+			end
+		end,
+		timeout = 30,
+		default_choice = 1,
+	})
+end
+
+---------------------------------------------------------------------------------------------------
+-- Show Templar commandery choices for a given tier
+---------------------------------------------------------------------------------------------------
+
+function BoonDebug_ShowTemplar(tier_name)
+	BoonDebug_ShowCiv("templar", tier_name or "feudal")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Show Abbasid wing choices for a given tier
+---------------------------------------------------------------------------------------------------
+
+function BoonDebug_ShowAbbasid(tier_name)
+	BoonDebug_ShowCiv("abbasid", tier_name or "feudal")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Show Ayyubid wing choices for a given tier
+---------------------------------------------------------------------------------------------------
+
+function BoonDebug_ShowAyyubid(tier_name)
+	BoonDebug_ShowCiv("abbasid_ha_01", tier_name or "feudal")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Show Golden Horde tent choices for a given tier
+---------------------------------------------------------------------------------------------------
+
+function BoonDebug_ShowGoldenHorde(tier_name)
+	BoonDebug_ShowCiv("mongol_ha_gol", tier_name or "feudal")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Wing family diagnostics
+---------------------------------------------------------------------------------------------------
+
+function BoonDebug_ShowChosenFamilies()
+	if PLAYERS == nil then
+		print("[BOON_DEBUG] PLAYERS not initialized")
+		return
+	end
+	for _, player in ipairs(PLAYERS) do
+		if player.isLocal then
+			local civ = Player_GetRaceName(player.id)
+			local chosen = BoonSelection_GetChosenWingFamilies(player.id, civ)
+			local families = {}
+			for family, _ in pairs(chosen) do
+				table.insert(families, family)
+			end
+			table.sort(families)
+			local remaining = {}
+			for _, f in ipairs(_BOON_WING_FAMILIES) do
+				if not chosen[f] then
+					table.insert(remaining, f)
+				end
+			end
+			print(string.format("[BOON_DEBUG] civ=%s chosen=[%s] remaining=[%s]",
+				civ, table.concat(families, ", "), table.concat(remaining, ", ")))
+			return
+		end
+	end
+	print("[BOON_DEBUG] No local player found")
+end
+
+function BoonDebug_ToggleLeftoverAutocomplete()
+	_AUTOAGE_WING_AUTOCOMPLETE_LEFTOVER = not _AUTOAGE_WING_AUTOCOMPLETE_LEFTOVER
+	print(string.format("[BOON_DEBUG] _AUTOAGE_WING_AUTOCOMPLETE_LEFTOVER = %s",
+		tostring(_AUTOAGE_WING_AUTOCOMPLETE_LEFTOVER)))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Console shortcuts
+---------------------------------------------------------------------------------------------------
+
+function BoonDebug_ForceSelect(index)
+	BoonSelection_ForceSelect(index)
+end
+
+function BoonDebug_Hide()
+	BoonSelection_Hide()
+	print("[BOON_DEBUG] Panel hidden.")
+end
+
+---------------------------------------------------------------------------------------------------
+-- D3D crash stress test: rapid show/hide cycling
+---------------------------------------------------------------------------------------------------
+
+function BoonDebug_StressToggle(count)
+	count = count or 10
+	print(string.format("[BOON_DEBUG] Stress test: %d rapid show/hide cycles", count))
+
+	for i = 1, count do
+		BoonSelection_Show({
+			title = string.format("[STRESS] Cycle %d/%d", i, count),
+			subtitle = "Rapid toggle test",
+			choices = {
+				{ title = "A", unit = "Test", desc = "Stress test option", icon = "" },
+				{ title = "B", unit = "Test", desc = "Stress test option", icon = "" },
+			},
+			on_select = function() end,
+			timeout = 0,
+			default_choice = 1,
+		})
+		BoonSelection_Hide()
+	end
+
+	-- Final show to verify panel still works
+	BoonSelection_Show({
+		title = "[STRESS] Complete",
+		subtitle = string.format("Survived %d cycles. Click to dismiss.", count),
+		choices = {
+			{ title = "OK", unit = "", desc = "Panel is functional.", icon = "" },
+		},
+		on_select = function()
+			print(string.format("[BOON_DEBUG] Stress test passed: %d cycles", count))
+		end,
+		timeout = 10,
+		default_choice = 1,
+	})
+end

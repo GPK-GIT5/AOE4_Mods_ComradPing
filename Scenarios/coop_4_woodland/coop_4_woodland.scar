@@ -1,0 +1,511 @@
+--[[ COOP 4 Players - Woodland/HRE
+By Comrad Ping
+
+Credits:
+AGameAnx - GetAIDifficulty
+Foxplot  - Patrol_Cycle, Units_Deploy 
+Woprock  - Advanced Game Settings functions (AGS_GetCivilizationEntity, AGS_ENTITY_TABLE)
+]]
+import("MissionOMatic/MissionOMatic.scar")   -- this imports the Cardinal scripts as well
+import("winconditions/annihilation.scar")    -- eliminates players without units left
+--import("winconditions/surrender.scar")	        -- Support for player surrender (through pause menu)
+--import("winconditions/elimination.scar")		-- Support for player quitting or dropping (through pause menu or disconnection)   
+
+-- Scenario related
+import("scar/Coop_4_Woodland_difficulty.scar")
+import("scar/Coop_4_Woodland_data.scar")
+import("scar/Coop_4_Woodland_debug.scar")
+import("scar/Coop_4_Woodland_spawns.scar")
+import("scar/Coop_4_Woodland_objectives.scar")
+import("scar/Coop_4_Woodland_disconnect.scar")
+import("scar/diplomacy/Coop_4_Woodland_tribute.scar")
+
+--import("gameplay/chi/current_dynasty_ui.scar")	  -- Displays Chinese Dynasty UI
+
+
+function Mission_SetupPlayers()
+	
+	-- Get player IDs for each player
+	player1 = World_GetPlayerAt(1) -- Allies
+	player2 = World_GetPlayerAt(2) 
+	player3 = World_GetPlayerAt(3) 
+	player4 = World_GetPlayerAt(4) 
+	player5 = World_GetPlayerAt(5) -- Hostile
+
+	-- Setup AI starting age 
+	Player_SetCurrentAge(player5, AGE_CASTLE)
+	
+end
+
+
+function Mission_SetupVariables()	-- create any extra sgroups, egroups, and mission variables in here
+	
+	AI_Difficulty = GetAIDifficulty(player5)
+	Difficulty_Init()
+	-- SGroup Tracker
+	sg_player_team = SGroup_CreateIfNotFound("sg_player_team") 
+	
+	
+	-------------
+	-- Phase 1 --
+	-------------
+	
+	-- Allied
+	
+	-- Start / EGroups / Spawn_TC
+	eg_player_tc = EGroup_CreateIfNotFound("eg_player_tc")
+	eg_player1_tc = EGroup_CreateIfNotFound("eg_player1_tc")
+	eg_player2_tc = EGroup_CreateIfNotFound("eg_player2_tc")
+	eg_player3_tc = EGroup_CreateIfNotFound("eg_player3_tc")
+	eg_player4_tc = EGroup_CreateIfNotFound("eg_player4_tc")
+	
+	-- Starter Unit spawner
+	sg_player1_start = SGroup_CreateIfNotFound("sg_player1_start") 
+	sg_player2_start = SGroup_CreateIfNotFound("sg_player2_start")
+	sg_player3_start = SGroup_CreateIfNotFound("sg_player3_start")
+	sg_player4_start = SGroup_CreateIfNotFound("sg_player4_start")
+	-- Reinforcements
+	sg_player1_reinforcements = SGroup_CreateIfNotFound("sg_player1_reinforcements")
+	sg_player2_reinforcements = SGroup_CreateIfNotFound("sg_player2_reinforcements")
+	sg_player3_reinforcements = SGroup_CreateIfNotFound("sg_player3_reinforcements")
+	sg_player4_reinforcements = SGroup_CreateIfNotFound("sg_player4_reinforcements")
+	
+	group_spawned = false
+	
+	-- Enemey
+	
+	-- Gold Camp / Guards
+	sg_gold_guards_1 = SGroup_CreateIfNotFound("sg_gold_guards_1")
+	sg_gold_guards_2 = SGroup_CreateIfNotFound("sg_gold_guards_2") 
+	-- Checkpoint / groups
+	sg_checkpoint_group_1 = SGroup_CreateIfNotFound("sg_checkpoint_group_1")
+	sg_checkpoint_group_2 = SGroup_CreateIfNotFound("sg_checkpoint_group_2")
+	sg_checkpoint_group_all = SGroup_CreateIfNotFound("sg_checkpoint_group_all")
+	-- Checkpoint / units
+	sg_checkpoint_units_1 = SGroup_CreateIfNotFound("sg_checkpoint_units_1")
+	sg_checkpoint_units_2 = SGroup_CreateIfNotFound("sg_checkpoint_units_2")	
+	sg_checkpoint_units_3 = SGroup_CreateIfNotFound("sg_checkpoint_units_3")
+	sg_checkpoint_units_4 = SGroup_CreateIfNotFound("sg_checkpoint_units_4")
+	-- Middle / Patrols
+	sg_middle_patrol_1 = SGroup_CreateIfNotFound("sg_middle_patrol_1")
+	sg_middle_patrol_2 = SGroup_CreateIfNotFound("sg_middle_patrol_2")
+	sg_middle_patrol_3 = SGroup_CreateIfNotFound("sg_middle_patrol_3")
+	sg_middle_patrol_4 = SGroup_CreateIfNotFound("sg_middle_patrol_4")
+	
+	-------------
+	-- Phase 2 --
+	-------------
+	
+	-- Allied
+	-- Villager Groups
+	sg_player1_villagers = SGroup_CreateIfNotFound("sg_player1_villagers")
+	sg_player2_villagers = SGroup_CreateIfNotFound("sg_player2_villagers")
+	sg_player3_villagers = SGroup_CreateIfNotFound("sg_player3_villagers")
+	sg_player4_villagers = SGroup_CreateIfNotFound("sg_player4_villagers")
+	
+	-- Enemey
+	-- Delayed attack waves / Side: Player 1 & 2
+	sg_waves_main_1_01a = SGroup_CreateIfNotFound("sg_waves_main_1_01a") -- Light
+	sg_waves_main_1_01b = SGroup_CreateIfNotFound("sg_waves_main_1_01b") -- Light, flank
+	sg_waves_main_1_01c = SGroup_CreateIfNotFound("sg_waves_main_1_01c") -- Light
+	sg_waves_main_1_01d = SGroup_CreateIfNotFound("sg_waves_main_1_01d") -- flank
+	sg_waves_main_1_02 = SGroup_CreateIfNotFound("sg_waves_main_1_02") -- Siege
+	sg_waves_main_1_03 = SGroup_CreateIfNotFound("sg_waves_main_1_03") -- Armored Cav
+	sg_waves_main_1_04 = SGroup_CreateIfNotFound("sg_waves_main_1_04")
+	sg_waves_main_1_05 = SGroup_CreateIfNotFound("sg_waves_main_1_05")
+	sg_waves_main_1_06 = SGroup_CreateIfNotFound("sg_waves_main_1_06")
+	sg_waves_main_1_07 = SGroup_CreateIfNotFound("sg_waves_main_1_07")
+	sg_waves_main_1_08 = SGroup_CreateIfNotFound("sg_waves_main_1_08") -- AI = Hardest
+	sg_waves_main_1_09 = SGroup_CreateIfNotFound("sg_waves_main_1_09") -- AI = Hardest
+	sg_waves_main_1_10 = SGroup_CreateIfNotFound("sg_waves_main_1_10") -- AI = Hardest
+	sg_waves_main_1_11 = SGroup_CreateIfNotFound("sg_waves_main_1_11") -- AI = Hardest
+	-- Delayed attack waves / Side: Player 3 & 4
+	sg_waves_main_2_01a = SGroup_CreateIfNotFound("sg_waves_main_2_01a") -- Light
+	sg_waves_main_2_01b = SGroup_CreateIfNotFound("sg_waves_main_2_01b") -- Light, flank
+	sg_waves_main_2_01c = SGroup_CreateIfNotFound("sg_waves_main_2_01c") -- Light
+	sg_waves_main_2_01d = SGroup_CreateIfNotFound("sg_waves_main_2_01d") -- flank
+	sg_waves_main_2_02 = SGroup_CreateIfNotFound("sg_waves_main_2_02") -- Siege
+	sg_waves_main_2_03 = SGroup_CreateIfNotFound("sg_waves_main_2_03") -- Armored Cav
+	sg_waves_main_2_04 = SGroup_CreateIfNotFound("sg_waves_main_2_04")
+	sg_waves_main_2_05 = SGroup_CreateIfNotFound("sg_waves_main_2_05")
+	sg_waves_main_2_06 = SGroup_CreateIfNotFound("sg_waves_main_2_06")
+	sg_waves_main_2_07 = SGroup_CreateIfNotFound("sg_waves_main_2_07")
+	sg_waves_main_2_08 = SGroup_CreateIfNotFound("sg_waves_main_2_08") -- AI = Hardest
+	sg_waves_main_2_09 = SGroup_CreateIfNotFound("sg_waves_main_2_09") -- AI = Hardest
+	sg_waves_main_2_10 = SGroup_CreateIfNotFound("sg_waves_main_2_10") -- AI = Hardest
+	sg_waves_main_2_11 = SGroup_CreateIfNotFound("sg_waves_main_2_11") -- AI = Hardest
+	
+	-- Guards @ City walls / Side: Player 1 & 2
+	sg_city_walls_1a = SGroup_CreateIfNotFound("sg_city_walls_1a")
+	sg_city_walls_2a = SGroup_CreateIfNotFound("sg_city_walls_2a")
+	sg_city_walls_3a = SGroup_CreateIfNotFound("sg_city_walls_3a")
+	sg_city_walls_4a = SGroup_CreateIfNotFound("sg_city_walls_4a")
+	-- Guards @ City walls / Side: Player 3 & 4
+	sg_city_walls_1b = SGroup_CreateIfNotFound("sg_city_walls_1b")
+	sg_city_walls_2b = SGroup_CreateIfNotFound("sg_city_walls_2b")
+	sg_city_walls_3b = SGroup_CreateIfNotFound("sg_city_walls_3b")
+	sg_city_walls_4b = SGroup_CreateIfNotFound("sg_city_walls_4b")
+	
+	-- Guards @ Bridge Replacement groups
+	sg_bridge_reinforcement_1 = SGroup_CreateIfNotFound("sg_bridge_reinforcement_1")
+	sg_bridge_reinforcement_2 = SGroup_CreateIfNotFound("sg_bridge_reinforcement_2")
+
+	-------------
+	-- Phase 3 --
+	-------------
+		
+	-- Guards @ Keep Walls  
+	sg_city_gates_1 = SGroup_CreateIfNotFound("sg_city_gates_1")
+	sg_city_gates_2 = SGroup_CreateIfNotFound("sg_city_gates_2")
+	sg_city_gates_3 = SGroup_CreateIfNotFound("sg_city_gates_3")
+	sg_city_gates_4 = SGroup_CreateIfNotFound("sg_city_gates_4")
+	sg_city_gates_5 = SGroup_CreateIfNotFound("sg_city_gates_5")
+		
+	-- Patrols @ Inner City
+	sg_city_patrol_1 = SGroup_CreateIfNotFound("sg_city_patrol_1")
+	sg_city_patrol_2 = SGroup_CreateIfNotFound("sg_city_patrol_2")
+	
+	-- Final Waves
+	sg_waves_main_3_01 = SGroup_CreateIfNotFound("sg_waves_main_3_01")
+	sg_waves_main_3_02 = SGroup_CreateIfNotFound("sg_waves_main_3_02")
+	sg_waves_main_3_03 = SGroup_CreateIfNotFound("sg_waves_main_3_03")
+	sg_waves_main_3_04 = SGroup_CreateIfNotFound("sg_waves_main_3_04")
+	sg_waves_main_3_05 = SGroup_CreateIfNotFound("sg_waves_main_3_05")
+	sg_waves_main_3_06 = SGroup_CreateIfNotFound("sg_waves_main_3_06")
+	
+	-- Keep EGroup
+	eg_keep_targets = EGroup_CreateIfNotFound("eg_keep_targets")
+	EGroup_AddEGroup(eg_keep_targets, eg_keep_target1)
+	EGroup_AddEGroup(eg_keep_targets, eg_keep_target2)
+	
+	
+end
+
+-- Set up any restrictions (i.e. locking out units, etc) in here
+function Mission_SetRestrictions()	
+	
+	for _, player in pairs(PLAYERS) do
+		ApplyRestrictionProfile(player, "starting")
+	end
+	_Validate_RestrictionCoverage()
+	
+end
+
+-- This function will be called before the intro cinematic
+function Mission_Preset()	-- any other setup to do before the mission starts (i.e. set up rules, spawn units, etc)
+	
+	AI_SetPersonality(player5, "default_campaign")
+	
+	-- Population 
+	Modifier_ApplyToPlayer(Modifier_Create(MAT_Player, "personnel_cap_player_modifier", MUT_Addition, false, 50, ""), player1, 0)
+	Modifier_ApplyToPlayer(Modifier_Create(MAT_Player, "personnel_cap_player_modifier", MUT_Addition, false, 50, ""), player2, 0)
+	Modifier_ApplyToPlayer(Modifier_Create(MAT_Player, "personnel_cap_player_modifier", MUT_Addition, false, 50, ""), player3, 0)
+	Modifier_ApplyToPlayer(Modifier_Create(MAT_Player, "personnel_cap_player_modifier", MUT_Addition, false, 50, ""), player4, 0)
+	-- Add professional scout upgrades
+	Player_CompleteUpgrade(player1, UPG.COMMON.UPGRADE_SCOUT_FORESTER)
+	Player_CompleteUpgrade(player2, UPG.COMMON.UPGRADE_SCOUT_FORESTER)
+	Player_CompleteUpgrade(player3, UPG.COMMON.UPGRADE_SCOUT_FORESTER)
+	Player_CompleteUpgrade(player4, UPG.COMMON.UPGRADE_SCOUT_FORESTER)
+	-- enable resource pickups
+	Player_SetStateModelBool(player1, "player_can_interact_with_resource_pickups", true)
+	Player_SetStateModelBool(player2, "player_can_interact_with_resource_pickups", true)
+	Player_SetStateModelBool(player3, "player_can_interact_with_resource_pickups", true)
+	Player_SetStateModelBool(player4, "player_can_interact_with_resource_pickups", true)
+	
+	--Initialize objectives
+	SeizeCity_InitObjectives()   -- MAIN: Timer countdown
+	DestroyKeep_InitObjectives() -- MAIN: Final phase / Destroy keeps
+	CaptureGold_InitObjectives() -- Pre-Phase
+	PrepareDefences_InitObjectives() -- Notification timer: Counter attacks
+	CaptureBridges_InitObjectives() -- Phase 1
+	BreachWalls_EnemiesTownInit() -- Phase 3 (Final)
+	-- Initialize path data
+	Unit_Path_Data() 	
+	
+
+	
+end
+
+-- This function will be called after the intro cinematic, before the player takes control
+function Mission_Start()	-- this is triggered after the intro, just as control is passed to the player
+	
+	--[[ Set Players starting age
+	Player_SetCurrentAge(player1, AGE_FEUDAL) 
+	Player_SetCurrentAge(player2, AGE_FEUDAL)
+	Player_SetCurrentAge(player3, AGE_FEUDAL) 
+	Player_SetCurrentAge(player4, AGE_FEUDAL)
+	]]
+	
+	-- Spawn Allied
+	Rule_AddOneShot(Start_Setup_Players, 0) -- Delay to load models from age up
+	-- Spawn Enemey
+	Start_Setup_Enemies()
+
+	-- Initialize tribute/diplomacy module
+	Tribute_Init()
+	
+	-- Start objectives
+--	Objective_Start(OBJ_SeizeCity,true, false)
+	Objective_Start(OBJ_CaptureGold_Main,true, false)
+	Objective_Start(OBJ_CaptureGold_side1, false, false)
+	Objective_Start(OBJ_CaptureGold_side2, false, false)
+	
+	-- SGroup Tracker
+	Rule_AddInterval(SGroup_Tracker, 60, { player = player1 })
+	Rule_AddInterval(SGroup_Tracker, 60, { player = player2 })
+	Rule_AddInterval(SGroup_Tracker, 60, { player = player3 })
+	Rule_AddInterval(SGroup_Tracker, 60, { player = player4 })
+
+	-- Populate shared player slot list (used by disconnect handling)
+	ALL_PLAYER_SLOTS = { player1, player2, player3, player4, player5 }
+
+	-- Disconnect system: slots 1-4 are co-op human seats by design
+	-- (Player_IsHuman() only works for local player in multiplayer)
+	for i = 1, 4 do
+		g_original_player_types[i] = true
+	end
+	
+	-- Prevent AI takeover
+	Rule_AddGlobalEvent(Reset_AI_OnMigrated, GE_AIPlayer_Migrated)
+	Rule_AddGlobalEvent(Reset_AI_OnTakeOver, GE_AITakeOver)
+	Rule_AddInterval(Reset_AI, 1)
+	
+	-- Setup TC starting area
+	Spawn_TC()
+	
+	-- Enable TC build menu
+	Player_SetStateModelFloat(player1, "has_capital", 1)
+	Player_SetStateModelFloat(player2, "has_capital", 1)
+	Player_SetStateModelFloat(player3, "has_capital", 1)
+	Player_SetStateModelFloat(player4, "has_capital", 1)
+	
+	-- UI: Hide popcap initially, disable condensed objectives
+	UI_SetPlayerDataContext(player1, { PopulationCapOn = false, hide_condensed_objectives_override = true })
+	UI_SetPlayerDataContext(player2, { PopulationCapOn = false, hide_condensed_objectives_override = true })
+	UI_SetPlayerDataContext(player3, { PopulationCapOn = false, hide_condensed_objectives_override = true })
+	UI_SetPlayerDataContext(player4, { PopulationCapOn = false, hide_condensed_objectives_override = true })
+	
+	-- Disable automatic targeting for buildings
+	EGroup_SetTargetingType(eg_buildings_hre, Targeting_Manual)
+end
+
+--The recipe can be used to create initial spawns, set up objectives or completion/failure states
+function GetRecipe()
+
+	local recipe = {
+
+		
+		-- Defining Locations for reference in script
+		--locations = {
+			--{ descriptor = "descriptorToUse", marker = mkr_mkrNameInEditor, player = player1 },
+		--},
+		
+		
+		-- Modules
+		modules = {
+
+			-- Player starting units spawner when the mission starts. 
+			-- Define the spawn location, unit type, number of units and can mention where to spawn them.
+			--{
+				--type = "UnitSpawner",
+				--player = player1,
+				--spawnLocation = mkr_mkrNameInEditor,
+				--units = {
+					--{type = "scar_spearman", numSquads = 3, spawn = mkr_mkrNameInEditor},
+				--},
+			--},
+			
+		},
+
+		
+		-- Presentation aspects for the start or end of a mission
+		onStart = {
+			intelEvent = "",
+			expositionCamera = {},
+			titleCard = {
+				icon = "icons/campaign/campaign_angevin_the_conquest", --icon to use for title card on mission start
+				location = LOC("Location, year"),
+			},
+			actions = {
+			},
+		},
+	}
+
+		
+		
+	return recipe
+
+end
+
+
+-- Unlocks Chinese Dynasty UI
+function DynastyUI_unlocked()
+	
+	for i, player in pairs(PLAYERS) do 
+
+		if Player_GetRaceName(player.id) == "chinese" then 
+			-- Dynasties unlocked
+			Player_CompleteUpgrade(player.id, BP_GetUpgradeBlueprint "player_dynasty1_chi")
+			Player_SetStateModelBool(player.id, "dynasty_1_was_completed_chi",true) 
+			Player_CompleteUpgrade(player.id, BP_GetUpgradeBlueprint "player_dynasty2_chi")
+			Player_SetStateModelBool(player.id, "dynasty_2_was_completed_chi",true) 
+
+			-- Update UI
+			Player_SetStateModelFloat(player.id, "current_dynasty_chi",1)
+			if Game_GetLocalPlayer() == player.id then 
+				DynastyUI_Update()
+			end
+
+			Player_SetStateModelFloat(player.id, "current_dynasty_chi",2)
+			if Game_GetLocalPlayer() == player.id then 
+				DynastyUI_Update()
+			end
+		end
+	end
+	
+end
+
+-- Group all Player units for Proximity Marker
+function SGroup_Tracker(context, data)
+	
+	local player = data.player 
+	
+	Player_GetAll(player)
+	SGroup_Filter(sg_allsquads, "military", FILTER_KEEP)
+	SGroup_AddGroup(sg_player_team, sg_allsquads)
+	
+	
+end 
+
+-- Patrol_Cycle & Units_Deploy / Thanks to Foxplot
+function Patrol_Cycle(context, data) -- Used to cycle units between waypoints
+	
+	local sgroup = data.sgroup 
+	local path = data.path 
+	
+	Cmd_FormationAttackMove(sgroup, path[1])
+	for index, mkr in pairs(path) do
+		if index > 1 then
+			Cmd_FormationAttackMove(sgroup, mkr, true)
+		end
+	end	
+	
+end
+
+-- 'Deploy_Unit' & 'Gaurdian_Raid' combined
+-- Helper: Resolve bombard SBP for a specific player's civ
+function GetBombardSBP(player)
+	local civ = string.lower(Player_GetRaceName(player))
+	local resolved = ResolveCivKey(civ) or civ
+	local bombard_attrib = CBA_SIEGE_TABLE[resolved] and CBA_SIEGE_TABLE[resolved].bombard
+	if bombard_attrib then
+		return BP_GetSquadBlueprint(bombard_attrib)
+	end
+	return nil
+end
+
+-- Helper: Convert scar_bombard type strings to actual SBPs for a player
+function ConvertBombardTypes(player, unit_type_table)
+	local converted = {}
+	for i, entry in ipairs(unit_type_table) do
+		local new_entry = {}
+		for k, v in pairs(entry) do
+			new_entry[k] = v
+		end
+		
+		if new_entry.type == "scar_bombard" then
+			local sbp = GetBombardSBP(player)
+			if sbp then
+				new_entry.sbp = sbp
+				new_entry.type = nil  -- Remove type key
+			else
+				print("[WARN] Could not resolve bombard SBP for " .. Player_GetRaceName(player))
+			end
+		end
+		
+		converted[i] = new_entry
+	end
+	return converted
+end
+
+function Units_Deploy(context, data) -- Used to spawn units / attack groups
+
+	local player = data.player
+	local sgroup = data.sgroup
+	local unit_type = data.unit_type
+	local spawn_loc = data.spawn_loc
+	local path = data.path 
+
+	-- Convert any scar_bombard entries to actual SBPs
+	local resolved_units = ConvertBombardTypes(player, unit_type)
+
+	UnitEntry_DeploySquads(player, sgroup, resolved_units, spawn_loc)
+	Cmd_FormationAttackMove(sgroup, path[1])
+	for index, mkr in pairs(path) do
+		if index > 1 then
+			Cmd_FormationAttackMove(sgroup, mkr, true)
+		end
+	end
+
+end
+
+-- From Advanced Game Settings by Woprock (DLC-safe: resolves through DLC_CIV_PARENT_MAP)
+function AGS_GetCivilizationEntity(player_civ, bp_type)
+	local resolved = ResolveCivKey(player_civ)
+	if resolved == nil then
+		error("[AGS] Unknown civ '" .. tostring(player_civ) .. "' in AGS_GetCivilizationEntity")
+	end
+	local bp = AGS_ENTITY_TABLE[resolved][bp_type]
+	if bp == nil or bp == false then return nil end
+	return BP_GetEntityBlueprint(bp)
+end 
+
+-- Duplicate for siege units
+function AGS_GetSiegeEntity(player_civ, bp_type)
+	local resolved = ResolveCivKey(player_civ)
+	if resolved == nil then
+		error("[AGS] Unknown civ '" .. tostring(player_civ) .. "' in AGS_GetSiegeEntity")
+	end
+	return BP_GetEntityBlueprint(CBA_SIEGE_TABLE[resolved][bp_type])
+end
+
+function AGS_GetSiegeSquad(player_civ, bp_type)
+	local resolved = ResolveCivKey(player_civ)
+	if resolved == nil then
+		error("[AGS] Unknown civ '" .. tostring(player_civ) .. "' in AGS_GetSiegeSquad")
+	end
+	return BP_GetSquadBlueprint(CBA_SIEGE_TABLE[resolved][bp_type])
+end
+
+-- End scenario
+g_gameOver = false
+
+function Defeat_Function()
+	if g_gameOver then return end
+	g_gameOver = true
+	Tribute_Cleanup()
+	for _, player in ipairs(PLAYERS) do
+		_RemoveTC_VisionSuppression(player.id)
+	end
+	Rule_RemoveGlobalEvent(Reset_AI_OnMigrated)
+	Rule_RemoveGlobalEvent(Reset_AI_OnTakeOver)
+	if Rule_Exists(Reset_AI) then Rule_Remove(Reset_AI) end
+
+	Core_SetTeamDefeated(TEAMS[1], Annihilation_LoserPresentation, WR_ANNIHILATION)
+	
+end
+
+function Victory_Function()
+	if g_gameOver then return end
+	g_gameOver = true
+	Tribute_Cleanup()
+	for _, player in ipairs(PLAYERS) do
+		_RemoveTC_VisionSuppression(player.id)
+	end
+	Rule_RemoveGlobalEvent(Reset_AI_OnMigrated)
+	Rule_RemoveGlobalEvent(Reset_AI_OnTakeOver)
+	if Rule_Exists(Reset_AI) then Rule_Remove(Reset_AI) end
+
+	Core_SetTeamDefeated(TEAMS[2], Annihilation_LoserPresentation, WR_ANNIHILATION)
+	
+end

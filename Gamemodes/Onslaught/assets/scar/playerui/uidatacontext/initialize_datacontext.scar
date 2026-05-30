@@ -1,0 +1,117 @@
+-----------------------------------------------------------------------
+-- PlayerUI: Data Context Initialization
+-- Builds PlayerUIDataContextMappings with slots for all players.
+-- Uses _PlayerUI_AllPlayers global (set by playerui.scar before init).
+-- Binds PlayerUiDataContext: teamLeft (local+allies), teamRight
+-- (enemies), players (all), and localPlayer (ref).
+-----------------------------------------------------------------------
+
+PlayerUIDataContextMappings = {
+	PlayersById = {},
+	PlayersByIndex = { {}, {}, {}, {}, {}, {}, {}, {} },
+}
+
+PlayerUiInitialization:AddInitializable(PlayerUIDataContextMappings)
+
+function PlayerUIDataContextMappings:Initialize()
+	local allPlayers = _PlayerUI_AllPlayers
+	if allPlayers == nil then
+		return
+	end
+
+	-- Trim unused slots
+	for i = 8, #allPlayers + 1, -1 do
+		self.PlayersByIndex[i] = nil
+	end
+
+	-- Map player IDs to data slots
+	for i = 1, #allPlayers do
+		self.PlayersById[allPlayers[i].id.PlayerID] = self.PlayersByIndex[i]
+		self.PlayersByIndex[i].killScore = 0
+
+		-- Ranking system fields (used by playerui_ranking.scar + XAML transforms)
+		self.PlayersByIndex[i].rankPosition = i
+		self.PlayersByIndex[i].rankChangeType = "none"
+		self.PlayersByIndex[i].isContested = false
+		self.PlayersByIndex[i].isTopPlayer = (i == 1)
+		self.PlayersByIndex[i].rankTranslateY = 0
+		self.PlayersByIndex[i].rankOffsetMargin = "0,0,0,0"
+		self.PlayersByIndex[i].rankScale = 1.0
+		self.PlayersByIndex[i].rankHighlightOpacity = 0.0
+		self.PlayersByIndex[i].rankHighlightFill = "#00FFFFFF"
+		self.PlayersByIndex[i].rankFlashMajorVisible = false
+		self.PlayersByIndex[i].rankFlashMinorVisible = false
+		-- killScorePulseScale intentionally omitted: unbound numeric in ItemsSource crashes D3D.
+		-- Pulse scale is computed locally in ApplyDisplayValues and only killScorePulseFontSize is published.
+		self.PlayersByIndex[i].killScorePulseActive = false
+		self.PlayersByIndex[i].rowOpacity = 1.0
+		self.PlayersByIndex[i].rowDimFill = "#00111111"
+		self.PlayersByIndex[i].eliminationReason = "alive"
+		self.PlayersByIndex[i].eliminationLabel = ""
+		self.PlayersByIndex[i].eliminationLabelColor = "#FFDD3333"
+		self.PlayersByIndex[i].showElimIconEliminated = false
+		self.PlayersByIndex[i].showElimIconSurrender = false
+		self.PlayersByIndex[i].showElimIconDisconnect = false
+		self.PlayersByIndex[i].showEliminationStrikethrough = false
+		self.PlayersByIndex[i]._elimCompletionFenceCycles = 0
+		self.PlayersByIndex[i]._elimFirstFrameSeeded = false
+		self.PlayersByIndex[i]._elimSteadyDeferFrame = false
+		self.PlayersByIndex[i]._elimPresentationKeyApplied = nil
+		self.PlayersByIndex[i]._elimPresentationPlayerID = allPlayers[i].id.PlayerID
+		self.PlayersByIndex[i]._elimSteadyVisualKeyApplied = nil
+		self.PlayersByIndex[i]._elimPresentationRevealed = false
+		self.PlayersByIndex[i]._elimPresentationReady = false   -- Phase 4.1: gate first reveal until settle
+		self.PlayersByIndex[i]._elimTransferSuppressed = false
+		self.PlayersByIndex[i]._elimTransferSuppressedSince = nil
+		self.PlayersByIndex[i]._elimTransferSuppressedWarnedAt = nil
+
+		-- Score color/glow/prediction fields
+		self.PlayersByIndex[i].killScoreColor = "#FFFFFFFF"
+		self.PlayersByIndex[i].scoreGlowTier = 1
+		self.PlayersByIndex[i].killScorePulseFontSize = 18
+		self.PlayersByIndex[i].isScoreUpdating = false
+		self.PlayersByIndex[i].rankPredictionUp = false
+		self.PlayersByIndex[i].rankPredictionDown = false
+		self.PlayersByIndex[i].rankPredictionContested = false
+		self.PlayersByIndex[i].rankPredictionUpGlowOpacity = 0.0
+		self.PlayersByIndex[i].rankPredictionDownGlowOpacity = 0.0
+		self.PlayersByIndex[i].rankPredictionContestedGlowOpacity = 0.0
+		self.PlayersByIndex[i].rankPredictionDelta = 0
+		self.PlayersByIndex[i].rankPredictionUp2 = false
+		self.PlayersByIndex[i].rankPredictionUp3 = false
+		self.PlayersByIndex[i].rankPredictionDown2 = false
+		self.PlayersByIndex[i].rankPredictionDown3 = false
+		self.PlayersByIndex[i].rankPredictionShuffleGlowOpacity = 0.0
+		self.PlayersByIndex[i].rewardEarnedFlash = false
+		self.PlayersByIndex[i]._lastDisplayedKillScore = 0
+		self.PlayersByIndex[i]._lastRawKillScore = 0
+	end
+
+	-- Identify local player slot
+	for i = 1, #allPlayers do
+		if allPlayers[i].isLocalPlayer then
+			self.LocalPlayer = self.PlayersByIndex[i]
+			break
+		end
+	end
+
+	-- Build team-split arrays: left = local + allies, right = enemies
+	-- Tag each slot with IsRightSide for XAML DataTrigger mirroring
+	local teamLeft = {}
+	local teamRight = {}
+	for i = 1, #allPlayers do
+		if allPlayers[i].isLocalPlayer or allPlayers[i].isAlly then
+			self.PlayersByIndex[i].IsRightSide = false
+			table.insert(teamLeft, self.PlayersByIndex[i])
+		else
+			self.PlayersByIndex[i].IsRightSide = true
+			table.insert(teamRight, self.PlayersByIndex[i])
+		end
+	end
+
+	-- Bind into data context
+	PlayerUiDataContext.players = self.PlayersByIndex
+	PlayerUiDataContext.teamLeft = teamLeft
+	PlayerUiDataContext.teamRight = teamRight
+	PlayerUiDataContext.localPlayer = self.LocalPlayer
+end

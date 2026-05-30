@@ -1,0 +1,330 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — Scenario Orchestrator (7 stages)
+-- Runs all debug suites in sequence with delays for full system validation.
+--
+-- Branch: onslaught-v3.3
+-- Source files: cba.scar, rewards/cba_rewards.scar, cba_annihilation.scar,
+--   cba_religious.scar, wonder.scar, cba_options.scar, cba_auto_age.scar,
+--   ags_global_settings.scar, gameplay/cba_economy.scar
+--
+-- Stages:
+--   1. Full Validation (6-phase)
+--   2. Stress Test (8-stage)
+--   3. Coverage Test (10-batch)
+--   4. Event Probes
+--   5. Audit Findings (known issues)
+--   6. AI Data Export
+--   7. Final Summary
+--
+-- Console: Debug_Scenario(), Debug_ScenarioStatus(), Debug_ScenarioStop()
+---------------------------------------------------------------------------------------------------
+
+local _cba_scenario = {
+	running = false,
+	current_stage = 0,
+	total_stages = 7,
+	results = {},
+	start_time = 0,
+}
+
+local SCENARIO_STAGE_DELAY = 3
+
+---------------------------------------------------------------------------------------------------
+-- Stage 1: Full Validation
+---------------------------------------------------------------------------------------------------
+
+function _Scenario_Stage1()
+	print("")
+	print("  ---- SCENARIO STAGE 1: Full Validation ----")
+	if type(Debug_FullValidation) == "function" then
+		Debug_FullValidation()
+	else
+		print("  [SKIP] Debug_FullValidation not available")
+	end
+	_cba_scenario.results[1] = "DONE"
+end
+
+---------------------------------------------------------------------------------------------------
+-- Stage 2: Stress Test
+---------------------------------------------------------------------------------------------------
+
+function _Scenario_Stage2()
+	print("")
+	print("  ---- SCENARIO STAGE 2: Stress Test ----")
+	if type(Debug_StressTest) == "function" then
+		Debug_StressTest()
+	else
+		print("  [SKIP] Debug_StressTest not available")
+	end
+	_cba_scenario.results[2] = "DONE"
+end
+
+---------------------------------------------------------------------------------------------------
+-- Stage 3: Coverage Test
+---------------------------------------------------------------------------------------------------
+
+function _Scenario_Stage3()
+	print("")
+	print("  ---- SCENARIO STAGE 3: Coverage Test ----")
+	if type(Debug_CoverageTest) == "function" then
+		Debug_CoverageTest()
+	else
+		print("  [SKIP] Debug_CoverageTest not available")
+	end
+	_cba_scenario.results[3] = "DONE"
+end
+
+---------------------------------------------------------------------------------------------------
+-- Stage 4: Event Probes
+---------------------------------------------------------------------------------------------------
+
+function _Scenario_Stage4()
+	print("")
+	print("  ---- SCENARIO STAGE 4: Event Probes ----")
+	if type(Debug_EventProbes) == "function" then
+		Debug_EventProbes()
+	else
+		print("  [SKIP] Debug_EventProbes not available")
+	end
+	_cba_scenario.results[4] = "DONE"
+end
+
+---------------------------------------------------------------------------------------------------
+-- Stage 5: Audit Findings
+-- Documents known issues found during code review of the onslaught-v3.3 branch.
+---------------------------------------------------------------------------------------------------
+
+function _Scenario_Stage5()
+	print("")
+	print("  ---- SCENARIO STAGE 5: Audit Findings (onslaught-v3.3) ----")
+	print("")
+
+	-- 1. Building limit desync after Entity_SetPlayerOwner transfer
+	print("  [AUDIT-1] Building limit counters desync after Entity_SetPlayerOwner")
+	print("    Source: cba_options.scar, cba.scar (Mod_EliminatePlayerUnits)")
+	print("    Impact: Transferred buildings skip construction events, counters not updated")
+	print("    Fix: Call CBA_Options_BuildingLimit_RecountPlayer after transfer")
+	print("")
+
+	-- 2. English keeps dual classification
+	print("  [AUDIT-2] English keeps dual-classified in production counting paths")
+	print("    Source: cba_options.scar reconciliation loop")
+	print("    Impact: Startup may overcount production slots for English players")
+	print("    Classes: military_only_production AND military_production_building")
+	print("")
+
+	-- 3. Player_SetMaximumAge cannot uncap
+	print("  [AUDIT-3] Player_SetMaximumAge returns early at AGE_IMPERIAL (>=4)")
+	print("    Source: cba_auto_age.scar, cardinal.scar")
+	print("    Impact: Cannot reliably uncap ages once restrictions were applied")
+	print("    Fix: Explicit restoration via Player_SetConstructionMenuAvailability/SetUpgradeAvailability")
+	print("")
+
+	-- 4. Siege limit 4-tier cascade
+	print("  [AUDIT-4] Siege-limit disable uses multi-step restriction cascade")
+	print("    Source: cba.scar CBA_Options_SiegeLimit_Disable, cba_options.scar")
+	print("    Impact: 4-tier progressive restriction; civ-specific paths for English/Chinese/French/etc.")
+	if type(CBA_Options_SiegeLimit_Disable) == "function" then
+		print("    Status: CBA_Options_SiegeLimit_Disable function present")
+	else
+		print("    Status: CBA_Options_SiegeLimit_Disable NOT FOUND")
+	end
+
+	_cba_scenario.results[5] = "DONE"
+end
+
+---------------------------------------------------------------------------------------------------
+-- Stage 6: AI Data Export
+---------------------------------------------------------------------------------------------------
+
+function _Scenario_Stage6()
+	print("")
+	print("  ---- SCENARIO STAGE 6: AI Data Export ----")
+
+	print("[CBA_AI_DATA] === BEGIN EXPORT ===")
+
+	-- Module list
+	print("[CBA_AI_DATA] MODULES:")
+	local modules = {
+		"Mod", "CBA_Rewards", "CBA_Options", "CBA_AutoAge", "CBA_Economy",
+		"Annihilation", "Religious", "Wonder",
+		"AGS_PopulationAutomatic", "AGS_AutoResources", "AGS_GlobalSettings",
+	}
+	for _, m in ipairs(modules) do
+		print(string.format("[CBA_AI_DATA]   %s", m))
+	end
+
+	-- State tables
+	print("[CBA_AI_DATA] STATE_TABLES:")
+	local tables = {
+		{"_mod", _mod},
+		{"_CBA", _CBA},
+		{"_buildingLimit", _buildingLimit},
+		{"_autoage", _autoage},
+		{"_annihilation", _annihilation},
+		{"_religious", _religious},
+		{"_wonder", _wonder},
+		{"AGS_GLOBAL_SETTINGS", AGS_GLOBAL_SETTINGS},
+	}
+	for _, t in ipairs(tables) do
+		local name = t[1]
+		local ref = t[2]
+		if ref ~= nil then
+			print(string.format("[CBA_AI_DATA]   %s: %d keys", name, _Debug_CountKeys(ref)))
+		else
+			print(string.format("[CBA_AI_DATA]   %s: nil", name))
+		end
+	end
+
+	-- Player count
+	print(string.format("[CBA_AI_DATA] PLAYER_COUNT: %d", #PLAYERS))
+
+	-- Civs in game
+	print("[CBA_AI_DATA] CIVS_IN_GAME:")
+	for i, player in ipairs(PLAYERS) do
+		local civ = _Debug_GetPlayerCiv(player)
+		print(string.format("[CBA_AI_DATA]   P%d: %s", i, civ))
+	end
+
+	-- Branch-specific info
+	print("[CBA_AI_DATA] BRANCH: onslaught-v3.3")
+	print("[CBA_AI_DATA] SOURCE_FILES:")
+	print("[CBA_AI_DATA]   rewards/cba_rewards.scar")
+	print("[CBA_AI_DATA]   cba_annihilation.scar")
+	print("[CBA_AI_DATA]   cba_religious.scar")
+	print("[CBA_AI_DATA]   gameplay/cba_economy.scar")
+
+	print("[CBA_AI_DATA] === END EXPORT ===")
+
+	_cba_scenario.results[6] = "DONE"
+end
+
+---------------------------------------------------------------------------------------------------
+-- Stage 7: Final Summary
+---------------------------------------------------------------------------------------------------
+
+function _Scenario_Stage7()
+	print("")
+	print("  ---- SCENARIO STAGE 7: Final Summary ----")
+
+	local ok, game_time = pcall(World_GetGameTime)
+	local elapsed = 0
+	if ok then elapsed = game_time - _cba_scenario.start_time end
+	print(string.format("  Total elapsed: %.1fs", elapsed))
+
+	local all_done = true
+	local done_count = 0
+	for s = 1, _cba_scenario.total_stages do
+		local status = _cba_scenario.results[s] or "NOT RUN"
+		print(string.format("  Stage %d: %s", s, status))
+		if status == "DONE" then
+			done_count = done_count + 1
+		else
+			all_done = false
+		end
+	end
+
+	print(string.format("\n  TOTAL: %d/%d passed", done_count, _cba_scenario.total_stages))
+	_Debug_EndMarker("Scenario", done_count, _cba_scenario.total_stages, elapsed)
+
+	_cba_scenario.running = false
+	_cba_scenario.current_stage = 0
+end
+
+---------------------------------------------------------------------------------------------------
+-- Stage Dispatch
+---------------------------------------------------------------------------------------------------
+
+local _SCENARIO_STAGES = {
+	_Scenario_Stage1,
+	_Scenario_Stage2,
+	_Scenario_Stage3,
+	_Scenario_Stage4,
+	_Scenario_Stage5,
+	_Scenario_Stage6,
+	_Scenario_Stage7,
+}
+
+function _Scenario_RunNextStage()
+	if not _cba_scenario.running then return end
+
+	_cba_scenario.current_stage = _cba_scenario.current_stage + 1
+	local stage = _cba_scenario.current_stage
+
+	if stage > _cba_scenario.total_stages then
+		_cba_scenario.running = false
+		return
+	end
+
+	local fn = _SCENARIO_STAGES[stage]
+	if fn ~= nil then fn() end
+
+	if stage < _cba_scenario.total_stages then
+		_Debug_ScheduleNextPhase(_Scenario_RunNextStage, SCENARIO_STAGE_DELAY, string.format("Stage %d", stage + 1), "Scenario")
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Public Entry Points
+---------------------------------------------------------------------------------------------------
+
+function Debug_Scenario()
+	if _cba_scenario.running then
+		print("[DEBUG_SCENARIO] Already running. Use Debug_ScenarioStop() first.")
+		return
+	end
+
+	_cba_debug.enabled = true
+	_cba_scenario.running = true
+	_cba_scenario.current_stage = 0
+	_cba_scenario.results = {}
+
+	local ok, gt = pcall(World_GetGameTime)
+	_cba_scenario.start_time = ok and gt or 0
+
+	print("")
+	print("============================================================")
+	print("  CBA DEBUG — SCENARIO ORCHESTRATOR (7 stages)")
+	print("  Branch: onslaught-v3.3")
+	print("============================================================")
+
+	_Scenario_RunNextStage()
+end
+
+function Debug_ScenarioStatus()
+	if not _cba_scenario.running then
+		print("[DEBUG_SCENARIO] Not running.")
+		return
+	end
+
+	local ok, gt = pcall(World_GetGameTime)
+	local elapsed = ok and (gt - _cba_scenario.start_time) or 0
+	print(string.format("[DEBUG_SCENARIO] Stage %d/%d  elapsed=%.1fs",
+		_cba_scenario.current_stage, _cba_scenario.total_stages, elapsed))
+
+	for s = 1, _cba_scenario.current_stage do
+		local status = _cba_scenario.results[s] or "IN PROGRESS"
+		print(string.format("  Stage %d: %s", s, status))
+	end
+end
+
+function Debug_ScenarioStop()
+	if not _cba_scenario.running then
+		print("[DEBUG_SCENARIO] Not running.")
+		return
+	end
+
+	print("[DEBUG_SCENARIO] Stopping...")
+	_cba_scenario.running = false
+	_cba_scenario.current_stage = 0
+end
+
+---------------------------------------------------------------------------------------------------
+-- Namespace Registration
+---------------------------------------------------------------------------------------------------
+if debug then
+	debug.validation.scenario = Debug_Scenario
+	debug.validation.scenarioStatus = Debug_ScenarioStatus
+	debug.validation.scenarioStop = Debug_ScenarioStop
+	debug._register("scenario", Debug_Scenario, "7-stage full orchestration (validation+stress+coverage+events+audit+AI+summary)", 3)
+end

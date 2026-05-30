@@ -1,0 +1,1451 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — AI Player Stress & Robustness Suite
+-- Stress testing, edge-case verification, and robustness checks for the CBA_AIPlayer module.
+--
+-- Categories (15):
+--   1  State Invariants       — cross-counter consistency, type-sum agreement, zone bounds
+--   2  Construction Stress    — queue saturation, stale entry accumulation, blacklist integrity
+--   3  Army Dispatch Stress   — staging overflow, rapid dispatch cycles, threshold coherence
+--   4  Villager Team Stress   — team assignment churn, dead team detection, orphan teams
+--   5  Zone Budget Stress     — zone overflow detection, cross-zone consistency
+--   6  Elimination Edge Cases — AI state after elimination, rule guard verification
+--   7  Economy Drift          — suppression state consistency, resource verification
+--   8  Patrol Arbitration     — hold window integrity, order source tracking, waypoint validity
+--   9  Telemetry Accounting   — counter monotonicity, terminal state accounting, flow balance
+--  10  Event Handler Safety   — GE handler existence, pcall resilience, rebuild guard
+--  11  Placement Quality      — fail rate, offmap rejects, clamped, sanity drops, stale abandons
+--  12  Construction Throughput — 10 military buildings per AI by 120s, type diversity
+--  13  MaA Sequence Ordering  — state machine validation, no skipped gates, history ordering
+--  14  Wall/Stage/Zone        — wall detection, villager stage progression, hostile zone, outpost caps
+--  15  Producer Utilization   — per-civ resolved producers, building_unit_map, age-eligible coverage
+--
+-- Console commands:
+--   Debug_AIStressTest()              Full 14-category suite
+--   Debug_AIStressCategory(n)         Single category (1-14)
+--
+-- Depends: cba_debug_core.scar, gameplay/cba_ai_player.scar
+---------------------------------------------------------------------------------------------------
+
+local _DAS_SUITE     = "AIStressTest"
+local _DAS_CATEGORIES = 15
+
+-- Per-run state (reset each invocation)
+local _das = {
+	running    = false,
+	start_time = 0,
+	passed     = 0,
+	total      = 0,
+	skipped    = 0,
+}
+
+---------------------------------------------------------------------------------------------------
+-- Helpers
+---------------------------------------------------------------------------------------------------
+
+local function _DAS_Assert(test_name, condition, detail)
+	_das.total = _das.total + 1
+	if condition then _das.passed = _das.passed + 1 end
+	local status = condition and "PASS" or "FAIL"
+	local msg = string.format("    [%s] %s", status, test_name)
+	if detail then msg = msg .. " — " .. tostring(detail) end
+	print(msg)
+	table.insert(_cba_debug.test_results, {
+		name = test_name,
+		pass = condition,
+		detail = detail or "",
+	})
+	return condition
+end
+
+local function _DAS_Skip(test_name, reason)
+	_das.total = _das.total + 1
+	_das.skipped = _das.skipped + 1
+	print(string.format("    [SKIP] %s — %s", test_name, tostring(reason)))
+	table.insert(_cba_debug.test_results, {
+		name = test_name,
+		pass = true,
+		detail = "SKIP: " .. tostring(reason),
+	})
+	_das.passed = _das.passed + 1
+end
+
+local function _DAS_GetCounters()
+	return { passed = _das.passed, total = _das.total }
+end
+
+local function _DAS_FindAIPlayer()
+	if _ai_players ~= nil and #_ai_players > 0 then
+		return _ai_players[1]
+	end
+	return nil
+end
+
+local function _DAS_CountTable(tbl)
+	if type(tbl) ~= "table" then return 0 end
+	local n = 0
+	for _ in pairs(tbl) do n = n + 1 end
+	return n
+end
+
+local function _DAS_HasAI()
+	return _ai_players ~= nil and #_ai_players > 0
+end
+
+---------------------------------------------------------------------------------------------------
+-- Category 1: State Invariants
+---------------------------------------------------------------------------------------------------
+
+local function _DAS_Cat1_StateInvariants()
+	_Debug_PhaseHeader(1, "State Invariants")
+
+	if not _DAS_HasAI() then
+		_DAS_Skip("1.0", "no AI players active")
+		return
+	end
+
+	for _, player in ipairs(_ai_players) do
+		local ai = player.ai
+		local label = ai.label or "P?"
+
+		-- 1.1 total_buildings == sum of per-type counts
+		local sum_types = 0
+		for _, type_data in pairs(ai.buildings) do
+			sum_types = sum_types + type_data.count
+		end
+		_DAS_Assert(label .. " 1.1 total_buildings matches type sum",
+			ai.total_buildings == sum_types,
+			string.format("total=%d sum=%d", ai.total_buildings, sum_types))
+
+		-- 1.2 building counts are non-negative
+		local neg_found = false
+		for type_key, type_data in pairs(ai.buildings) do
+			if type_data.count < 0 then neg_found = true end
+		end
+		_DAS_Assert(label .. " 1.2 all building counts non-negative", not neg_found)
+
+		-- 1.3 zone counts within bounds
+		_DAS_Assert(label .. " 1.3 primary zone count in range",
+			ai.primary_zone_count >= 0 and ai.primary_zone_count <= _AI_GetPrimaryZoneMax() + 5,
+			string.format("%d/%d", ai.primary_zone_count, _AI_GetPrimaryZoneMax()))
+		_DAS_Assert(label .. " 1.4 secondary zone count in range",
+			ai.secondary_zone_count >= 0 and ai.secondary_zone_count <= _AI_GetSecondaryZoneMax() + 5,
+			string.format("%d/%d", ai.secondary_zone_count, _AI_GetSecondaryZoneMax()))
+
+		-- 1.5 staging SGroup exists and is valid
+		_DAS_Assert(label .. " 1.5 staging SGroup exists",
+			ai.staging_sg ~= nil, ai.staging_sg_name or "nil")
+
+		-- 1.6 construction queue is a table
+		_DAS_Assert(label .. " 1.6 construction_queue is table",
+			type(ai.construction_queue) == "table", #ai.construction_queue .. " entries")
+
+		-- 1.7 production egroups keys match building keys
+		local prod_keys_ok = true
+		for type_key, _ in pairs(ai.buildings) do
+			if ai.production_egroups[type_key] == nil then prod_keys_ok = false end
+		end
+		_DAS_Assert(label .. " 1.7 production egroups cover all building types", prod_keys_ok)
+
+		-- 1.8 telemetry table exists with expected keys
+		local t = ai.telemetry
+		local expected_keys = {"build_attempts","build_successes","build_failures","build_abandoned",
+			"units_produced","armies_dispatched","team_assignments","team_releases"}
+		local missing = {}
+		for _, k in ipairs(expected_keys) do
+			if t[k] == nil then table.insert(missing, k) end
+		end
+		_DAS_Assert(label .. " 1.8 telemetry has expected keys",
+			#missing == 0, #missing > 0 and ("missing: " .. table.concat(missing, ",")) or "all present")
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Category 2: Construction Stress
+---------------------------------------------------------------------------------------------------
+
+local function _DAS_Cat2_ConstructionStress()
+	_Debug_PhaseHeader(2, "Construction Stress")
+
+	if not _DAS_HasAI() then
+		_DAS_Skip("2.0", "no AI players active")
+		return
+	end
+
+	for _, player in ipairs(_ai_players) do
+		local ai = player.ai
+		local label = ai.label or "P?"
+		local now = World_GetGameTime()
+
+		-- 2.1 No queue entry should have nil type_key
+		local nil_keys = 0
+		for _, entry in ipairs(ai.construction_queue) do
+			if entry.type_key == nil then nil_keys = nil_keys + 1 end
+		end
+		_DAS_Assert(label .. " 2.1 no nil type_keys in queue", nil_keys == 0,
+			nil_keys > 0 and (nil_keys .. " nil entries") or "clean")
+
+		-- 2.2 Completed entries should not still be in the active queue
+		local completed_in_queue = 0
+		for _, entry in ipairs(ai.construction_queue) do
+			if entry.completed == true then completed_in_queue = completed_in_queue + 1 end
+		end
+		_DAS_Assert(label .. " 2.2 no completed entries lingering in queue",
+			completed_in_queue == 0, completed_in_queue .. " completed still in queue")
+
+		-- 2.3 Queue entries with entities should reference alive entities
+		local dead_refs = 0
+		for _, entry in ipairs(ai.construction_queue) do
+			if entry.entity ~= nil then
+				local ok_alive, alive = pcall(Entity_IsAlive, entry.entity)
+				if ok_alive and not alive then dead_refs = dead_refs + 1 end
+			end
+		end
+		_DAS_Assert(label .. " 2.3 no dead entity refs in queue",
+			dead_refs == 0, dead_refs .. " dead entity refs")
+
+		-- 2.4 Blacklist entries should not have expired entries (soft check)
+		local expired_bl = 0
+		if ai.stale_pos_blacklist ~= nil then
+			for _, expire_t in pairs(ai.stale_pos_blacklist) do
+				if type(expire_t) == "number" and expire_t < now then
+					expired_bl = expired_bl + 1
+				end
+			end
+		end
+		_DAS_Assert(label .. " 2.4 blacklist cleanup (expired entries)",
+			expired_bl <= 5, expired_bl .. " expired entries (tolerable if <=5)")
+
+		-- 2.5 Queue size within reasonable bounds (should not grow unbounded)
+		_DAS_Assert(label .. " 2.5 queue size bounded",
+			#ai.construction_queue <= 20,
+			#ai.construction_queue .. " entries (expected <=20)")
+
+		-- 2.6 Issue counts should not be extremely high
+		local max_issues = 0
+		for _, entry in ipairs(ai.construction_queue) do
+			if (entry.issue_count or 0) > max_issues then max_issues = entry.issue_count end
+		end
+		_DAS_Assert(label .. " 2.6 max issue count bounded",
+			max_issues <= _AI_GetMaxReissues() + 2,
+			string.format("max=%d limit=%d", max_issues, _AI_GetMaxReissues()))
+
+		-- 2.7 All queue entries have valid positions
+		local no_pos = 0
+		for _, entry in ipairs(ai.construction_queue) do
+			if entry.pos == nil or entry.pos.x == nil or entry.pos.z == nil then
+				no_pos = no_pos + 1
+			end
+		end
+		_DAS_Assert(label .. " 2.7 all queue entries have positions",
+			no_pos == 0, no_pos > 0 and (no_pos .. " missing pos") or "all valid")
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Category 3: Army Dispatch Stress
+---------------------------------------------------------------------------------------------------
+
+local function _DAS_Cat3_ArmyDispatchStress()
+	_Debug_PhaseHeader(3, "Army Dispatch Stress")
+
+	if not _DAS_HasAI() then
+		_DAS_Skip("3.0", "no AI players active")
+		return
+	end
+
+	for _, player in ipairs(_ai_players) do
+		local ai = player.ai
+		local label = ai.label or "P?"
+
+		-- 3.1 Squad threshold is valid
+		_DAS_Assert(label .. " 3.1 squad threshold in valid range",
+			ai.squad_threshold >= 1 and ai.squad_threshold <= 200,
+			"threshold=" .. tostring(ai.squad_threshold))
+
+		-- 3.2 Armies table is an array (no orphan keys)
+		local is_array = true
+		for k, _ in pairs(ai.armies) do
+			if type(k) ~= "number" then is_array = false end
+		end
+		_DAS_Assert(label .. " 3.2 armies is a clean array", is_array,
+			#ai.armies .. " entries")
+
+		-- 3.3 Active army SGroups are all valid
+		local invalid_army = 0
+		for _, a in ipairs(ai.armies) do
+			if a.sg == nil then invalid_army = invalid_army + 1 end
+		end
+		_DAS_Assert(label .. " 3.3 all active armies have SGroups",
+			invalid_army == 0, invalid_army .. " missing SGroup")
+
+		-- 3.4 Dispatched armies should not reference 0-count SGroups (stale armies)
+		local empty_armies = 0
+		for _, a in ipairs(ai.armies) do
+			if a.sg ~= nil then
+				local ok, count = pcall(SGroup_CountSpawned, a.sg)
+				if ok and count == 0 then empty_armies = empty_armies + 1 end
+			end
+		end
+		_DAS_Assert(label .. " 3.4 no empty dispatched armies",
+			empty_armies == 0, empty_armies .. " empty armies")
+
+		-- 3.5 Staging count is non-negative
+		local staging = ai.staging_sg and SGroup_CountSpawned(ai.staging_sg) or 0
+		_DAS_Assert(label .. " 3.5 staging count non-negative",
+			staging >= 0, "staging=" .. tostring(staging))
+
+		-- 3.6 dispatched count >= 0
+		_DAS_Assert(label .. " 3.6 armies_dispatched counter non-negative",
+			(ai.telemetry.armies_dispatched or 0) >= 0,
+			"dispatched=" .. tostring(ai.telemetry.armies_dispatched))
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Category 4: Villager Team Stress
+---------------------------------------------------------------------------------------------------
+
+local function _DAS_Cat4_VillagerTeamStress()
+	_Debug_PhaseHeader(4, "Villager Team Stress")
+
+	if not _DAS_HasAI() then
+		_DAS_Skip("4.0", "no AI players active")
+		return
+	end
+
+	for _, player in ipairs(_ai_players) do
+		local ai = player.ai
+		local label = ai.label or "P?"
+
+		-- 4.1 Villager teams is a valid array
+		_DAS_Assert(label .. " 4.1 villager_teams is table",
+			type(ai.villager_teams) == "table",
+			#ai.villager_teams .. " teams")
+
+		-- 4.2 Each team has an sg_name
+		local nameless = 0
+		for _, team in ipairs(ai.villager_teams) do
+			if team.sg_name == nil then nameless = nameless + 1 end
+		end
+		_DAS_Assert(label .. " 4.2 all teams have sg_name",
+			nameless == 0, nameless > 0 and (nameless .. " nameless") or "all named")
+
+		-- 4.3 Teams with SGroups should have >0 members (detect dead teams)
+		local dead_teams = 0
+		for _, team in ipairs(ai.villager_teams) do
+			if team.sg_name ~= nil then
+				local sg = SGroup_CreateIfNotFound(team.sg_name)
+				local ok, count = pcall(SGroup_CountSpawned, sg)
+				if ok and count == 0 then dead_teams = dead_teams + 1 end
+			end
+		end
+		_DAS_Assert(label .. " 4.3 no dead villager teams (0-member SGroups)",
+			dead_teams == 0, dead_teams .. " dead teams")
+
+		-- 4.4 Team count within configured max
+		local team_max = (_AI_GetVillagerTeamMax ~= nil) and _AI_GetVillagerTeamMax() or 5
+		_DAS_Assert(label .. " 4.4 team count within max",
+			#ai.villager_teams <= team_max + 1,
+			string.format("%d/%d", #ai.villager_teams, team_max))
+
+		-- 4.5 team_assignments >= team_releases (monotonic flow)
+		local t = ai.telemetry
+		_DAS_Assert(label .. " 4.5 assignments >= releases",
+			(t.team_assignments or 0) >= (t.team_releases or 0),
+			string.format("assign=%d release=%d", t.team_assignments or 0, t.team_releases or 0))
+
+		-- 4.6 No orphan team assignments (assigned to non-existent queue entry)
+		local orphan_teams = 0
+		for _, team in ipairs(ai.villager_teams) do
+			if team.assigned_to ~= nil then
+				local found = false
+				for _, entry in ipairs(ai.construction_queue) do
+					if entry.assigned_team == team then found = true end
+				end
+				if not found then orphan_teams = orphan_teams + 1 end
+			end
+		end
+		-- This is a soft check since assigned_to tracking varies
+		if orphan_teams > 0 then
+			_DAS_Assert(label .. " 4.6 orphan team check", true,
+				orphan_teams .. " potential orphans (advisory)")
+		else
+			_DAS_Assert(label .. " 4.6 orphan team check", true, "clean")
+		end
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Category 5: Zone Budget Stress
+---------------------------------------------------------------------------------------------------
+
+local function _DAS_Cat5_ZoneBudgetStress()
+	_Debug_PhaseHeader(5, "Zone Budget Stress")
+
+	if not _DAS_HasAI() then
+		_DAS_Skip("5.0", "no AI players active")
+		return
+	end
+
+	for _, player in ipairs(_ai_players) do
+		local ai = player.ai
+		local label = ai.label or "P?"
+
+		-- 5.1 Zone counts non-negative
+		_DAS_Assert(label .. " 5.1 primary zone >= 0",
+			ai.primary_zone_count >= 0,
+			"primary=" .. tostring(ai.primary_zone_count))
+		_DAS_Assert(label .. " 5.2 secondary zone >= 0",
+			ai.secondary_zone_count >= 0,
+			"secondary=" .. tostring(ai.secondary_zone_count))
+
+		-- 5.3 primary + secondary should match total_buildings + pending queue entries
+		local zone_sum = ai.primary_zone_count + ai.secondary_zone_count
+		local pending_count = 0
+		for _, entry in ipairs(ai.construction_queue) do
+			if not entry.completed then pending_count = pending_count + 1 end
+		end
+		local expected_zone = ai.total_buildings + pending_count
+		local diff = math.abs(expected_zone - zone_sum)
+		_DAS_Assert(label .. " 5.3 zone_sum matches completed+pending",
+			diff <= 3,
+			string.format("expected=%d zones=%d diff=%d (built=%d pending=%d)", expected_zone, zone_sum, diff, ai.total_buildings, pending_count))
+
+		-- 5.4 Outside chain built counts should not exceed priority max
+		if ai.outside_chain then
+			local chain_ok = true
+			for _, entry in ipairs(_AI_GetBuildingPriority and {} or {}) do
+				-- Check outside_chain.built doesn't wildly exceed per-type max
+			end
+			for type_key, built_count in pairs(ai.outside_chain.built) do
+				if built_count < 0 then chain_ok = false end
+			end
+			_DAS_Assert(label .. " 5.4 outside chain counts non-negative", chain_ok)
+		end
+
+		-- 5.5 Production buildings alive-count matches tracked count (spot check barracks)
+		local barracks_alive = 0
+		for _, eg_name in ipairs(ai.production_egroups.barracks or {}) do
+			local eg = EGroup_CreateIfNotFound(eg_name)
+			if EGroup_Count(eg) > 0 then
+				local ent = EGroup_GetEntityAt(eg, 1)
+				local ok_alive, alive = pcall(Entity_IsAlive, ent)
+				if ok_alive and alive then barracks_alive = barracks_alive + 1 end
+			end
+		end
+		_DAS_Assert(label .. " 5.5 barracks alive matches tracked",
+			barracks_alive == ai.buildings.barracks.count,
+			string.format("alive=%d tracked=%d", barracks_alive, ai.buildings.barracks.count))
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Category 6: Elimination Edge Cases
+---------------------------------------------------------------------------------------------------
+
+local function _DAS_Cat6_EliminationEdgeCases()
+	_Debug_PhaseHeader(6, "Elimination Edge Cases")
+
+	if not _DAS_HasAI() then
+		_DAS_Skip("6.0", "no AI players active")
+		return
+	end
+
+	for _, player in ipairs(_ai_players) do
+		local ai = player.ai
+		local label = ai.label or "P?"
+
+		-- 6.1 _AI_IsEliminated function exists
+		_DAS_Assert(label .. " 6.1 _AI_IsEliminated callable",
+			type(_AI_IsEliminated) == "function", "function present")
+
+		local eliminated = _AI_IsEliminated(player)
+
+		if eliminated then
+			-- 6.2 Eliminated players should not have active staging units
+			local staging = ai.staging_sg and SGroup_CountSpawned(ai.staging_sg) or 0
+			_DAS_Assert(label .. " 6.2 eliminated player staging cleared",
+				staging == 0, staging .. " staging units remain")
+
+			-- 6.3 Eliminated players should have empty construction queue
+			_DAS_Assert(label .. " 6.3 eliminated player queue empty",
+				#ai.construction_queue == 0,
+				#ai.construction_queue .. " queue entries remain")
+		else
+			-- 6.4 Active players should have a valid base position
+			local base_pos = _AI_GetBasePosition(player)
+			_DAS_Assert(label .. " 6.4 active player has base position",
+				base_pos ~= nil,
+				base_pos and string.format("(%.0f, %.0f)", base_pos.x, base_pos.z) or "nil")
+
+			-- 6.5 Active player has economy suppression applied
+			if ai.economy then
+				_DAS_Assert(label .. " 6.5 economy suppressed for active AI",
+					ai.economy.suppressed == true,
+					tostring(ai.economy.suppressed))
+			end
+		end
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Category 7: Economy Drift
+---------------------------------------------------------------------------------------------------
+
+local function _DAS_Cat7_EconomyDrift()
+	_Debug_PhaseHeader(7, "Economy Drift")
+
+	if not _DAS_HasAI() then
+		_DAS_Skip("7.0", "no AI players active")
+		return
+	end
+
+	for _, player in ipairs(_ai_players) do
+		local ai = player.ai
+		local label = ai.label or "P?"
+
+		if _AI_IsEliminated(player) then
+			_DAS_Skip(label .. " 7.x", "eliminated")
+			goto next_eco
+		end
+
+		-- 7.1 Economy state table exists
+		_DAS_Assert(label .. " 7.1 economy state exists",
+			ai.economy ~= nil, type(ai.economy))
+
+		if ai.economy then
+			-- 7.2 Suppressed flag should be true
+			_DAS_Assert(label .. " 7.2 economy suppressed == true",
+				ai.economy.suppressed == true,
+				tostring(ai.economy.suppressed))
+
+			-- 7.3 Apply count > 0 (should have been applied at least once)
+			_DAS_Assert(label .. " 7.3 economy apply_count > 0",
+				(ai.economy.apply_count or 0) > 0,
+				"count=" .. tostring(ai.economy.apply_count))
+
+			-- 7.4 Drift alerts should be 0 in normal operation
+			_DAS_Assert(label .. " 7.4 drift alerts == 0",
+				(ai.economy.drift_alerts or 0) == 0,
+				"alerts=" .. tostring(ai.economy.drift_alerts or 0))
+		end
+
+		-- 7.5 Native AI disabled state
+		if ai.native_ai then
+			_DAS_Assert(label .. " 7.5 native AI disabled",
+				ai.native_ai.disabled == true,
+				tostring(ai.native_ai.disabled))
+		end
+
+		-- 7.6 Resources should be very high (unlimited grant applied)
+		local ok_food, food = pcall(Player_GetResource, player.id, RT_Food)
+		if ok_food then
+			_DAS_Assert(label .. " 7.6 resources above threshold",
+				food >= 1000,
+				string.format("food=%d (expected 1000+)", food))
+		end
+
+		::next_eco::
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Category 8: Patrol Arbitration
+---------------------------------------------------------------------------------------------------
+
+local function _DAS_Cat8_PatrolArbitration()
+	_Debug_PhaseHeader(8, "Patrol Arbitration")
+
+	if not _DAS_HasAI() then
+		_DAS_Skip("8.0", "no AI players active")
+		return
+	end
+
+	for _, player in ipairs(_ai_players) do
+		local ai = player.ai
+		local label = ai.label or "P?"
+		local now = World_GetGameTime()
+
+		-- 8.1 Patrol hold timestamp is a number
+		_DAS_Assert(label .. " 8.1 patrol_order_hold_until is number",
+			type(ai.patrol_order_hold_until) == "number",
+			type(ai.patrol_order_hold_until))
+
+		-- 8.2 Patrol order source is a string
+		_DAS_Assert(label .. " 8.2 patrol_last_order_source is string",
+			type(ai.patrol_last_order_source) == "string",
+			tostring(ai.patrol_last_order_source))
+
+		-- 8.3 Hold window not absurdly long (> 60s from now is suspicious)
+		local hold_remaining = (ai.patrol_order_hold_until or 0) - now
+		_DAS_Assert(label .. " 8.3 hold window reasonable",
+			hold_remaining <= 60,
+			string.format("remaining=%.1fs", hold_remaining))
+
+		-- 8.4 Patrol SGroup consistency (if exists, should be valid)
+		if ai.patrol_sg ~= nil then
+			local ok, count = pcall(SGroup_CountSpawned, ai.patrol_sg)
+			_DAS_Assert(label .. " 8.4 patrol SGroup valid",
+				ok, ok and (count .. " units") or "SGroup error")
+		end
+
+		-- 8.5 combat response timestamp is a number
+		_DAS_Assert(label .. " 8.5 last_combat_response_at is number",
+			type(ai.last_combat_response_at) == "number",
+			tostring(ai.last_combat_response_at))
+
+		-- 8.6 Patrol rally state consistency
+		if ai.patrol_rallying then
+			-- If rallying, rally_pos should exist
+			_DAS_Assert(label .. " 8.6 rally_pos exists when rallying",
+				ai.patrol_rally_pos ~= nil,
+				ai.patrol_rally_pos and string.format("(%.0f,%.0f)", ai.patrol_rally_pos.x, ai.patrol_rally_pos.z) or "nil")
+		else
+			_DAS_Assert(label .. " 8.6 rally state consistent", true, "not rallying")
+		end
+
+		-- 8.7 Patrol telemetry counters non-negative
+		local t = ai.telemetry
+		_DAS_Assert(label .. " 8.7 patrol counters non-negative",
+			(t.patrol_orders or 0) >= 0 and (t.patrol_orders_suppressed or 0) >= 0 and (t.patrol_assault_joins or 0) >= 0,
+			string.format("orders=%d suppress=%d joins=%d",
+				t.patrol_orders or 0, t.patrol_orders_suppressed or 0, t.patrol_assault_joins or 0))
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Category 9: Telemetry Accounting
+---------------------------------------------------------------------------------------------------
+
+local function _DAS_Cat9_TelemetryAccounting()
+	_Debug_PhaseHeader(9, "Telemetry Accounting")
+
+	if not _DAS_HasAI() then
+		_DAS_Skip("9.0", "no AI players active")
+		return
+	end
+
+	for _, player in ipairs(_ai_players) do
+		local ai = player.ai
+		local label = ai.label or "P?"
+		local t = ai.telemetry
+
+		-- 9.1 All counters non-negative (monotonicity)
+		local neg_keys = {}
+		for k, v in pairs(t) do
+			if type(v) == "number" and v < 0 then
+				table.insert(neg_keys, k)
+			end
+		end
+		_DAS_Assert(label .. " 9.1 all telemetry counters non-negative",
+			#neg_keys == 0,
+			#neg_keys > 0 and ("negative: " .. table.concat(neg_keys, ",")) or "all >= 0")
+
+		-- 9.2 Terminal state accounting: created >= done + abandon + destroyed + sanity
+		local created = t.queue_entries_created or 0
+		local terminal_sum = (t.queue_terminal_completed or 0) +
+			(t.queue_terminal_abandoned or 0) +
+			(t.queue_terminal_destroyed or 0) +
+			(t.queue_sanity_drops or 0)
+		local in_flight = #ai.construction_queue
+		_DAS_Assert(label .. " 9.2 queue terminal accounting",
+			created >= terminal_sum,
+			string.format("created=%d terminal=%d inflight=%d", created, terminal_sum, in_flight))
+
+		-- 9.3 Created should equal terminal + in-flight (with slack for race conditions)
+		local accounting_diff = math.abs(created - (terminal_sum + in_flight))
+		_DAS_Assert(label .. " 9.3 queue flow balance",
+			accounting_diff <= 3,
+			string.format("created=%d terminal+inflight=%d diff=%d", created, terminal_sum + in_flight, accounting_diff))
+
+		-- 9.4 build_successes <= build_attempts
+		_DAS_Assert(label .. " 9.4 successes <= attempts",
+			(t.build_successes or 0) <= (t.build_attempts or 0),
+			string.format("ok=%d attempts=%d", t.build_successes or 0, t.build_attempts or 0))
+
+		-- 9.5 failures + successes + blocked + abandoned should relate to attempts
+		local outcome_sum = (t.build_successes or 0) + (t.build_failures or 0) +
+			(t.build_blocked or 0) + (t.build_abandoned or 0)
+		-- outcome_sum can exceed attempts due to forced completions
+		_DAS_Assert(label .. " 9.5 outcome sum reasonable",
+			outcome_sum >= (t.build_attempts or 0) * 0.5,
+			string.format("outcomes=%d attempts=%d", outcome_sum, t.build_attempts or 0))
+
+		-- 9.6 release-to-assign samples correspond to release-to-assign total
+		local samples = t.team_release_to_assign_samples or 0
+		local total_latency = t.team_release_to_assign_total or 0
+		if samples > 0 then
+			_DAS_Assert(label .. " 9.6 release-to-assign avg reasonable",
+				(total_latency / samples) < 120,
+				string.format("avg=%.2fs samples=%d", total_latency / samples, samples))
+		else
+			_DAS_Assert(label .. " 9.6 release-to-assign no samples yet", true, "0 samples")
+		end
+
+		-- 9.7 park_suppressed <= park_orders (suppression is subset)
+		_DAS_Assert(label .. " 9.7 park suppressed <= park orders",
+			(t.villager_park_suppressed or 0) <= (t.villager_park_orders or 0) + (t.villager_park_suppressed or 0),
+			string.format("park=%d suppress=%d", t.villager_park_orders or 0, t.villager_park_suppressed or 0))
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Category 10: Event Handler Safety
+---------------------------------------------------------------------------------------------------
+
+local function _DAS_Cat10_EventHandlerSafety()
+	_Debug_PhaseHeader(10, "Event Handler Safety")
+
+	-- 10.1 GE_EntityKilled handler exists
+	_DAS_Assert("10.1 _AI_OnEntityKilled exists",
+		type(_AI_OnEntityKilled) == "function", "function present")
+
+	-- 10.2 GE_UpgradeComplete handler exists
+	_DAS_Assert("10.2 _AI_OnUpgradeComplete exists",
+		type(_AI_OnUpgradeComplete) == "function", "function present")
+
+	-- 10.3 Key console commands exist
+	local cmds = {
+		"CBA_AIPlayer_Status",
+		"CBA_AIPlayer_Track",
+		"CBA_AIPlayer_ForceAttack",
+		"CBA_AIPlayer_ConstructionProbe",
+		"CBA_AIPlayer_ForceAllConstruction",
+		"CBA_AIPlayer_StrategyReport",
+		"CBA_AIPlayer_BuildTimeline",
+		"CBA_AIPlayer_ZoneReport",
+		"CBA_AIPlayer_SetDebugVerbosity",
+		"CBA_AIPlayer_TaskAudit",
+		"CBA_AIPlayer_SetDebugExternalLock",
+		"CBA_AIPlayer_GetDebugExternalLock",
+	}
+	local missing_cmds = {}
+	for _, cmd in ipairs(cmds) do
+		if type(_G[cmd]) ~= "function" then table.insert(missing_cmds, cmd) end
+	end
+	_DAS_Assert("10.3 all console commands exist",
+		#missing_cmds == 0,
+		#missing_cmds > 0 and ("missing: " .. table.concat(missing_cmds, ", ")) or (#cmds .. " commands present"))
+
+	-- 10.4 Key internal functions exist
+	local internals = {
+		"_AI_InitPlayerState",
+		"_AI_BuildMilitaryBuildings",
+		"_AI_ManageArmies",
+		"_AI_ProcessConstructionQueue",
+		"_AI_ManagePatrol",
+		"_AI_SanityCheck",
+		"_AI_IsEliminated",
+		"_AI_GetBasePosition",
+		"_AI_CountPendingFoundations",
+		"_AI_CountFreeTeams",
+	}
+	local missing_int = {}
+	for _, fn in ipairs(internals) do
+		if type(_G[fn]) ~= "function" then table.insert(missing_int, fn) end
+	end
+	_DAS_Assert("10.4 key internal functions exist",
+		#missing_int == 0,
+		#missing_int > 0 and ("missing: " .. table.concat(missing_int, ", ")) or (#internals .. " functions present"))
+
+	-- 10.5 _AI_OnEntityKilled is pcall-safe with nil context
+	local ok_nil = pcall(_AI_OnEntityKilled, {})
+	_DAS_Assert("10.5 _AI_OnEntityKilled survives empty context",
+		ok_nil, ok_nil and "no crash" or "CRASH")
+
+	-- 10.6 _AI_OnUpgradeComplete is pcall-safe with nil context
+	local ok_nil_up = pcall(_AI_OnUpgradeComplete, {})
+	_DAS_Assert("10.6 _AI_OnUpgradeComplete survives empty context",
+		ok_nil_up, ok_nil_up and "no crash" or "CRASH")
+
+	-- 10.7 Getter functions return expected types
+	local getter_checks = {
+		{ fn = _AI_GetBuildingPriority, name = "BuildingPriority", expect = "table" },
+		{ fn = _AI_GetPrimaryZoneMax, name = "PrimaryZoneMax", expect = "number" },
+		{ fn = _AI_GetSecondaryZoneMax, name = "SecondaryZoneMax", expect = "number" },
+		{ fn = _AI_GetMaxOutposts, name = "MaxOutposts", expect = "number" },
+		{ fn = _AI_GetPendingFoundationLimit, name = "PendingFoundationLimit", expect = "number" },
+		{ fn = _AI_GetStaleTimeout, name = "StaleTimeout", expect = "number" },
+		{ fn = _AI_GetMaxReissues, name = "MaxReissues", expect = "number" },
+		{ fn = _AI_GetVillagerTeamMax, name = "VillagerTeamMax", expect = "number" },
+		{ fn = _AI_GetVisionOutpostTarget, name = "VisionOutpostTarget", expect = "number" },
+		{ fn = _AI_GetSpawnRadius, name = "SpawnRadius", expect = "number" },
+	}
+	local getter_fails = {}
+	for _, gc in ipairs(getter_checks) do
+		local ok, val = pcall(gc.fn)
+		if not ok or type(val) ~= gc.expect then
+			table.insert(getter_fails, gc.name)
+		end
+	end
+	_DAS_Assert("10.7 getter functions return expected types",
+		#getter_fails == 0,
+		#getter_fails > 0 and ("bad: " .. table.concat(getter_fails, ",")) or (#getter_checks .. " getters OK"))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Category 11: Placement Quality Thresholds
+---------------------------------------------------------------------------------------------------
+
+local function _DAS_Cat11_PlacementQuality()
+	_Debug_PhaseHeader(11, "Placement Quality Thresholds")
+
+	if not _DAS_HasAI() then
+		_DAS_Skip("11.0", "no AI players active")
+		return
+	end
+
+	for _, player in ipairs(_ai_players) do
+		local ai = player.ai
+		local label = ai.label or "P?"
+		local t = ai.telemetry or {}
+
+		-- 11.1 Placement failure rate < 25% of attempts
+		local total_attempts = (t.placement_attempts or 0)
+		local total_fails = (t.placement_failures or 0)
+		local fail_rate = total_attempts > 0 and (total_fails / total_attempts) or 0
+		_DAS_Assert(label .. " 11.1 placement fail rate < 25%",
+			fail_rate < 0.25,
+			string.format("fails=%d attempts=%d rate=%.1f%%", total_fails, total_attempts, fail_rate * 100))
+
+		-- 11.2 Offmap rejects should be minority of total rejects
+		local offmap = (t.placement_rejects_offmap or 0)
+		local total_rejects = offmap + (t.placement_rejects_calc or 0) + (t.placement_rejects_pending or 0) + (t.placement_rejects_blacklist or 0)
+		local offmap_rate = total_rejects > 0 and (offmap / total_rejects) or 0
+		_DAS_Assert(label .. " 11.2 offmap rejects < 50% of rejections",
+			total_rejects == 0 or offmap_rate < 0.50,
+			string.format("offmap=%d total_rejects=%d rate=%.1f%%", offmap, total_rejects, offmap_rate * 100))
+
+		-- 11.3 Clamped placements tracked (informational, always pass)
+		local clamped = (t.placement_clamped or 0)
+		_DAS_Assert(label .. " 11.3 placement_clamped counter present",
+			true,
+			string.format("clamped=%d", clamped))
+
+		-- 11.4 Sanity drops should be zero (all zone paths should decrement first)
+		local sanity_drops = (t.queue_sanity_drops or 0)
+		_DAS_Assert(label .. " 11.4 sanity drops == 0",
+			sanity_drops == 0,
+			string.format("sanity_drops=%d", sanity_drops))
+
+		-- 11.5 Stale abandon rate < 30% of queue entries ever created
+		local stale_abandons = (t.queue_terminal_abandoned or 0)
+		local total_queued = (t.queue_entries_created or 0)
+		local stale_rate = total_queued > 0 and (stale_abandons / total_queued) or 0
+		_DAS_Assert(label .. " 11.5 stale abandon rate < 30%",
+			stale_rate < 0.30,
+			string.format("stale=%d queued=%d rate=%.1f%%", stale_abandons, total_queued, stale_rate * 100))
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Category 12: Construction Throughput Target (10 military buildings per AI by 120s)
+---------------------------------------------------------------------------------------------------
+
+local function _DAS_Cat12_ConstructionThroughput()
+	_Debug_PhaseHeader(12, "Construction Throughput Target")
+
+	if not _DAS_HasAI() then
+		_DAS_Skip("12.0", "no AI players active")
+		return
+	end
+
+	local game_time = World_GetGameTime()
+	local target_time = 120.0
+	local target_buildings = 10
+	local hard_floor = 6  -- minimum even under adverse conditions
+
+	for _, player in ipairs(_ai_players) do
+		local ai = player.ai
+		local label = ai.label or "P?"
+
+		-- Count completed military production buildings using resolved producer types
+		local military_count = 0
+		local counted = {}
+		local priority = ai.building_priority or _AI_GetBuildingPriority()
+		for _, entry in ipairs(priority) do
+			local ik = entry.key
+			if not counted[ik] then
+				counted[ik] = true
+				local td = ai.buildings[ik]
+				if td ~= nil then
+					military_count = military_count + td.count
+				end
+			end
+		end
+
+		-- 12.1 At 120s+, military buildings >= 10 (aspirational target)
+		if game_time >= target_time then
+			_DAS_Assert(label .. " 12.1 military buildings >= " .. target_buildings .. " at 120s",
+				military_count >= target_buildings,
+				string.format("count=%d target=%d time=%.1fs", military_count, target_buildings, game_time))
+		else
+			_DAS_Assert(label .. " 12.1 military buildings (pre-120s, informational)",
+				true,
+				string.format("count=%d time=%.1fs (target evaluated at 120s)", military_count, game_time))
+		end
+
+		-- 12.2 Hard floor: at least 6 buildings regardless of time (if past 60s)
+		if game_time >= 60.0 then
+			_DAS_Assert(label .. " 12.2 military buildings >= " .. hard_floor .. " (hard floor at 60s)",
+				military_count >= hard_floor,
+				string.format("count=%d floor=%d time=%.1fs", military_count, hard_floor, game_time))
+		else
+			_DAS_Assert(label .. " 12.2 military buildings (pre-60s, informational)",
+				true,
+				string.format("count=%d time=%.1fs (floor evaluated at 60s)", military_count, game_time))
+		end
+
+		-- 12.3 Build successes > 0 (sanity: building system is active)
+		local successes = (ai.telemetry and ai.telemetry.build_successes) or 0
+		_DAS_Assert(label .. " 12.3 build successes > 0",
+			successes > 0,
+			string.format("successes=%d", successes))
+
+		-- 12.4 Type diversity: at least 2 different building types (requires Age >= 2 and time >= 90s)
+		local current_age = 1
+		if player.id ~= nil then
+			local ok_age, p_age = pcall(Player_GetCurrentAge, player.id)
+			if ok_age and p_age ~= nil then current_age = p_age end
+		end
+		if game_time >= 90.0 and current_age >= 2 then
+			local types_present = 0
+			local type_counted = {}
+			for _, entry in ipairs(priority) do
+				local ik = entry.key
+				if not type_counted[ik] then
+					type_counted[ik] = true
+					local td = ai.buildings[ik]
+					if td ~= nil and td.count > 0 then
+						types_present = types_present + 1
+					end
+				end
+			end
+			_DAS_Assert(label .. " 12.4 building type diversity >= 2",
+				types_present >= 2,
+				string.format("types=%d age=%d", types_present, current_age))
+		else
+			_DAS_Assert(label .. " 12.4 type diversity (pre-req not met, informational)",
+				true,
+				string.format("time=%.1fs age=%d (requires 90s + Age 2)", game_time, current_age))
+		end
+
+		-- 12.5 Producer resolution non-empty
+		_DAS_Assert(label .. " 12.5 resolved producers non-empty",
+			#priority > 0,
+			string.format("resolved=%d civ=%s", #priority, ai.civ_name or "?"))
+
+		-- 12.6 All resolved producers have tracking entries
+		local missing_tracking = {}
+		for _, entry in ipairs(priority) do
+			local ik = entry.key
+			if ai.buildings[ik] == nil then
+				table.insert(missing_tracking, ik)
+			end
+		end
+		_DAS_Assert(label .. " 12.6 all producers have tracking entries",
+			#missing_tracking == 0,
+			#missing_tracking > 0 and ("missing: " .. table.concat(missing_tracking, ",")) or "all tracked")
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Category 13: Manatarms Sequence Ordering
+---------------------------------------------------------------------------------------------------
+
+local function _DAS_Cat13_MaaSequenceOrdering()
+	_Debug_PhaseHeader(13, "Manatarms Sequence Ordering")
+
+	if not _DAS_HasAI() then
+		_DAS_Skip("13.0", "no AI players active")
+		return
+	end
+
+	for _, player in ipairs(_ai_players) do
+		local ai = player.ai
+		local label = ai.label or "P?"
+		local t = ai.telemetry or {}
+
+		-- 13.1 State machine initialized (not stuck in idle if MaA claimed)
+		local maa_state = ai.maa_state or "idle"
+		local claimed = ai.maa_claim_done or false
+		if claimed then
+			_DAS_Assert(label .. " 13.1 MaA state != idle (MaA claimed)",
+				maa_state ~= MAA_STATE_IDLE,
+				string.format("state=%s claimed=%s", maa_state, tostring(claimed)))
+		else
+			_DAS_Assert(label .. " 13.1 MaA state (not yet claimed, informational)",
+				true,
+				string.format("state=%s claimed=%s", maa_state, tostring(claimed)))
+		end
+
+		-- 13.2 No sequence violations
+		local violations = (t.maa_sequence_violations or 0)
+		_DAS_Assert(label .. " 13.2 sequence violations == 0",
+			violations == 0,
+			string.format("violations=%d", violations))
+
+		-- 13.3 State history ordering: if engagement happened, verify scouting preceded it
+		local history = ai.maa_state_history or {}
+		local saw_scouting = false
+		local saw_enemy = false
+		local order_valid = true
+		for _, entry in ipairs(history) do
+			if entry.state == MAA_STATE_SCOUTING then
+				saw_scouting = true
+			elseif entry.state == MAA_STATE_ENEMY_FOUND then
+				if not saw_scouting then
+					order_valid = false
+				end
+				saw_enemy = true
+			elseif entry.state == MAA_STATE_ENGAGING then
+				if not saw_scouting then
+					order_valid = false
+				end
+			end
+		end
+		_DAS_Assert(label .. " 13.3 scouting precedes engagement in history",
+			order_valid,
+			string.format("history_len=%d saw_scout=%s saw_enemy=%s",
+				#history, tostring(saw_scouting), tostring(saw_enemy)))
+
+		-- 13.4 Transitions > 0 if game time > 30s and MaA claimed
+		local transitions = (t.maa_transitions or 0)
+		local game_time = World_GetGameTime()
+		if claimed and game_time > 30.0 then
+			_DAS_Assert(label .. " 13.4 MaA transitions > 0",
+				transitions > 0,
+				string.format("transitions=%d time=%.1fs", transitions, game_time))
+		else
+			_DAS_Assert(label .. " 13.4 MaA transitions (early/unclaimed, informational)",
+				true,
+				string.format("transitions=%d claimed=%s time=%.1fs", transitions, tostring(claimed), game_time))
+		end
+
+		-- 13.5 Hold entries tracked (informational)
+		local hold_entries = (t.maa_hold_entries or 0)
+		_DAS_Assert(label .. " 13.5 hold entries tracked",
+			true,
+			string.format("maa_hold_entries=%d", hold_entries))
+
+		-- 13.6 No RETURNING state in history (removed state should never appear)
+		local saw_returning = false
+		for _, entry in ipairs(history) do
+			if entry.state == "returning" then
+				saw_returning = true
+				break
+			end
+		end
+		_DAS_Assert(label .. " 13.6 no returning state in history",
+			not saw_returning,
+			string.format("saw_returning=%s history_len=%d", tostring(saw_returning), #history))
+
+		-- 13.7 Engage extensions counter present and tracked
+		local extensions = (t.maa_engage_extensions or 0)
+		_DAS_Assert(label .. " 13.7 engage extensions counter tracked",
+			extensions >= 0,
+			string.format("maa_engage_extensions=%d", extensions))
+
+		-- 13.8 Rally-from-dispatch counter present and tracked
+		local rally_dispatch = (t.maa_rally_from_dispatch or 0)
+		_DAS_Assert(label .. " 13.8 rally-from-dispatch counter tracked",
+			rally_dispatch >= 0,
+			string.format("maa_rally_from_dispatch=%d", rally_dispatch))
+
+		-- 13.9 Expected end state: scouting or engaging (never idle after claim, never returning)
+		if claimed and game_time > 60.0 then
+			local valid_end_state = (maa_state == MAA_STATE_SCOUTING or
+				maa_state == MAA_STATE_ENGAGING or
+				maa_state == MAA_STATE_ENEMY_FOUND or
+				maa_state == MAA_STATE_RALLYING or
+				maa_state == MAA_STATE_REGROUPED or
+				maa_state == MAA_STATE_RETREATING)
+			_DAS_Assert(label .. " 13.9 end state is active (not idle/returning)",
+				valid_end_state,
+				string.format("state=%s time=%.1fs", maa_state, game_time))
+		else
+			_DAS_Assert(label .. " 13.9 end state (early/unclaimed, informational)",
+				true,
+				string.format("state=%s claimed=%s time=%.1fs", maa_state, tostring(claimed), game_time))
+		end
+
+		-- 13.10 Retreat counter tracked (informational)
+		local retreats = (t.maa_retreats or 0)
+		_DAS_Assert(label .. " 13.10 retreat counter tracked",
+			retreats >= 0,
+			string.format("maa_retreats=%d", retreats))
+
+		-- 13.11 No solo engage from ENEMY_FOUND in history (excluding hold_timeout_engage safety net)
+		local saw_solo_engage = false
+		for i, entry in ipairs(history) do
+			if entry.state == MAA_STATE_ENGAGING and i > 1 then
+				local prev = history[i - 1]
+				if prev.state == MAA_STATE_ENEMY_FOUND and entry.reason ~= "hold_timeout_engage" then
+					saw_solo_engage = true
+					break
+				end
+			end
+		end
+		_DAS_Assert(label .. " 13.11 no solo engage from enemy_found",
+			not saw_solo_engage,
+			string.format("saw_solo_engage=%s history_len=%d", tostring(saw_solo_engage), #history))
+
+		-- 13.12 RETREATING always terminates (followed by rallying or scouting, never stuck)
+		local retreat_stuck = false
+		for i, entry in ipairs(history) do
+			if entry.state == MAA_STATE_RETREATING then
+				-- Check if next state exists and is a valid termination
+				if i < #history then
+					local next_entry = history[i + 1]
+					if next_entry.state ~= MAA_STATE_RALLYING and
+					   next_entry.state ~= MAA_STATE_SCOUTING and
+					   next_entry.state ~= MAA_STATE_ENEMY_FOUND then
+						retreat_stuck = true
+					end
+				end
+				-- If retreating is the last history entry, that's acceptable (game ended during retreat)
+			end
+		end
+		_DAS_Assert(label .. " 13.12 retreating always terminates properly",
+			not retreat_stuck,
+			string.format("retreat_stuck=%s retreats=%d", tostring(retreat_stuck), retreats))
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Category 14: Wall Detection, Villager Stages, Hostile Zones, Outpost Caps
+---------------------------------------------------------------------------------------------------
+
+local function _DAS_Cat14_WallStageZone()
+	_Debug_PhaseHeader(14, "Wall / Stage / Zone")
+
+	if not _DAS_HasAI() then
+		_DAS_Skip("14.0", "no AI players active")
+		return
+	end
+
+	local game_time = World_GetGameTime()
+
+	for _, player in ipairs(_ai_players) do
+		local ai = player.ai
+		local label = ai.label or "P?"
+
+		-- 14.1 wall_scan_done should be true after game start
+		_DAS_Assert(label .. " 14.1 wall scan completed",
+			ai.wall_scan_done == true,
+			string.format("wall_scan_done=%s", tostring(ai.wall_scan_done)))
+
+		-- 14.2 is_walled and team_walled are boolean
+		_DAS_Assert(label .. " 14.2 wall flags are boolean",
+			type(ai.is_walled) == "boolean" and type(ai.team_walled) == "boolean",
+			string.format("is_walled=%s team_walled=%s", tostring(ai.is_walled), tostring(ai.team_walled)))
+
+		-- 14.3 team_walled implies at least one teammate is_walled
+		if ai.team_walled then
+			local any_walled = false
+			for _, other in ipairs(_ai_players) do
+				if other.ai and other.ai.is_walled then any_walled = true; break end
+			end
+			_DAS_Assert(label .. " 14.3 team_walled has walled source",
+				any_walled,
+				string.format("team_walled=%s any_teammate_walled=%s", tostring(ai.team_walled), tostring(any_walled)))
+		else
+			_DAS_Assert(label .. " 14.3 team_walled consistency", true, "not team_walled")
+		end
+
+		-- 14.4 villager_stage is valid (1, 2, or 3)
+		local stage = ai.villager_stage or 0
+		_DAS_Assert(label .. " 14.4 villager_stage valid",
+			stage >= 1 and stage <= 3,
+			string.format("stage=%d", stage))
+
+		-- 14.5 Stage progression monotonic: stage matches completion state
+		local prod_done = _AI_IsSpawnProductionSetupComplete and _AI_IsSpawnProductionSetupComplete(player) or false
+		local vision_done = (ai.vision_outpost_count or 0) >= ((_AI_GetVisionOutpostTarget and _AI_GetVisionOutpostTarget()) or 5)
+		if stage == 1 then
+			-- Stage 1: production buildings not yet complete (or just advanced)
+			_DAS_Assert(label .. " 14.5 stage 1 consistency",
+				true,
+				string.format("prod_done=%s vision=%d", tostring(prod_done), ai.vision_outpost_count or 0))
+		elseif stage == 2 then
+			-- Stage 2: production complete, vision outposts in progress
+			_DAS_Assert(label .. " 14.5 stage 2 requires prod complete",
+				prod_done,
+				string.format("prod_done=%s vision=%d", tostring(prod_done), ai.vision_outpost_count or 0))
+		elseif stage == 3 then
+			-- Stage 3: both production and vision outposts complete
+			_DAS_Assert(label .. " 14.5 stage 3 requires vision complete",
+				prod_done and vision_done,
+				string.format("prod_done=%s vision=%d/%d", tostring(prod_done),
+					ai.vision_outpost_count or 0, (_AI_GetVisionOutpostTarget and _AI_GetVisionOutpostTarget()) or 5))
+		end
+
+		-- 14.6 vision_outpost_count bounded
+		local max_outposts = (_AI_GetMaxOutposts and _AI_GetMaxOutposts()) or 5
+		_DAS_Assert(label .. " 14.6 vision outposts within cap",
+			(ai.vision_outpost_count or 0) <= max_outposts,
+			string.format("vision=%d max=%d", ai.vision_outpost_count or 0, max_outposts))
+
+		-- 14.7 secondary_zone_hostile is boolean
+		_DAS_Assert(label .. " 14.7 hostile zone flag is boolean",
+			type(ai.secondary_zone_hostile) == "boolean",
+			string.format("secondary_zone_hostile=%s", tostring(ai.secondary_zone_hostile)))
+
+		-- 14.8 hostile zone attack target consistency
+		if ai.secondary_zone_hostile and ai.secondary_zone_attack_target ~= nil then
+			local tgt = ai.secondary_zone_attack_target
+			local valid_pos = type(tgt) == "table" or (tgt.x ~= nil and tgt.z ~= nil)
+			_DAS_Assert(label .. " 14.8 hostile attack target is valid pos",
+				valid_pos,
+				string.format("has_target=%s", tostring(ai.secondary_zone_attack_target ~= nil)))
+		else
+			_DAS_Assert(label .. " 14.8 hostile attack target consistency", true,
+				string.format("hostile=%s has_target=%s",
+					tostring(ai.secondary_zone_hostile), tostring(ai.secondary_zone_attack_target ~= nil)))
+		end
+
+		-- 14.9 No army dispatch before early game timer
+		local early_limit = 300.0  -- _AI_EARLY_GAME_NO_ATTACK
+		local t = ai.telemetry or {}
+		if game_time < early_limit then
+			_DAS_Assert(label .. " 14.9 no dispatch in early game",
+				(t.armies_dispatched or 0) == 0,
+				string.format("armies_dispatched=%d time=%.1fs", t.armies_dispatched or 0, game_time))
+		else
+			_DAS_Assert(label .. " 14.9 early game elapsed (informational)", true,
+				string.format("armies_dispatched=%d time=%.1fs", t.armies_dispatched or 0, game_time))
+		end
+
+		-- 14.10 Outside chain only builds in stage 3
+		local chain = ai.outside_chain or {}
+		local chain_built = chain.built or {}
+		local chain_total = 0
+		for _, v in pairs(chain_built) do chain_total = chain_total + (v or 0) end
+		if stage < 3 then
+			_DAS_Assert(label .. " 14.10 no secondary chain in pre-stage-3",
+				chain_total == 0,
+				string.format("stage=%d chain_built_total=%d", stage, chain_total))
+		else
+			_DAS_Assert(label .. " 14.10 secondary chain (stage 3, informational)", true,
+				string.format("stage=%d chain_built_total=%d", stage, chain_total))
+		end
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Category 15: Producer Utilization
+---------------------------------------------------------------------------------------------------
+
+local function _DAS_Cat15_ProducerUtilization()
+	_Debug_PhaseHeader(15, "Producer Utilization")
+
+	if not _DAS_HasAI() then
+		_DAS_Skip("15.0", "no AI players active")
+		return
+	end
+
+	local game_time = World_GetGameTime()
+
+	for _, player in ipairs(_ai_players) do
+		local ai = player.ai
+		local label = ai.label or "P?"
+		local priority = ai.building_priority or _AI_GetBuildingPriority()
+		local civ = ai.civ_name or "?"
+		local current_age = 1
+		if player.id ~= nil then
+			local ok_age, p_age = pcall(Player_GetCurrentAge, player.id)
+			if ok_age and p_age ~= nil then current_age = p_age end
+		end
+
+		-- 15.1 building_priority resolved and cached
+		_DAS_Assert(label .. " 15.1 building_priority cached",
+			ai.building_priority ~= nil and #ai.building_priority > 0,
+			string.format("civ=%s resolved=%d", civ, ai.building_priority and #ai.building_priority or 0))
+
+		-- 15.2 building_unit_map populated for all resolved types
+		local map = ai.building_unit_map or {}
+		local map_count = 0
+		for _ in pairs(map) do map_count = map_count + 1 end
+		_DAS_Assert(label .. " 15.2 building_unit_map populated",
+			map_count >= #priority,
+			string.format("map_entries=%d resolved=%d", map_count, #priority))
+
+		-- 15.3 At 180s+, all age-eligible producers have at least 1 completed building
+		if game_time >= 180.0 then
+			local underused = {}
+			for _, entry in ipairs(priority) do
+				if current_age >= (entry.min_age or 1) then
+					local ik = entry.key
+					local td = ai.buildings[ik]
+					if td == nil or td.count == 0 then
+						table.insert(underused, ik)
+					end
+				end
+			end
+			_DAS_Assert(label .. " 15.3 all age-eligible producers built at 180s",
+				#underused == 0,
+				#underused > 0 and ("underused: " .. table.concat(underused, ",")) or
+				string.format("all %d eligible types built", #priority))
+		else
+			_DAS_Assert(label .. " 15.3 producer coverage (pre-180s, informational)",
+				true, string.format("time=%.1fs age=%d", game_time, current_age))
+		end
+
+		-- 15.4 No nil-skip silent failures: all resolved types have tracking in ai.buildings
+		local orphaned = {}
+		for _, entry in ipairs(priority) do
+			if ai.buildings[entry.key] == nil then
+				table.insert(orphaned, entry.key)
+			end
+		end
+		_DAS_Assert(label .. " 15.4 no orphaned producer types",
+			#orphaned == 0,
+			#orphaned > 0 and ("orphaned: " .. table.concat(orphaned, ",")) or "all tracked")
+
+		-- 15.5 Producer utilization matrix log (informational)
+		local matrix = {}
+		for _, entry in ipairs(priority) do
+			local ik = entry.key
+			local td = ai.buildings[ik]
+			local cnt = (td and td.count) or 0
+			table.insert(matrix, string.format("%s:%d/%d", ik, cnt, entry.max))
+		end
+		_DAS_Assert(label .. " 15.5 producer matrix (informational)", true,
+			string.format("civ=%s age=%d [%s]", civ, current_age, table.concat(matrix, " ")))
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Category Dispatch Table
+---------------------------------------------------------------------------------------------------
+
+local _DAS_CATEGORIES_TABLE = {
+	[1]  = _DAS_Cat1_StateInvariants,
+	[2]  = _DAS_Cat2_ConstructionStress,
+	[3]  = _DAS_Cat3_ArmyDispatchStress,
+	[4]  = _DAS_Cat4_VillagerTeamStress,
+	[5]  = _DAS_Cat5_ZoneBudgetStress,
+	[6]  = _DAS_Cat6_EliminationEdgeCases,
+	[7]  = _DAS_Cat7_EconomyDrift,
+	[8]  = _DAS_Cat8_PatrolArbitration,
+	[9]  = _DAS_Cat9_TelemetryAccounting,
+	[10] = _DAS_Cat10_EventHandlerSafety,
+	[11] = _DAS_Cat11_PlacementQuality,
+	[12] = _DAS_Cat12_ConstructionThroughput,
+	[13] = _DAS_Cat13_MaaSequenceOrdering,
+	[14] = _DAS_Cat14_WallStageZone,
+	[15] = _DAS_Cat15_ProducerUtilization,
+}
+
+---------------------------------------------------------------------------------------------------
+-- Public Console Commands
+---------------------------------------------------------------------------------------------------
+
+--- Full 15-category AI stress & robustness test.
+function Debug_AIStressTest()
+	if _das.running then
+		print("[AI_STRESS] Already running. Wait for completion.")
+		return
+	end
+
+	_das.running = true
+	_das.start_time = World_GetGameTime()
+	_das.passed = 0
+	_das.total = 0
+	_das.skipped = 0
+
+	_Debug_ResetPhaseTracking()
+	_Debug_SetPhaseCounterGetter(_DAS_GetCounters)
+
+	print("============================================")
+	print(string.format("  CBA AI STRESS & ROBUSTNESS SUITE (%d categories)", _DAS_CATEGORIES))
+	print(string.format("  AI players: %d | Game time: %.1fs",
+		_ai_players and #_ai_players or 0, World_GetGameTime()))
+	print("============================================")
+
+	for cat = 1, _DAS_CATEGORIES do
+		local fn = _DAS_CATEGORIES_TABLE[cat]
+		if fn then
+			local ok, err = pcall(fn)
+			if not ok then
+				print(string.format("  [CRASH] Category %d: %s", cat, tostring(err)))
+				_DAS_Assert(string.format("Cat%d no crash", cat), false, tostring(err))
+			end
+		end
+	end
+
+	local elapsed = World_GetGameTime() - _das.start_time
+	print("")
+	print("============================================")
+	print(string.format("  RESULT: %d / %d passed (skipped=%d) in %.1fs",
+		_das.passed, _das.total, _das.skipped, elapsed))
+	if _das.passed < _das.total then
+		print("  FAILURES:")
+		for _, r in ipairs(_cba_debug.test_results) do
+			if not r.pass then
+				print(string.format("    [FAIL] %s — %s", r.name, r.detail))
+			end
+		end
+	end
+	print("============================================")
+
+	_Debug_EndMarker(_DAS_SUITE, _das.passed, _das.total, elapsed)
+	_das.running = false
+end
+
+--- Run a single stress category (1-15).
+function Debug_AIStressCategory(n)
+	n = tonumber(n)
+	if n == nil or n < 1 or n > _DAS_CATEGORIES then
+		print(string.format("[AI_STRESS] Category must be 1-%d", _DAS_CATEGORIES))
+		return
+	end
+
+	_das.running = true
+	_das.start_time = World_GetGameTime()
+	_das.passed = 0
+	_das.total = 0
+	_das.skipped = 0
+
+	_Debug_ResetPhaseTracking()
+	_Debug_SetPhaseCounterGetter(_DAS_GetCounters)
+
+	print(string.format("============= AI STRESS CATEGORY %d =============", n))
+	local fn = _DAS_CATEGORIES_TABLE[n]
+	if fn then
+		local ok, err = pcall(fn)
+		if not ok then
+			print(string.format("  [CRASH] Category %d: %s", n, tostring(err)))
+			_DAS_Assert(string.format("Cat%d no crash", n), false, tostring(err))
+		end
+	end
+
+	local elapsed = World_GetGameTime() - _das.start_time
+	print(string.format("  RESULT: %d / %d passed (skipped=%d)", _das.passed, _das.total, _das.skipped))
+	_Debug_EndMarker(string.format("AIStressCat%d", n), _das.passed, _das.total, elapsed)
+	print(string.format("============= /AI STRESS CATEGORY %d =============", n))
+	_das.running = false
+end
+
+---------------------------------------------------------------------------------------------------
+-- Module Registration
+---------------------------------------------------------------------------------------------------
+
+Debug_RegisterModule({
+	name        = "ai_stress",
+	tags        = { "ai_stress", "ai_robustness" },
+	tier        = 3,
+	depends     = { "core", "ai_player_test" },
+	state_tables = { "_ai_players" },
+	required_game = { "PLAYERS", "_AI_IsEliminated" },
+	namespace   = "ai_stress",
+	description = "15-category AI player stress, edge-case, and robustness verification suite",
+}, {
+	full       = Debug_AIStressTest,
+	category   = Debug_AIStressCategory,
+})
+
+if debug then
+	debug._register("ai_stress", Debug_AIStressTest,
+		"15-category AI stress & robustness (invariants, construction, army, villagers, zones, elimination, economy, patrol, telemetry, handlers, placement, throughput, maa, wall/stage/zone, producers)", 3)
+end

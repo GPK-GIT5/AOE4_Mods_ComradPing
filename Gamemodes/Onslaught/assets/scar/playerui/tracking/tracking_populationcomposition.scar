@@ -1,0 +1,75 @@
+-----------------------------------------------------------------------
+-- PlayerUI Tracking: Population Composition
+-- Worker/trade/idle/military/siege breakdown per visible player.
+-- Reference: observerui/tracking_populationcomposition.scar
+-----------------------------------------------------------------------
+
+PlayerUI_PopulationComposition = {}
+
+PlayerUiInitialization:AddInitializable(PlayerUI_PopulationComposition)
+
+function PlayerUI_PopulationComposition:Initialize()
+	local visiblePlayers = _PlayerUI_VisiblePlayers
+	if visiblePlayers == nil then
+		return
+	end
+	for i = 1, #visiblePlayers do
+		self:_Initialize(visiblePlayers[i].id)
+	end
+end
+
+function PlayerUI_PopulationComposition:GetForPlayer_Worker_WorkerIdle_Military_MilitaryNonSiege_Siege(player)
+	local data = self[player.PlayerID]
+	if data == nil then
+		return 0, 0, 0, 0, 0
+	end
+	return data.WorkerNonTrade + data.Trade, data.WorkerIdle,
+		data.MilitaryNonSiege + data.Siege,
+		data.MilitaryNonSiege, data.Siege
+end
+
+function PlayerUI_PopulationComposition:_Initialize(player)
+	local populationComposition = {
+		WorkerNonTrade = 0,
+		Trade = 0,
+		WorkerIdle = 0,
+		MilitaryNonSiege = 0,
+		Siege = 0,
+	}
+	self[player.PlayerID] = populationComposition
+
+	local resetRule = function()
+		populationComposition.WorkerNonTrade = 0
+		populationComposition.Trade = 0
+		populationComposition.WorkerIdle = 0
+		populationComposition.MilitaryNonSiege = 0
+		populationComposition.Siege = 0
+	end
+	PlayerUiRuleSystem:AddDataGatheringPreparationRule(player.PlayerID, resetRule)
+
+	local squad_Population = Squad_Population
+	local squad_IsIdle = Squad_IsIdle
+	local squad_IsOfType = Squad_IsOfType
+	local workerRule = function(squad)
+		local population = squad_Population(squad, CT_Personnel)
+		if not squad_IsOfType(squad, "trade_cart") then
+			populationComposition.WorkerNonTrade = populationComposition.WorkerNonTrade + population
+		else
+			populationComposition.Trade = populationComposition.Trade + population
+		end
+		if squad_IsIdle(squad) then
+			populationComposition.WorkerIdle = populationComposition.WorkerIdle + population
+		end
+	end
+	PlayerUiRuleSystem:AddSquadDataGatheringRule(player.PlayerID, "worker", workerRule)
+
+	local militaryRule = function(squad)
+		local population = squad_Population(squad, CT_Personnel)
+		if not squad_IsOfType(squad, "siege") then
+			populationComposition.MilitaryNonSiege = populationComposition.MilitaryNonSiege + population
+		else
+			populationComposition.Siege = populationComposition.Siege + population
+		end
+	end
+	PlayerUiRuleSystem:AddSquadDataGatheringRule(player.PlayerID, "NonWorker", militaryRule)
+end

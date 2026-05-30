@@ -1,0 +1,111 @@
+---------------------------------------------------------------------------------------------------
+-- Authors:
+-- Woprock
+-- Skrip & Hank (CBA S/H part)
+--
+-- Description:
+-- Lobby Option - Generates resources for each player every 60 seconds
+---------------------------------------------------------------------------------------------------
+AGS_AUTO_RESOURCES_MODULE = "AGS_AutoResources"
+
+
+---------------------------------------------------------------------------------------------------
+-- Delegates:
+---------------------------------------------------------------------------------------------------
+
+Core_RegisterModule(AGS_AUTO_RESOURCES_MODULE)	
+
+function AGS_AutoResources_UpdateModuleSettings()
+	if _mod.resource_amount == "disabled" then
+		Core_UnregisterModule(AGS_AUTO_AGE_MODULE)
+	end
+end
+
+function AGS_AutoResources_PresetFinalize()
+	Rule_AddInterval(AGS_AutoResources, 60)
+	if _mod.resource_amount == "unlimited" then
+		AGS_Toggle_EconBuildings()
+	end
+end
+
+	---------------------------------------------------------------------------------------------------
+	-- Functions:
+	---------------------------------------------------------------------------------------------------
+
+function AGS_AutoResources()
+	
+	for i, player in ipairs(PLAYERS) do
+		if not player.isEliminated then
+			if type(_mod.resource_amount) == "number" and _mod.resource_amount > 0 then 
+				Player_AddResource(player.id, RT_Food, _mod.resource_amount)
+				Player_AddResource(player.id, RT_Wood, _mod.resource_amount)
+				Player_AddResource(player.id, RT_Gold, _mod.resource_amount)
+				Player_AddResource(player.id, RT_Stone, _mod.resource_amount)
+				if player.isLocal then
+					local event_cue_text = Loc_FormatText("$f5a005650ae44d2b8e05306aa891f90c:38", _mod.resource_amount)
+					UI_CreateEventCueClickable(-1, 10, -1, 0, event_cue_text, "", "low_priority", "", "sfx_ui_event_queue_low_priority_play", 255, 255, 255, 255, ECV_Queue, nothing)				
+				end
+
+				-- From CBA S/H
+			elseif _mod.resource_amount == "unlimited" then
+				local res = Player_GetResources(player.id)
+				if(res.food < 75000) then
+					Player_SetResource(player.id, RT_Food, 99999)
+				end
+				if(res.wood < 75000) then
+					Player_SetResource(player.id, RT_Wood, 99999)
+				end
+				if(res.gold < 75000) then
+					Player_SetResource(player.id, RT_Gold, 99999)
+				end
+				if(res.stone < 75000) then
+					Player_SetResource(player.id, RT_Stone, 99999)
+				end
+				if player.isLocal then
+					local event_cue_text = Loc_FormatText("$f5a005650ae44d2b8e05306aa891f90c:264")
+					UI_CreateEventCueClickable(-1, 10, -1, 0, event_cue_text, "", "low_priority", "", "sfx_ui_event_queue_low_priority_play", 255, 255, 255, 255, ECV_Queue, nothing)				
+				end
+				
+			end
+		end
+	end
+end
+
+-- Disable economy buildings so (hopefully) players understand its set to unlimited. NOTE: Mongol Ovoo is used in tuning pack and left out, also dont unlock them here because thats done within the tuning pack. 
+function AGS_Toggle_EconBuildings()
+	local BUILDING_ECON_ALL = {
+		AGS_BP_MARKET,
+		AGS_BP_MINING_CAMP,
+		AGS_BP_LUMBER_CAMP,
+		AGS_BP_MILL,
+	}
+	
+
+	for _, player in ipairs(PLAYERS) do
+		-- Use the iterated player's race, NOT the local player's. Reading
+		-- localPlayer here caused the Malian ranch to be removed only on the
+		-- local peer when the local player was Malian, producing a per-peer
+		-- divergence in building availability.
+		-- See docs/game_systems/systems/mp-deterministic-mutation-pattern.md.
+		local player_civ = player.raceName
+		
+		for id, building_bp in pairs(BUILDING_ECON_ALL) do
+			local ebp = AGS_GetCivilizationEntity(player.raceName, building_bp)
+			if ebp ~= nil then
+				Player_SetEntityProductionAvailability(player.id, ebp, ITEM_LOCKED)
+			end
+		end
+		if player_civ == "malian" then
+			Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_econ_ranch_mal"), ITEM_REMOVED)
+		end
+	end
+	
+end
+
+
+
+
+
+		
+		
+	

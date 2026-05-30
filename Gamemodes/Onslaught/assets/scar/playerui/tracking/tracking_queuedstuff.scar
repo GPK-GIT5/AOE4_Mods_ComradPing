@@ -1,0 +1,46 @@
+-----------------------------------------------------------------------
+-- PlayerUI Tracking: Queued Stuff
+-- Production queue contents (units + upgrades) for visible players.
+-- Reference: observerui/tracking_queuedstuff.scar
+-----------------------------------------------------------------------
+
+PlayerUI_QueuedStuff = {}
+
+PlayerUiInitialization:AddInitializable(PlayerUI_QueuedStuff)
+
+function PlayerUI_QueuedStuff:Initialize()
+	local visiblePlayers = _PlayerUI_VisiblePlayers
+	if visiblePlayers == nil then
+		return
+	end
+	for i = 1, #visiblePlayers do
+		self:_Initialize(visiblePlayers[i].id)
+	end
+end
+
+function PlayerUI_QueuedStuff:GetForPlayer(player)
+	return self[player.PlayerID] or {}
+end
+
+function PlayerUI_QueuedStuff:_Initialize(player)
+	local resetRule = function()
+		self[player.PlayerID] = {}
+	end
+	PlayerUiRuleSystem:AddDataGatheringPreparationRule(player.PlayerID, resetRule)
+
+	local entity_GetProductionQueueSize = Entity_GetProductionQueueSize
+	local entity_GetProductionQueueItem = Entity_GetProductionQueueItem
+	local scanRule = function(entity)
+		local queuedStuff = self[player.PlayerID]
+		local queueSize = entity_GetProductionQueueSize(entity)
+		for i = 0, (queueSize - 1) do
+			local bp = entity_GetProductionQueueItem(entity, i)
+			if queuedStuff[bp.PropertyBagGroupID] then
+				queuedStuff[bp.PropertyBagGroupID].Count = queuedStuff[bp.PropertyBagGroupID].Count + 1
+			else
+				queuedStuff[bp.PropertyBagGroupID] = { Count = 1, Bp = bp }
+			end
+		end
+	end
+	PlayerUiRuleSystem:AddEntityDataGatheringRule(player.PlayerID, "BuildingWithQueue", scanRule)
+end

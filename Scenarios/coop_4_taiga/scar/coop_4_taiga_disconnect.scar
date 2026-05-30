@@ -1,0 +1,433 @@
+-- ============================================================
+-- Player Disconnect: Faction-Safe Asset Conversion
+-- ============================================================
+-- When a human player (1–4) disconnects and AI takes over their slot:
+-- 1. +50 population cap bonus applied to recipient
+-- 2. Resources transferred directly
+-- 3. Buildings & squads converted to recipient's faction equivalent
+--    via delete+respawn (prevents cross-faction upgrade crashes)
+-- 4. Recipient = lowest-population human player (tie-break: fewest prior transfers)
+-- 5. Unconvertible buildings/units (landmarks, unique units) are deleted
+-- ============================================================
+
+-- Track original human/AI state for personality enforcement
+g_original_player_types = {}
+
+-- Track which human slots have already been transferred (prevent double-transfer)
+g_transferred_slots = {}
+
+-- Track which co-op slots have been marked as disconnected (event-driven via GE_AITakeOver)
+g_disconnected_slots = {}
+
+-- Resource types to transfer
+RESOURCE_TYPES = { RT_Food, RT_Wood, RT_Gold, RT_Stone }
+
+-- Track how many transfers each slot has received (for tie-breaking)
+g_transfer_counts = {}
+
+-- All player slots indexed for Reset_AI iteration
+ALL_PLAYER_SLOTS = {}  -- populated in Mission_Start after player globals exist
+
+-- ============================================================
+-- Core Module: disconnect callback (primary detection layer)
+-- ============================================================
+-- Relic's engine calls <Module>_OnPlayerAITakeover(context) on registered
+-- Core modules when a human player disconnects. Without this, GE_AITakeOver
+-- alone may not fire reliably for crashes/network drops.
+Core_RegisterModule("TaigaDisconnect")
+
+function TaigaDisconnect_OnPlayerAITakeover(context)
+	OnPlayerAITakeover_Hold()
+	if context ~= nil and context.player ~= nil then
+		for i = 1, 4 do
+			if ALL_PLAYER_SLOTS[i] == context.player then
+				if not g_disconnected_slots[i] then
+					g_disconnected_slots[i] = true
+					print(string.format("[DC] Core callback fired: player%d marked as disconnected", i))
+				end
+				break
+			end
+		end
+	end
+	CheckPlayerDisconnects()
+end
+
+-- Find the remaining human player with the lowest current population.
+-- Tie-break: fewest prior transfers received. Excludes the disconnected player.
+function FindRecipientPlayer(exclude_pid)
+	local best_pid = nil
+	local best_slot = nil
+	local best_pop = nil
+	local best_transfers = nil
+	for i = 1, 4 do
+		local pid = ALL_PLAYER_SLOTS[i]
+		if pid == nil then
+			print(string.format("[DC][WARN] ALL_PLAYER_SLOTS[%d] is nil — skipping", i))
+		elseif pid ~= exclude_pid and not g_disconnected_slots[i] and not g_transferred_slots[i] then
+			local pop = Player_GetCurrentPopulation(pid, CT_Personnel)
+			local transfers = g_transfer_counts[i] or 0
+			if best_pid == nil
+				or pop < best_pop
+				or (pop == best_pop and transfers < best_transfers) then
+				best_pid = pid
+				best_slot = i
+				best_pop = pop
+				best_transfers = transfers
+			end
+		end
+	end
+	return best_pid, best_slot
+end
+
+-- Transfer all resources from one player to another, then zero the source
+function TransferResources(from_pid, to_pid, from_slot, to_slot)
+	for _, rt in ipairs(RESOURCE_TYPES) do
+		local amount = Player_GetResource(from_pid, rt)
+		if amount > 0 then
+			Player_AddResource(to_pid, rt, amount)
+			Player_SetResource(from_pid, rt, 0)
+		end
+	end
+	print(string.format("[DC] Resources transferred from player%d → player%d", from_slot, to_slot))
+end
+-- Find all remaining human recipients ordered by population (ascending).
+-- Tie-break: fewest prior transfers received. Excludes the disconnected player.
+function FindAllRecipients(exclude_pid)
+	local recipients = {}
+	for i = 1, 4 do
+		local pid = ALL_PLAYER_SLOTS[i]
+		if pid ~= nil and pid ~= exclude_pid and not g_disconnected_slots[i] and not g_transferred_slots[i] then
+			local pop = Player_GetCurrentPopulation(pid, CT_Personnel)
+			local transfers = g_transfer_counts[i] or 0
+			table.insert(recipients, { pid = pid, slot = i, pop = pop, transfers = transfers })
+		end
+	end
+	table.sort(recipients, function(a, b)
+		if a.pop ~= b.pop then return a.pop < b.pop end
+		return a.transfers < b.transfers
+	end)
+	return recipients
+end
+-- ============================================================
+-- Building Conversion (delete + respawn as recipient's faction)
+-- ============================================================
+
+-- Convert a single building entity to the recipient's faction equivalent.
+-- Returns "converted", "transferred", "deleted", or "skipped".
+function _ConvertBuildingEntity(entity, to_pid, to_civ, from_civ)
+	if Entity_IsAlive(entity) == false then
+		print("[DC]   Entity dead between snapshot and processing — skipping")
+		return "skipped"
+	end
+	if Entity_IsOfType(entity, "landmark") then
+		local owner_civ = string.lower(Player_GetRaceName(Entity_GetPlayerOwner(entity)))
+		if owner_civ == from_civ then
+			Entity_SetPlayerOwner(entity, to_pid)
+			return "transferred"
+		end
+		print("[DC]   Landmark owner civ mismatch — deleting instead of transferring")
+		Entity_Destroy(entity)
+		return "deleted"
+	end
+	local bp = Entity_GetBlueprint(entity)
+	local bp_name = BP_GetName(bp)
+	local pos = Entity_GetPosition(entity)
+	local health_pct = Entity_GetHealthPercentage(entity)
+	
+	-- Look up AGS key from reverse map
+	local ags_key = BLUEPRINT_REVERSE_MAP[bp_name]
+	
+	if ags_key == nil then
+		-- Walls, palisades, towers, and gates: transfer ownership (no faction equivalent needed)
+		if string.find(bp_name, "defense_wall") or string.find(bp_name, "palisade") or string.find(bp_name, "defense_tower") then
+			Entity_SetPlayerOwner(entity, to_pid)
+			return "transferred"
+		end
+		-- No mapping found (landmark, wonder, or unknown) — delete
+		print(string.format("[DC]   Building '%s' has no faction equivalent — deleting", bp_name))
+		Entity_Destroy(entity)
+		return "deleted"
+	end
+	
+	-- Resolve recipient's version of this building
+	local to_bp = TryGetCivilizationEntity(to_civ, ags_key)
+	if to_bp == nil then
+		-- Recipient's civ doesn't have this building type — delete
+		print(string.format("[DC]   Building '%s' (key=%s) not available for %s — deleting", bp_name, ags_key, to_civ))
+		Entity_Destroy(entity)
+		return "deleted"
+	end
+	
+	-- Check if already the correct blueprint (same civ)
+	if BP_GetName(to_bp) == bp_name then
+		-- Same blueprint — just transfer ownership, no need to respawn
+		Entity_SetPlayerOwner(entity, to_pid)
+		return "transferred"
+	end
+	
+	-- Delete original and spawn recipient's version
+	Entity_Destroy(entity)
+	local eg_temp = EGroup_CreateIfNotFound("eg_dc_convert_temp")
+	EGroup_Clear(eg_temp)
+	Util_CreateEntities(to_pid, eg_temp, to_bp, pos, 1, false, true, false, false)
+	-- Apply health percentage to match original
+	if health_pct < 1.0 and EGroup_CountSpawned(eg_temp) > 0 then
+		local new_entity = EGroup_GetEntityAt(eg_temp, 1)
+		local max_hp = Entity_GetHealthMax(new_entity)
+		local target_hp = math.max(1, math.floor(max_hp * health_pct))
+		Entity_SetHealth(new_entity, target_hp)
+	end
+	return "converted"
+end
+
+-- Convert all buildings from a leaving player to the recipient's faction.
+-- Ejects garrisoned units first, then snapshots and processes each building.
+function ConvertBuildings(from_pid, to_pid, to_civ, from_slot, to_slot)
+	Player_GetAll(from_pid)
+	local from_civ = string.lower(Player_GetRaceName(from_pid))
+	local count = EGroup_CountSpawned(eg_allentities)
+	if count == 0 then
+		print(string.format("[DC] No buildings to convert from player%d", from_slot))
+		return
+	end
+	
+	-- Snapshot entities first; converting destroys entities, so avoid direct iteration mutation.
+	local snapshot = {}
+	local _CollectEntity = function(gid, idx, entity)
+		table.insert(snapshot, entity)
+	end
+	EGroup_ForEach(eg_allentities, _CollectEntity)
+	
+	local converted = 0
+	local skipped = 0
+	local errors = 0
+	for _, entity in ipairs(snapshot) do
+		local ok, result = pcall(_ConvertBuildingEntity, entity, to_pid, to_civ, from_civ)
+		if ok then
+			if result == "skipped" then
+				skipped = skipped + 1
+			else
+				converted = converted + 1
+			end
+		else
+			errors = errors + 1
+			print(string.format("[DC][ERROR] Building conversion failed: %s", tostring(result)))
+		end
+	end
+	print(string.format("[DC] Buildings from player%d → player%d (%s): %d ok, %d skipped, %d errors (of %d)", from_slot, to_slot, to_civ, converted, skipped, errors, #snapshot))
+end
+
+-- ============================================================
+-- Squad Handling (transfer military, convert villagers)
+-- ============================================================
+
+-- Convert villagers to recipient faction when possible, transfer all other squads.
+-- Never deletes military units.
+function _TransferOrConvertSquad(squad, to_pid, to_civ)
+	if Squad_IsAlive(squad) == false then
+		print("[DC]   Squad dead between snapshot and processing — skipping")
+		return "skipped"
+	end
+	local sbp = Squad_GetBlueprint(squad)
+	local sbp_name = BP_GetName(sbp)
+
+	-- Only villagers are converted. All military squads are ownership-transferred.
+	local ags_key = BLUEPRINT_REVERSE_MAP[sbp_name]
+	if ags_key == "villager" then
+		local to_bp = TryGetCivilizationEntity(to_civ, "villager")
+		if to_bp ~= nil then
+			local to_bp_name = BP_GetName(to_bp)
+			if to_bp_name ~= sbp_name then
+				local ok_sbp, to_sbp = pcall(BP_GetSquadBlueprint, to_bp_name)
+				if ok_sbp and to_sbp ~= nil then
+					local pos = Squad_GetPosition(squad)
+					Squad_Destroy(squad)
+					local sg_temp = SGroup_CreateIfNotFound("sg_dc_convert_temp")
+					SGroup_Clear(sg_temp)
+					Util_CreateSquads(to_pid, sg_temp, to_sbp, pos, nil, 1)
+					return "converted"
+				end
+				print(string.format("[DC]   Villager squad blueprint missing for '%s' — transferring ownership", to_bp_name))
+			end
+		end
+	end
+
+	Squad_SetPlayerOwner(squad, to_pid)
+	return "transferred"
+end
+
+-- Convert all squads from a leaving player to the recipient's faction.
+-- Convert all squads from a leaving player to recipients' factions.
+-- Transfers squads to first recipient until pop cap reached, then overflows to next.
+function ConvertSquads(from_pid, ordered_recipients, from_civ, from_slot)
+	Player_GetAll(from_pid)
+	local count = SGroup_CountSpawned(sg_allsquads)
+	if count == 0 then
+		print(string.format("[DC] No squads to convert from player%d", from_slot))
+		return
+	end
+	
+	-- Snapshot squads first; villager conversion may destroy squads.
+	local snapshot = {}
+	local _CollectSquad = function(gid, idx, squad)
+		table.insert(snapshot, squad)
+	end
+	SGroup_ForEach(sg_allsquads, _CollectSquad)
+	
+	local converted = 0
+	local transferred = 0
+	local skipped = 0
+	local killed = 0
+	local errors = 0
+	local rcv_idx = 1
+	for _, squad in ipairs(snapshot) do
+		local ok, result = pcall(function()
+			if Squad_IsAlive(squad) == false then
+				return "skipped"
+			end
+			
+			-- Advance to next recipient if current is at pop cap
+			while rcv_idx <= #ordered_recipients do
+				local r = ordered_recipients[rcv_idx]
+				local pop = Player_GetCurrentPopulation(r.pid, CT_Personnel)
+				local cap = Player_GetCurrentPopulationCap(r.pid, CT_Personnel)
+				if pop < cap then break end
+				rcv_idx = rcv_idx + 1
+			end
+			
+			if rcv_idx > #ordered_recipients then
+				-- No recipient has capacity — kill remaining
+				Squad_Kill(squad)
+				return "killed"
+			end
+			
+			local r = ordered_recipients[rcv_idx]
+			local to_civ = string.lower(Player_GetRaceName(r.pid))
+			return _TransferOrConvertSquad(squad, r.pid, to_civ)
+		end)
+		if ok then
+			if result == "converted" then
+				converted = converted + 1
+			elseif result == "transferred" then
+				transferred = transferred + 1
+			elseif result == "killed" then
+				killed = killed + 1
+			elseif result == "skipped" then
+				skipped = skipped + 1
+			end
+		else
+			errors = errors + 1
+			print(string.format("[DC][ERROR] Squad conversion failed: %s", tostring(result)))
+		end
+	end
+	print(string.format("[DC] Squads from player%d: %d converted, %d transferred, %d killed, %d skipped, %d errors (of %d)",
+		from_slot, converted, transferred, killed, skipped, errors, #snapshot))
+end
+-- Called by Reset_AI interval (1s) — checks if any originally-human slot is now AI
+function CheckPlayerDisconnects()
+	if g_gameOver then return end
+	for i = 1, 4 do
+		-- Only process slots marked disconnected that haven't been transferred yet
+		if g_disconnected_slots[i] and not g_transferred_slots[i] then
+			local pid = ALL_PLAYER_SLOTS[i]
+			if pid == nil then
+				print(string.format("[DC][WARN] ALL_PLAYER_SLOTS[%d] is nil — skipping disconnect check", i))
+			else
+				local to_pid, to_slot = FindRecipientPlayer(pid)
+				if to_pid ~= nil then
+					print(string.format("[DC] Player%d disconnected — converting assets to player%d", i, to_slot))
+					
+					-- Track transfer count for tie-breaking
+					g_transfer_counts[to_slot] = (g_transfer_counts[to_slot] or 0) + 1
+					
+					-- Resolve civs for conversion
+					local from_civ = string.lower(Player_GetRaceName(pid))
+					local to_civ = string.lower(Player_GetRaceName(to_pid))
+					
+					-- +50 population cap bonus for absorbing a player's assets
+					Modifier_ApplyToPlayer(Modifier_Create(MAT_Player, "personnel_cap_player_modifier", MUT_Addition, false, 50, ""), to_pid, 0)
+					print(string.format("[DC] +50 pop cap applied to player%d", to_slot))
+					
+					-- Transfer resources (no conversion needed)
+					TransferResources(pid, to_pid, i, to_slot)
+					
+					-- Build ordered recipient list for squad pop cap overflow
+					local recipients = FindAllRecipients(pid)
+					
+					-- Convert squads (transfer until pop cap, overflow to next recipient)
+					ConvertSquads(pid, recipients, from_civ, i)
+					
+					-- Convert buildings (delete + respawn as recipient's faction)
+					ConvertBuildings(pid, to_pid, to_civ, i, to_slot)
+					
+					-- Mark transferred AFTER successful pipeline completion
+					g_transferred_slots[i] = true
+					
+					print(string.format("[DC] Disconnect transfer complete: player%d → player%d (%s→%s)", i, to_slot, from_civ, to_civ))
+				else
+					print(string.format("[DC] Player%d disconnected — no remaining human players to transfer to", i))
+				end
+			end
+		end
+	end
+end
+
+-- ============================================================
+-- AI Personality Enforcement
+-- ============================================================
+-- Registered as both Rule_AddGlobalEvent (GE_AIPlayer_Migrated + GE_AITakeOver) and Rule_AddInterval (1s)
+
+function Reset_AI(context)
+	if g_gameOver then return end
+	for i, pid in ipairs(ALL_PLAYER_SLOTS) do
+		-- Only enforce AI personality on AI slots (5+) and disconnected co-op slots (1-4)
+		-- In MP, Player_IsHuman() only works for local player — do not use it here
+		local should_enforce = (i > 4) or g_disconnected_slots[i]
+		if should_enforce then
+			local current_personality = AI_GetPersonality(pid)
+			if current_personality ~= "default_campaign" then
+				if DLC_DEBUG then
+					local role = (i <= 4) and "disconnected human" or "AI"
+					print(string.format("[AI] Personality drift on player%d (%s): '%s' → 'default_campaign'", 
+						i, role, current_personality))
+				end
+				AI_SetPersonality(pid, "default_campaign")
+			end
+		end
+	end
+	
+	-- Check for disconnected human players and transfer their assets
+	CheckPlayerDisconnects()
+end
+
+-- Event handler for GE_AITakeOver: marks the disconnected slot and triggers transfer
+function Reset_AI_OnTakeOver(context)
+	if context ~= nil and context.player ~= nil then
+		for i = 1, 4 do
+			if ALL_PLAYER_SLOTS[i] == context.player then
+				if not g_disconnected_slots[i] then
+					g_disconnected_slots[i] = true
+					print(string.format("[DC] GE_AITakeOver fired: player%d marked as disconnected", i))
+				end
+				break
+			end
+		end
+	end
+	Reset_AI(context)
+end
+
+-- Event handler for GE_AIPlayer_Migrated: marks the disconnected slot (tertiary detection)
+function Reset_AI_OnMigrated(context)
+	if context ~= nil and context.player ~= nil then
+		for i = 1, 4 do
+			if ALL_PLAYER_SLOTS[i] == context.player then
+				if not g_disconnected_slots[i] then
+					g_disconnected_slots[i] = true
+					print(string.format("[DC] GE_AIPlayer_Migrated fired: player%d marked as disconnected", i))
+				end
+				break
+			end
+		end
+	end
+	Reset_AI(context)
+end

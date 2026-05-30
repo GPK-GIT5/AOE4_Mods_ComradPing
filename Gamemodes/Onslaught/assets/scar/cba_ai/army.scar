@@ -1,0 +1,341 @@
+---------------------------------------------------------------------------------------------------
+-- CBA AI Player — Army Management
+-- Army dispatch, staging management, combat response, ally support.
+-- Origin: cba_ai_player.scar lines 1691–1960
+---------------------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------
+-- RULE: Manage Armies (squad grouping & dispatch)
+-----------------------------------------------------------------------
+
+function _AI_Rule_ManageArmies()
+	if _AI_IsExternallyLocked() then return end
+	for _, player in ipairs(_ai_players) do
+		if not _AI_IsEliminated(player) then
+			_AI_GatherProducedUnits(player)
+			_AI_ManageArmies(player)
+		end
+	end
+end
+
+function _AI_ManageArmies(player)
+	local ai = player.ai
+	local game_time = World_GetGameTime()
+
+	-- Early game protection: no dispatching armies during first 5 minutes
+	local early_game = game_time < _AI_EARLY_GAME_NO_ATTACK
+
+	-- Clean up completed / dissolved armies; retreat depleted armies to base.
+	-- BUG D FIX: Add mission-complete detection so armies that reach their
+	-- target and clear all enemies don't idle there forever. Without this the
+	-- armies table grew unbounded, staging continued to accumulate, and new
+	-- armies piled onto the same already-cleared target.
+	local active = {}
+	local base_pos = _AI_GetBasePosition(player)
+	for _, army_entry in ipairs(ai.armies) do
+		if army_entry.sg ~= nil and SGroup_CountSpawned(army_entry.sg) > 0 then
+			local army_count = SGroup_CountSpawned(army_entry.sg)
+
+			-- Mission-complete detection: when the army has been at its target
+			-- for >= _AI_ARMY_MISSION_STABLE_WINDOW with no count drop AND no
+			-- threat at the target position, recall it to staging.
+			if not army_entry.retreating and army_entry.target ~= nil then
+				local ok_pos, army_pos = pcall(SGroup_GetPosition, army_entry.sg)
+				local at_target = false
+				if ok_pos and army_pos ~= nil then
+					local ok_dist, dist = pcall(World_DistancePointToPoint, army_pos, army_entry.target)
+					if ok_dist and dist <= _AI_ARMY_MISSION_ARRIVAL_DIST then
+						at_target = true
+					end
+				end
+				if at_target then
+					if army_entry.stable_count == army_count then
+						local stable_for = game_time - (army_entry.stable_since or game_time)
+						if stable_for >= _AI_ARMY_MISSION_STABLE_WINDOW then
+							local threatened = false
+							local ok_threat, t = pcall(AIPlayer_IsPointThreatened, player.id, army_entry.target, true, 80.0)
+							if ok_threat and t then threatened = true end
+							if not threatened then
+								if ai.staging_sg ~= nil then
+									SGroup_AddGroup(ai.staging_sg, army_entry.sg)
+									SGroup_Clear(army_entry.sg)
+								end
+								ai.telemetry.armies_completed = (ai.telemetry.armies_completed or 0) + 1
+								_AI_DebugLog(1, string.format("[AI_PLAYER] %s army completed mission, merging %d squads to staging (target_clear).",
+									ai.label or "P?", army_count))
+								goto next_army
+							end
+						end
+					else
+						army_entry.stable_count = army_count
+						army_entry.stable_since = game_time
+					end
+				else
+					army_entry.stable_count = nil
+					army_entry.stable_since = nil
+				end
+			end
+
+			if army_count < _AI_ARMY_RETREAT_THRESHOLD and not army_entry.retreating then
+				-- Army depleted below retreat threshold — pull back to base
+				army_entry.retreating = true
+				if base_pos ~= nil then
+					pcall(Cmd_Move, army_entry.sg, base_pos, false)
+				end
+				ai.telemetry.army_retreats = (ai.telemetry.army_retreats or 0) + 1
+				_AI_DebugLog(1, string.format("[AI_PLAYER] %s army retreating (count=%d < %d threshold)",
+					ai.label or "P?", army_count, _AI_ARMY_RETREAT_THRESHOLD))
+			end
+			-- Retreating armies that reach base get merged back into staging
+			if army_entry.retreating and base_pos ~= nil then
+				local ok_pos, army_pos = pcall(SGroup_GetPosition, army_entry.sg)
+				if ok_pos and army_pos ~= nil then
+					local ok_dist, dist = pcall(World_DistancePointToPoint, army_pos, base_pos)
+					if ok_dist and dist < 40 then
+						-- Merge back into staging
+						if ai.staging_sg ~= nil then
+							SGroup_AddGroup(ai.staging_sg, army_entry.sg)
+							SGroup_Clear(army_entry.sg)
+						end
+					_AI_DebugLog(1, string.format("[AI_PLAYER] %s retreated army merged back to staging",
+							ai.label or "P?"))
+						goto next_army
+					end
+				end
+			end
+			table.insert(active, army_entry)
+		end
+		::next_army::
+	end
+	ai.armies = active
+
+	-- Clean dead squads from staging SGroup before counting
+	if ai.staging_sg ~= nil then
+		local total = SGroup_Count(ai.staging_sg)
+		local spawned = SGroup_CountSpawned(ai.staging_sg)
+		if total ~= spawned and total > 0 then
+			_AI_DebugLog(1, string.format("[AI_PLAYER] %s staging: %d total, %d spawned (engine will clean dead)",
+				ai.label or "P?", total, spawned))
+		end
+	end
+
+	-- Check staging count
+	local staging_count = 0
+	if ai.staging_sg ~= nil then
+		staging_count = SGroup_CountSpawned(ai.staging_sg)
+	end
+
+	if staging_count < ai.squad_threshold then
+		-- Below attack threshold: use staging units for base defense if under attack
+		if staging_count >= _AI_STAGING_DEFENSE_MIN and base_pos ~= nil then
+			local ok_threat, threatened = pcall(AIPlayer_IsPointThreatened, player.id, base_pos, true, 60.0)
+			if ok_threat and threatened then
+				pcall(Cmd_AttackMove, ai.staging_sg, base_pos, false)
+				if not ai._staging_defending then
+					ai._staging_defending = true
+					ai.telemetry.staging_defenses = (ai.telemetry.staging_defenses or 0) + 1
+					_AI_DebugLog(1, string.format("[AI_PLAYER] %s staging (%d) defending base (below attack threshold %d)",
+						ai.label or "P?", staging_count, ai.squad_threshold))
+				end
+			elseif ai._staging_defending then
+				ai._staging_defending = false
+				pcall(Cmd_Stop, ai.staging_sg)
+			end
+		end
+		return  -- not enough for an army yet
+	end
+	ai._staging_defending = false
+
+	-- Early game: don't attack during first 5 minutes; keep staging units near base
+	if early_game then
+		if base_pos ~= nil and staging_count > 0 then
+			pcall(Cmd_Move, ai.staging_sg, base_pos, false)
+		end
+		return
+	end
+
+	-- Find best attack target (prioritize hostile secondary zone if flagged)
+	local target_pos = nil
+	if ai.secondary_zone_attack_target ~= nil then
+		target_pos = ai.secondary_zone_attack_target
+	end
+	if target_pos == nil then
+		target_pos = _AI_FindBestAttackTarget(player)
+	end
+	if target_pos == nil then
+		target_pos = _CBA.center  -- fallback to map center
+	end
+	if target_pos == nil then return end
+
+	-- Create army SGroup from staging
+	_ai_group_counter = _ai_group_counter + 1
+	local army_sg_name = "sg_ai_army_" .. tostring(player.id) .. "_" .. tostring(_ai_group_counter)
+	local army_sg = SGroup_CreateIfNotFound(army_sg_name)
+	SGroup_AddGroup(army_sg, ai.staging_sg)
+	SGroup_Clear(ai.staging_sg)
+
+	-- Issue attack-move command to target
+	pcall(Cmd_AttackMove, army_sg, target_pos, false)
+	_AI_SetPatrolOrderHold(player, "main_dispatch", _AI_PATROL_ORDER_HOLD_AFTER_ASSAULT, "army_dispatch")
+	-- Join patrol to army dispatch: try rally-first, fall back to deferred engage
+	local maa_can_join = (ai.maa_state == MAA_STATE_SCOUTING)
+	local maa_promote = (ai.maa_state == MAA_STATE_IDLE)
+	local maa_retarget = (ai.maa_state == MAA_STATE_ENGAGING)
+	if maa_promote and ai.patrol_sg ~= nil and SGroup_CountSpawned(ai.patrol_sg) > 0 then
+		_AI_MaaTransition(player, MAA_STATE_SCOUTING, "maa_claimed")
+		_AI_IssuePatrolOrder(player)
+	elseif (maa_can_join or maa_retarget) and ai.patrol_sg ~= nil and SGroup_CountSpawned(ai.patrol_sg) > 0 then
+		ai.telemetry.patrol_assault_joins = (ai.telemetry.patrol_assault_joins or 0) + 1
+		ai.maa_enemy_pos = target_pos
+		ai.maa_engage_target = target_pos
+		if maa_retarget then
+			_AI_RecordPatrolCommand(player, "main_dispatch", "attack_move", target_pos, "dispatch_retarget")
+			pcall(Cmd_AttackMove, ai.patrol_sg, target_pos, false)
+			_AI_MaaTransition(player, MAA_STATE_ENGAGING, "dispatch_retarget")
+		elseif maa_can_join then
+			local rallied = _AI_TryRallyAllies(player, target_pos)
+			if rallied then
+				ai.maa_rally_pos = ai.patrol_rally_pos
+				ai.telemetry.maa_rally_from_dispatch = (ai.telemetry.maa_rally_from_dispatch or 0) + 1
+				_AI_MaaTransition(player, MAA_STATE_RALLYING, "dispatch_rally")
+			else
+				_AI_MaaTransition(player, MAA_STATE_ENEMY_FOUND, "dispatch_no_ally")
+				_AI_RecordPatrolCommand(player, "patrol_stop", "stop", target_pos, "dispatch_no_ally")
+				pcall(Cmd_Stop, ai.patrol_sg)
+			end
+		end
+	end
+
+	local army_entry = {
+		sg = army_sg,
+		target = target_pos,
+		dispatch_time = World_GetGameTime(),
+	}
+	table.insert(ai.armies, army_entry)
+	ai.telemetry.armies_dispatched = ai.telemetry.armies_dispatched + 1
+
+	_AI_DebugLog(1, string.format("[AI_PLAYER] %s dispatched army #%d of %d squads to (%.0f, %.0f).",
+		player.ai.label or "P?", ai.telemetry.armies_dispatched, SGroup_CountSpawned(army_sg),
+		target_pos.x or 0, target_pos.z or 0))
+end
+
+-----------------------------------------------------------------------
+-- RULE: Ally Support
+-----------------------------------------------------------------------
+
+function _AI_Rule_AllySupport()
+	if _AI_IsExternallyLocked() then return end
+	for _, player in ipairs(_ai_players) do
+		if not _AI_IsEliminated(player) then
+			_AI_CheckCombatResponse(player)
+		end
+	end
+end
+
+-----------------------------------------------------------------------
+-- Combat Response: detect teammates fighting, dispatch 40+ staging
+-----------------------------------------------------------------------
+
+function _AI_CheckCombatResponse(player)
+	local ai = player.ai
+	if World_GetGameTime() < _AI_EARLY_GAME_NO_ATTACK then return end
+	local staging_count = ai.staging_sg ~= nil and SGroup_CountSpawned(ai.staging_sg) or 0
+	local min_support_staging = math.max(_AI_COMBAT_RESPONSE_THRESHOLD, ai.squad_threshold or _AI_COMBAT_RESPONSE_THRESHOLD)
+	if staging_count < min_support_staging then return end
+	if (World_GetGameTime() - (ai.last_combat_response_at or -9999)) < _AI_COMBAT_RESPONSE_COOLDOWN then
+		return
+	end
+
+	if player.AGS_Team == nil or player.AGS_Team.allies == nil then return end
+
+	for _, ally in ipairs(player.AGS_Team.allies) do
+		if ally.id ~= nil and ally.id ~= player.id and not _AI_IsEliminated(ally) then
+			local combat_pos = _AI_FindTeammateCombatPosition(ally)
+			if combat_pos ~= nil then
+			_AI_DebugLog(1, string.format("[AI_PLAYER] %s detected ally %s in combat at (%.0f,%.0f)",
+					ai.label or "P?",
+					ally.ai and ally.ai.label or "?",
+					combat_pos.x or 0, combat_pos.z or 0))
+				ai.telemetry.ally_redirects = ai.telemetry.ally_redirects + 1
+				ai.last_combat_response_at = World_GetGameTime()
+				_AI_DispatchCombatResponse(player, combat_pos)
+				return  -- one response per cycle
+			end
+		end
+	end
+end
+
+function _AI_FindTeammateCombatPosition(teammate)
+	local sg_all = Player_GetSquads(teammate.id)
+	local count = SGroup_CountSpawned(sg_all)
+
+	for i = 1, count do
+		local squad = SGroup_GetSpawnedSquadAt(sg_all, i)
+		if squad then
+			local ok_w, is_worker = pcall(Squad_IsOfType, squad, "worker")
+			if not (ok_w and is_worker) then
+				local ok_atk, under_attack = pcall(Squad_IsUnderAttack, squad, 5.0)
+				if ok_atk and under_attack then
+					local ok_pos, pos = pcall(Squad_GetPosition, squad)
+					if ok_pos and pos ~= nil then
+						return pos
+					end
+				end
+			end
+		end
+	end
+
+	return nil
+end
+
+function _AI_DispatchCombatResponse(player, combat_pos)
+	local ai = player.ai
+
+	_ai_group_counter = _ai_group_counter + 1
+	local army_sg_name = "sg_ai_response_" .. tostring(player.id) .. "_" .. tostring(_ai_group_counter)
+	local army_sg = SGroup_CreateIfNotFound(army_sg_name)
+	SGroup_AddGroup(army_sg, ai.staging_sg)
+	SGroup_Clear(ai.staging_sg)
+
+	pcall(Cmd_AttackMove, army_sg, combat_pos, false)
+	_AI_SetPatrolOrderHold(player, "combat_response", _AI_PATROL_ORDER_HOLD_AFTER_ASSAULT, "combat_response")
+	local maa_can_join = (ai.maa_state == MAA_STATE_SCOUTING)
+	local maa_promote = (ai.maa_state == MAA_STATE_IDLE)
+	local maa_retarget = (ai.maa_state == MAA_STATE_ENGAGING)
+	if maa_promote and ai.patrol_sg ~= nil and SGroup_CountSpawned(ai.patrol_sg) > 0 then
+		_AI_MaaTransition(player, MAA_STATE_SCOUTING, "maa_claimed")
+		_AI_IssuePatrolOrder(player)
+	elseif (maa_can_join or maa_retarget) and ai.patrol_sg ~= nil and SGroup_CountSpawned(ai.patrol_sg) > 0 then
+		ai.telemetry.patrol_assault_joins = (ai.telemetry.patrol_assault_joins or 0) + 1
+		ai.maa_enemy_pos = combat_pos
+		ai.maa_engage_target = combat_pos
+		if maa_retarget then
+			_AI_RecordPatrolCommand(player, "combat_response", "attack_move", combat_pos, "combat_retarget")
+			pcall(Cmd_AttackMove, ai.patrol_sg, combat_pos, false)
+			_AI_MaaTransition(player, MAA_STATE_ENGAGING, "combat_retarget")
+		elseif maa_can_join then
+			local rallied = _AI_TryRallyAllies(player, combat_pos)
+			if rallied then
+				ai.maa_rally_pos = ai.patrol_rally_pos
+				ai.telemetry.maa_rally_from_dispatch = (ai.telemetry.maa_rally_from_dispatch or 0) + 1
+				_AI_MaaTransition(player, MAA_STATE_RALLYING, "combat_rally")
+			else
+				_AI_MaaTransition(player, MAA_STATE_ENEMY_FOUND, "combat_no_ally")
+				_AI_RecordPatrolCommand(player, "patrol_stop", "stop", combat_pos, "combat_no_ally")
+				pcall(Cmd_Stop, ai.patrol_sg)
+			end
+		end
+	end
+
+	table.insert(ai.armies, {
+		sg = army_sg,
+		target = combat_pos,
+		dispatch_time = World_GetGameTime(),
+	})
+
+	ai.telemetry.armies_dispatched = ai.telemetry.armies_dispatched + 1
+
+	_AI_DebugLog(1, string.format("[AI_PLAYER] %s dispatched combat response of %d squads to (%.0f,%.0f).",
+		ai.label or "P?", SGroup_CountSpawned(army_sg),
+		combat_pos.x or 0, combat_pos.z or 0))
+end

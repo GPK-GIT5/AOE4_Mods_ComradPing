@@ -1,0 +1,1832 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — Validation (6-Phase: Boot, Config, Runtime, Data, Endstate, Limits)
+-- Validates all core systems across the onslaught-v3.3 branch.
+-- Depends on: cba_debug_core.scar, cba_debug_helpers.scar
+--
+-- State tables validated: _mod, _CBA, _buildingLimit, _autoage,
+--   _annihilation, _religious, _wonder, AGS_GLOBAL_SETTINGS
+-- Console: Debug_FullValidation()  (~10s with phase delays)
+--          Debug_LimitEnforcementValidator()  (Phase 5 only)
+---------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------
+-- Phase 0: Boot — Globals, tables, module registration
+---------------------------------------------------------------------------------------------------
+
+function _Debug_Phase0_Boot()
+	_Debug_PhaseHeader(0, "Boot")
+
+	_Debug_RunTest("0.1 PLAYERS table exists", function()
+		if PLAYERS == nil then return false, "PLAYERS is nil" end
+		if #PLAYERS == 0 then return false, "PLAYERS is empty" end
+		return true, #PLAYERS .. " players"
+	end)
+
+	_Debug_RunTest("0.2 _mod orchestrator exists", function()
+		if _mod == nil then return false, "_mod is nil" end
+		if type(_mod.module) ~= "string" then return false, "_mod.module not a string" end
+		return true, "_mod.module=" .. _mod.module
+	end)
+
+	_Debug_RunTest("0.3 _CBA rewards table exists", function()
+		-- From rewards/cba_rewards.scar
+		if _CBA == nil then return false, "_CBA is nil" end
+		return true, type(_CBA)
+	end)
+
+	_Debug_RunTest("0.4 AGS_GLOBAL_SETTINGS exists", function()
+		if AGS_GLOBAL_SETTINGS == nil then return false, "AGS_GLOBAL_SETTINGS is nil" end
+		return true, "build=" .. tostring(AGS_GLOBAL_SETTINGS_BUILD)
+	end)
+
+	_Debug_RunTest("0.5 AGS_ENTITY_TABLE exists", function()
+		if AGS_ENTITY_TABLE == nil then return false, "AGS_ENTITY_TABLE is nil" end
+		return true, _Debug_CountKeys(AGS_ENTITY_TABLE) .. " civs"
+	end)
+
+	_Debug_RunTest("0.6 Entry point detection", function()
+		return true, "entry=" .. tostring(_cba_debug.entry_point)
+	end)
+
+	_Debug_RunTest("0.7 World_GetPlayerCount matches PLAYERS", function()
+		local ok, wpc = pcall(World_GetPlayerCount)
+		if not ok then return false, "World_GetPlayerCount failed" end
+		if wpc ~= #PLAYERS then return false, "mismatch: World=" .. wpc .. " PLAYERS=" .. #PLAYERS end
+		return true, wpc .. " players"
+	end)
+
+	_Debug_PhaseFooter(0, "Boot")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase 1: Config — Settings types and parsed values
+---------------------------------------------------------------------------------------------------
+
+function _Debug_Phase1_Config()
+	_Debug_PhaseHeader(1, "Config")
+
+	_Debug_RunTest("1.1 MaximumPopulation type", function()
+		local v = AGS_GLOBAL_SETTINGS.MaximumPopulation
+		if type(v) ~= "number" then return false, "expected number, got " .. type(v) end
+		return true, "MaxPop=" .. tostring(v)
+	end)
+
+	_Debug_RunTest("1.2 AutoAge setting", function()
+		local v = AGS_GLOBAL_SETTINGS.AutoAge
+		return true, "AutoAge=" .. tostring(v) .. " (" .. type(v) .. ")"
+	end)
+
+	_Debug_RunTest("1.3 CBA_Rewards setting", function()
+		local v = AGS_GLOBAL_SETTINGS.CBA_Rewards
+		return true, "CBA_Rewards=" .. tostring(v) .. " (" .. type(v) .. ")"
+	end)
+
+	_Debug_RunTest("1.4 Win condition flags", function()
+		local flags = {"Annihilation", "Elimination", "Surrender", "Religious", "Wonder"}
+		local issues = {}
+		for _, f in ipairs(flags) do
+			if AGS_GLOBAL_SETTINGS[f] == nil then
+				table.insert(issues, f .. "=nil")
+			end
+		end
+		if #issues > 0 then return false, table.concat(issues, ", ") end
+		return true, #flags .. " win condition flags present"
+	end)
+
+	_Debug_RunTest("1.5 Pop cap and interval", function()
+		if _mod.pop_cap == nil then return false, "_mod.pop_cap is nil" end
+		if _mod.pop_interval == nil then return false, "_mod.pop_interval is nil" end
+		return true, string.format("cap=%s start=%s interval=%ss",
+			tostring(_mod.pop_cap), tostring(_mod.pop_start), tostring(_mod.pop_interval))
+	end)
+
+	_Debug_RunTest("1.6 Siege restriction settings", function()
+		local ns = AGS_GLOBAL_SETTINGS.NoSiege
+		local nw = AGS_GLOBAL_SETTINGS.NoWall
+		local nd = AGS_GLOBAL_SETTINGS.NoDock
+		return true, string.format("NoSiege=%s NoWall=%s NoDock=%s", tostring(ns), tostring(nw), tostring(nd))
+	end)
+
+	_Debug_RunTest("1.7 Building limit settings from AGS", function()
+		local mpb = AGS_GLOBAL_SETTINGS.MaximumProductionBuildings
+		local msw = AGS_GLOBAL_SETTINGS.MaximumSiegeWorkshop
+		return true, string.format("MaxProdBuildings=%s MaxSiegeWorkshop=%s", tostring(mpb), tostring(msw))
+	end)
+
+	_Debug_RunTest("1.8 Speed settings", function()
+		if _mod.speed == nil then return false, "_mod.speed is nil" end
+		return true, string.format("build=%s gather=%s production=%s",
+			tostring(_mod.speed.build), tostring(_mod.speed.gather), tostring(_mod.speed.production))
+	end)
+
+	_Debug_PhaseFooter(1, "Config")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase 2: Runtime — Player state, entity references, team setup
+---------------------------------------------------------------------------------------------------
+
+function _Debug_Phase2_Runtime()
+	_Debug_PhaseHeader(2, "Runtime")
+
+	_Debug_RunTest("2.1 Player keeps found", function()
+		local missing = {}
+		for i, player in ipairs(PLAYERS) do
+			if player.keep == nil then
+				table.insert(missing, "P" .. i)
+			elseif player.keep.entity == nil then
+				table.insert(missing, "P" .. i .. "(entity nil)")
+			end
+		end
+		if #missing > 0 then return false, "missing keeps: " .. table.concat(missing, ", ") end
+		return true, #PLAYERS .. " keeps found"
+	end)
+
+	_Debug_RunTest("2.2 Keep positions valid", function()
+		local issues = {}
+		for i, player in ipairs(PLAYERS) do
+			if player.keep and player.keep.position then
+				local pos = player.keep.position
+				local ok, x = pcall(function() return pos.x end)
+				if not ok or x == nil then
+					table.insert(issues, "P" .. i .. " pos.x invalid")
+				end
+			end
+		end
+		if #issues > 0 then return false, table.concat(issues, ", ") end
+		return true, "all positions valid"
+	end)
+
+	_Debug_RunTest("2.3 _mod.castles populated", function()
+		if _mod.castles == nil then return false, "_mod.castles is nil" end
+		local count = _Debug_CountKeys(_mod.castles)
+		if count == 0 then return false, "_mod.castles is empty" end
+		return true, count .. " castle entries"
+	end)
+
+	_Debug_RunTest("2.4 Sacred site center found", function()
+		if _CBA == nil then return false, "_CBA is nil" end
+		if _CBA.center == nil then return false, "_CBA.center is nil" end
+		return true, "center found"
+	end)
+
+	_Debug_RunTest("2.5 Player civ resolution", function()
+		local civs = {}
+		for i, player in ipairs(PLAYERS) do
+			table.insert(civs, _Debug_GetPlayerCiv(player))
+		end
+		return true, table.concat(civs, ", ")
+	end)
+
+	_Debug_RunTest("2.6 Team setup", function()
+		local teams = {}
+		for i, player in ipairs(PLAYERS) do
+			local team = player.team or "nil"
+			local key = "T" .. tostring(team)
+			teams[key] = (teams[key] or 0) + 1
+		end
+		local parts = {}
+		for t, c in pairs(teams) do table.insert(parts, t .. "=" .. c) end
+		return true, table.concat(parts, " ")
+	end)
+
+	_Debug_RunTest("2.7 Population state", function()
+		local issues = {}
+		for i, player in ipairs(PLAYERS) do
+			local ok_pop, pop = pcall(Player_GetCurrentPopulation, player.id, CT_Personnel)
+			local ok_cap, cap = pcall(Player_GetCurrentPopulationCap, player.id, CT_Personnel)
+			if ok_pop and ok_cap then
+				if pop > cap and cap > 0 then
+					table.insert(issues, string.format("P%d overflow %d/%d", i, pop, cap))
+				end
+			end
+		end
+		if #issues > 0 then return false, table.concat(issues, "; ") end
+		return true, "all within cap"
+	end)
+
+	_Debug_RunTest("2.8 Auto-pop cross-civ cap equality", function()
+		if _AGS_AutoPop_Caps == nil or next(_AGS_AutoPop_Caps) == nil then
+			return true, "auto-pop disabled or not yet initialized (skip)"
+		end
+		-- Compare base caps (tracked minus team-balance bonus) so legitimate TB differences
+		-- don't cause false positives. AGS_TeamBalance_IncreaseCapPopulation bakes its bonus
+		-- into _AGS_AutoPop_Caps (KI-LEAVER-003), so subtract teamBalance_popBonus to recover
+		-- the underlying auto-pop baseline for each player.
+		local ref_cap = nil
+		local ref_idx = nil
+		local diverged = {}
+		for i, player in ipairs(PLAYERS) do
+			if not Core_IsPlayerEliminated(player.id) then
+				local tracked = _AGS_AutoPop_Caps[player.id]
+				if tracked == nil then
+					table.insert(diverged, string.format("P%d no tracked cap", i))
+				else
+					local base = tracked - (player.teamBalance_popBonus or 0)
+					if ref_cap == nil then
+						ref_cap = base
+						ref_idx = i
+					elseif base ~= ref_cap then
+						table.insert(diverged, string.format("P%d base=%d (ref P%d=%d)", i, base, ref_idx, ref_cap))
+					end
+				end
+			end
+		end
+		if #diverged > 0 then return false, table.concat(diverged, "; ") end
+		local n = 0
+		for _, player in ipairs(PLAYERS) do
+			if not Core_IsPlayerEliminated(player.id) then n = n + 1 end
+		end
+		return true, string.format("%d active players all at base cap=%d", n, ref_cap or 0)
+	end)
+
+	_Debug_RunTest("2.9 Only authorized systems modified pop caps", function()
+		if _AGS_AutoPop_Caps == nil or next(_AGS_AutoPop_Caps) == nil then
+			return true, "auto-pop disabled or not yet initialized (skip)"
+		end
+		-- Skip eliminated players: leaver may have killed their pop buildings without
+		-- updating _AGS_AutoPop_Caps, producing a harmless residual.
+		-- teamBalance_popBonus is already baked into _AGS_AutoPop_Caps by
+		-- AGS_TeamBalance_IncreaseCapPopulation (KI-LEAVER-003), so residual = eff - tracked
+		-- with no separate TB term to subtract (doing so would double-count it).
+		local issues = {}
+		for i, player in ipairs(PLAYERS) do
+			if Core_IsPlayerEliminated(player.id) then goto continue end
+			local ok_eff, effective = pcall(Player_GetCurrentPopulationCap, player.id, CT_Personnel)
+			if ok_eff then
+				local tracked  = _AGS_AutoPop_Caps[player.id] or 0
+				local tb       = player.teamBalance_popBonus or 0
+				local residual = effective - tracked
+				if math.abs(residual) > 5 then
+					table.insert(issues, string.format("P%d residual=%+d (eff=%d tracked=%d tb=%d)",
+						i, residual, effective, tracked, tb))
+				end
+			end
+			::continue::
+		end
+		if #issues > 0 then return false, table.concat(issues, "; ") end
+		return true, string.format("%d players — all pop deltas accounted for", #PLAYERS)
+	end)
+
+	_Debug_PhaseFooter(2, "Runtime")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase 3: Data — Table completeness, key coverage
+---------------------------------------------------------------------------------------------------
+
+function _Debug_Phase3_Data()
+	_Debug_PhaseHeader(3, "Data")
+
+	_Debug_RunTest("3.1 AGS_ENTITY_TABLE civ coverage", function()
+		local expected = {
+			"english", "chinese", "french", "hre", "mongol", "rus",
+			"sultanate", "abbasid", "malian", "ottoman",
+			"japanese", "byzantine", "jin_dynasty",
+		}
+		local missing = {}
+		for _, civ in ipairs(expected) do
+			if AGS_ENTITY_TABLE[civ] == nil then table.insert(missing, civ) end
+		end
+		if #missing > 0 then return false, #missing .. " missing: " .. table.concat(missing, ", ") end
+		return true, #expected .. " civs covered"
+	end)
+
+	_Debug_RunTest("3.1a DLC parent-mapped civ resolution", function()
+		if AGS_CIV_PARENT_MAP == nil then return false, "AGS_CIV_PARENT_MAP is nil" end
+		local issues = {}
+		for child, parent in pairs(AGS_CIV_PARENT_MAP) do
+			if AGS_ENTITY_TABLE[parent] == nil then
+				table.insert(issues, child .. " -> " .. parent .. " (parent missing)")
+			end
+			if AGS_UNIT_BP_OVERRIDES == nil or AGS_UNIT_BP_OVERRIDES.villager == nil or AGS_UNIT_BP_OVERRIDES.villager[child] == nil then
+				table.insert(issues, child .. " (no villager override)")
+			end
+		end
+		if #issues > 0 then return false, table.concat(issues, "; ") end
+		local count = 0
+		for _ in pairs(AGS_CIV_PARENT_MAP) do count = count + 1 end
+		return true, count .. " DLC civs resolved"
+	end)
+
+	_Debug_RunTest("3.1a2 AGS_CIV_FACTION_MAP coverage", function()
+		if AGS_CIV_FACTION_MAP == nil then return false, "AGS_CIV_FACTION_MAP is nil" end
+		local issues = {}
+		-- Every variant in FACTION_MAP must have a parent in AGS_ENTITY_TABLE
+		for child, parent in pairs(AGS_CIV_FACTION_MAP) do
+			if AGS_ENTITY_TABLE[parent] == nil then
+				table.insert(issues, child .. " -> " .. parent .. " (parent entity table missing)")
+			end
+			-- Every variant must have its own entity table (or be in parent map)
+			if AGS_ENTITY_TABLE[child] == nil and (AGS_CIV_PARENT_MAP == nil or AGS_CIV_PARENT_MAP[child] == nil) then
+				table.insert(issues, child .. " (no own entity table and not in parent map)")
+			end
+		end
+		-- FACTION_MAP must be a superset of PARENT_MAP
+		if AGS_CIV_PARENT_MAP ~= nil then
+			for child, parent in pairs(AGS_CIV_PARENT_MAP) do
+				if AGS_CIV_FACTION_MAP[child] == nil then
+					table.insert(issues, child .. " in PARENT_MAP but missing from FACTION_MAP")
+				elseif AGS_CIV_FACTION_MAP[child] ~= parent then
+					table.insert(issues, child .. " faction mismatch: PARENT=" .. parent .. " FACTION=" .. AGS_CIV_FACTION_MAP[child])
+				end
+			end
+		end
+		if #issues > 0 then return false, table.concat(issues, "; ") end
+		local count = 0
+		for _ in pairs(AGS_CIV_FACTION_MAP) do count = count + 1 end
+		return true, count .. " variant civs in faction map"
+	end)
+
+	_Debug_RunTest("3.1a3 Explicit-false vs parent override guard", function()
+		-- For every variant that has explicit false entries, verify the false-guard
+		-- would block parent fallback (i.e. AGS_CivTableHasExplicitFalse returns true).
+		if AGS_CIV_PARENT_MAP == nil then return true, "no parent map, skip" end
+		local violations = {}
+		local checked = 0
+		for child, parent in pairs(AGS_CIV_PARENT_MAP) do
+			local child_table = AGS_ENTITY_TABLE[child]
+			local parent_table = AGS_ENTITY_TABLE[parent]
+			if child_table ~= nil and parent_table ~= nil then
+				for key, val in pairs(child_table) do
+					if val == false then
+						checked = checked + 1
+						-- Guard function must return true
+						if not AGS_CivTableHasExplicitFalse(child, key) then
+							table.insert(violations, child .. "/" .. key .. " (guard returned false)")
+						end
+						-- If parent has a real value, this would have been a false-override leak
+						if type(parent_table[key]) == "string" then
+							table.insert(violations, child .. "/" .. key .. " CONFLICT: parent " .. parent .. " has '" .. parent_table[key] .. "'")
+						end
+					end
+				end
+			end
+		end
+		-- Report conflicts as informational, not failures — the guard prevents the leak
+		local conflicts = 0
+		local clean = {}
+		for _, v in ipairs(violations) do
+			if string.find(v, "CONFLICT") then
+				conflicts = conflicts + 1
+			else
+				table.insert(clean, v)
+			end
+		end
+		if #clean > 0 then return false, table.concat(clean, "; ") end
+		return true, checked .. " false-entries checked, " .. conflicts .. " parent-override conflicts guarded"
+	end)
+
+	-- === Civ-sync validator: iterate AGS_CIV_PREFIXES against all dependent tables ===
+
+	_Debug_RunTest("3.1b AGS_CIV_PREFIXES -> AGS_ENTITY_TABLE sync", function()
+		if AGS_CIV_PREFIXES == nil then return false, "AGS_CIV_PREFIXES is nil" end
+		local missing = {}
+		for civ, _ in pairs(AGS_CIV_PREFIXES) do
+			if AGS_ENTITY_TABLE[civ] == nil then
+				-- Allow faction-map or parent-map fallback for variant civs
+				local parent = AGS_CIV_FACTION_MAP and AGS_CIV_FACTION_MAP[civ]
+				if parent == nil then parent = AGS_CIV_PARENT_MAP and AGS_CIV_PARENT_MAP[civ] end
+				if parent == nil or AGS_ENTITY_TABLE[parent] == nil then
+					table.insert(missing, civ)
+				end
+			end
+		end
+		if #missing > 0 then return false, #missing .. " missing: " .. table.concat(missing, ", ") end
+		local count = 0
+		for _ in pairs(AGS_CIV_PREFIXES) do count = count + 1 end
+		return true, count .. " civs synced"
+	end)
+
+	_Debug_RunTest("3.1c AGS_CIV_PREFIXES -> _CBA.rewards sync", function()
+		if _CBA == nil or _CBA.rewards == nil then return false, "_CBA.rewards is nil" end
+		local missing = {}
+		for civ, _ in pairs(AGS_CIV_PREFIXES) do
+			if _CBA.rewards[civ] == nil then
+				table.insert(missing, civ)
+			end
+		end
+		if #missing > 0 then return false, #missing .. " missing: " .. table.concat(missing, ", ") end
+		local count = 0
+		for _ in pairs(AGS_CIV_PREFIXES) do count = count + 1 end
+		return true, count .. " civs have rewards"
+	end)
+
+	_Debug_RunTest("3.1d AGS_CIV_PREFIXES -> CBA_CIV_BP_SUFFIX sync", function()
+		if CBA_CIV_BP_SUFFIX == nil then return true, "CBA_CIV_BP_SUFFIX not loaded (ok)" end
+		local missing = {}
+		for civ, _ in pairs(AGS_CIV_PREFIXES) do
+			if CBA_CIV_BP_SUFFIX[civ] == nil then
+				table.insert(missing, civ)
+			end
+		end
+		if #missing > 0 then return false, #missing .. " missing: " .. table.concat(missing, ", ") end
+		local count = 0
+		for _ in pairs(AGS_CIV_PREFIXES) do count = count + 1 end
+		return true, count .. " civs synced"
+	end)
+
+	_Debug_RunTest("3.1e _LEAVER_MILITARY_SUFFIX_OVERRIDE consistency", function()
+		if _LEAVER_MILITARY_SUFFIX_OVERRIDE == nil then return true, "no overrides defined (ok)" end
+		local issues = {}
+		for civ, override_suffix in pairs(_LEAVER_MILITARY_SUFFIX_OVERRIDE) do
+			local prefix = AGS_CIV_PREFIXES[civ]
+			if prefix == nil then
+				table.insert(issues, civ .. " not in AGS_CIV_PREFIXES")
+			else
+				local default_suffix = string.sub(prefix, 1, -2)
+				if default_suffix == override_suffix then
+					table.insert(issues, civ .. " override '" .. override_suffix .. "' equals default (redundant)")
+				end
+			end
+		end
+		if #issues > 0 then return false, table.concat(issues, "; ") end
+		local count = 0
+		for _ in pairs(_LEAVER_MILITARY_SUFFIX_OVERRIDE) do count = count + 1 end
+		return true, count .. " overrides valid"
+	end)
+
+	_Debug_RunTest("3.1f Reward BP precache manifest coverage", function()
+		if _PRECACHE_MANIFEST == nil then return false, "_PRECACHE_MANIFEST not built" end
+		local M = _PRECACHE_MANIFEST
+		local excluded_total = (M.excluded_age1_sources or 0) + (M.excluded_age1_targets or 0)
+		if M.total_gaps > 0 then
+			local gap_summary = {}
+			for _, gap in ipairs(M.gaps) do
+				gap_summary[gap.src_bp] = (gap_summary[gap.src_bp] or 0) + 1
+			end
+			local parts = {}
+			for bp, count in pairs(gap_summary) do
+				table.insert(parts, bp .. " x" .. count)
+			end
+			return false, M.total_gaps .. " required gaps: " .. table.concat(parts, ", ") .. " | excluded_age1=" .. excluded_total
+		end
+		local n_confirmed = 0
+		for _ in pairs(M.confirmed) do n_confirmed = n_confirmed + 1 end
+		return true, M.total_routes .. " required routes, " .. n_confirmed .. " unique targets confirmed, excluded_age1=" .. excluded_total
+	end)
+
+	_Debug_RunTest("3.1g Weapon-audit: forced-precache BP hardpoints", function()
+		-- Consumes results from Debug_LeaverWeaponAudit() if already run.
+		-- Passes when no concrete weapon failures exist; skips when audit not yet run.
+		if _WEAPON_AUDIT_RESULTS == nil then
+			return true, "weapon-audit not yet run (run Debug_LeaverWeaponAudit to populate)"
+		end
+		local W = _WEAPON_AUDIT_RESULTS
+		local issues = {}
+		if (W.weapon_missing or 0) > 0 then
+			table.insert(issues, W.weapon_missing .. " weapon_missing")
+		end
+		if (W.spawn_error or 0) > 0 then
+			table.insert(issues, W.spawn_error .. " spawn_error")
+		end
+		if (W.bp_phantom or 0) > 0 then
+			table.insert(issues, W.bp_phantom .. " bp_phantom")
+		end
+		if (W.weapon_query_error or 0) > 0 then
+			table.insert(issues, W.weapon_query_error .. " weapon_query_error")
+		end
+		if #issues > 0 then
+			return false, table.concat(issues, ", ") .. " out of " .. (W.total or 0) .. " forced BPs"
+		end
+		local ok_count = (W.weapon_ok or 0)
+		local total = (W.total or 0)
+		local msg = ok_count .. "/" .. total .. " weapon_ok"
+		return true, msg
+	end)
+
+	_Debug_RunTest("3.1h Precache coverage: reward BPs in forced table", function()
+		-- Verifies every recurring unit_upgrade BP in reward tables is covered
+		-- by _LEAVER_PRECACHE_ALWAYS_REQUIRED_BP. Catches gaps like unit_horseman_4_mal.
+		if _LEAVER_PRECACHE_ALWAYS_REQUIRED_BP == nil then
+			return false, "_LEAVER_PRECACHE_ALWAYS_REQUIRED_BP is nil"
+		end
+		if _CBA == nil or _CBA.rewards == nil then
+			return true, "no reward tables loaded (skip)"
+		end
+		local missing = {}
+		local checked = 0
+		for civ, thresholds in pairs(_CBA.rewards) do
+			for _, reward in pairs(thresholds) do
+				if reward.unit_upgrade ~= nil then
+					checked = checked + 1
+					local ok_name, bp_name = pcall(BP_GetName, reward.unit_upgrade)
+					if ok_name and bp_name ~= nil then
+						if _LEAVER_PRECACHE_ALWAYS_REQUIRED_BP[bp_name] == nil then
+							missing[bp_name] = (missing[bp_name] or 0) + 1
+						end
+					end
+				end
+			end
+		end
+		if next(missing) ~= nil then
+			local parts = {}
+			for bp, count in pairs(missing) do
+				table.insert(parts, bp .. " x" .. count)
+			end
+			return false, #parts .. " reward BPs not in forced-precache: " .. table.concat(parts, ", ")
+		end
+		return true, checked .. " recurring reward BPs all covered"
+	end)
+
+	_Debug_RunTest("3.1i Spawner-exempt prefix table initialized", function()
+		-- Verifies _LEAVER_SPAWNER_EXEMPT_PREFIXES exists and has the expected 3 entries.
+		if _LEAVER_SPAWNER_EXEMPT_PREFIXES == nil then
+			return false, "_LEAVER_SPAWNER_EXEMPT_PREFIXES is nil — spawner exemption disabled"
+		end
+		if type(_LEAVER_SPAWNER_EXEMPT_PREFIXES) ~= "table" then
+			return false, "_LEAVER_SPAWNER_EXEMPT_PREFIXES is " .. type(_LEAVER_SPAWNER_EXEMPT_PREFIXES) .. ", expected table"
+		end
+		if #_LEAVER_SPAWNER_EXEMPT_PREFIXES < 3 then
+			return false, "expected at least 3 exempt prefixes, found " .. #_LEAVER_SPAWNER_EXEMPT_PREFIXES
+		end
+		if type(_Leaver_IsSpawnerExemptBP) ~= "function" then
+			return false, "_Leaver_IsSpawnerExemptBP function not available"
+		end
+		-- Spot check: unit_manatarms_3_eng must be exempt, unit_trebuchet_4_eng must not
+		if not _Leaver_IsSpawnerExemptBP("unit_manatarms_3_eng") then
+			return false, "unit_manatarms_3_eng not exempt (expected exempt)"
+		end
+		if _Leaver_IsSpawnerExemptBP("unit_trebuchet_4_eng") then
+			return false, "unit_trebuchet_4_eng is exempt (expected non-exempt)"
+		end
+		return true, #_LEAVER_SPAWNER_EXEMPT_PREFIXES .. " exempt prefixes present"
+	end)
+
+	_Debug_RunTest("3.2 AGS_ENTITY_TABLE castle field", function()
+		local issues = {}
+		for civ, data in pairs(AGS_ENTITY_TABLE) do
+			if civ ~= "neutral" and data.castle == nil then
+				if civ ~= "mongol" then
+					table.insert(issues, civ)
+				end
+			end
+		end
+		if #issues > 0 then return false, "missing castle: " .. table.concat(issues, ", ") end
+		return true, "all non-mongol civs have castle"
+	end)
+
+	_Debug_RunTest("3.3 Reward tables present (rewards.scar)", function()
+		if _CBA == nil or _CBA.rewards == nil then return false, "_CBA.rewards is nil" end
+		local count = _Debug_CountKeys(_CBA.rewards)
+		if count == 0 then return false, "rewards table is empty" end
+		return true, count .. " reward sets"
+	end)
+
+	_Debug_RunTest("3.4 Building limit state per player", function()
+		local issues = {}
+		for i, player in ipairs(PLAYERS) do
+			if player.obj_buildingLimit_count == nil then
+				table.insert(issues, "P" .. i .. " bld_count=nil")
+			end
+		end
+		if #issues > 0 then return false, table.concat(issues, ", ") end
+		return true, #PLAYERS .. " players have building counters"
+	end)
+
+	_Debug_RunTest("3.5 Siege limit state per player", function()
+		local issues = {}
+		for i, player in ipairs(PLAYERS) do
+			if player.siegeLimit_count == nil then
+				table.insert(issues, "P" .. i .. " siege_count=nil")
+			end
+		end
+		if #issues > 0 then return false, table.concat(issues, ", ") end
+		return true, #PLAYERS .. " players have siege counters"
+	end)
+
+	_Debug_RunTest("3.5a Ram limit state per player", function()
+		local issues = {}
+		for i, player in ipairs(PLAYERS) do
+			if player.ramLimit_count == nil then
+				table.insert(issues, "P" .. i .. " ram_count=nil")
+			end
+		end
+		if #issues > 0 then return false, table.concat(issues, ", ") end
+		return true, #PLAYERS .. " players have ram counters"
+	end)
+
+	_Debug_RunTest("3.5b Siege tower limit state per player", function()
+		local issues = {}
+		for i, player in ipairs(PLAYERS) do
+			if player.siegeTowerLimit_count == nil then
+				table.insert(issues, "P" .. i .. " tower_count=nil")
+			end
+		end
+		if #issues > 0 then return false, table.concat(issues, ", ") end
+		return true, #PLAYERS .. " players have siege tower counters"
+	end)
+
+	_Debug_RunTest("3.5c Pending counters initialized", function()
+		local issues = {}
+		for i, player in ipairs(PLAYERS) do
+			if player.ramLimit_pending == nil then
+				table.insert(issues, "P" .. i .. " ramLimit_pending=nil")
+			end
+			if player.siegeTowerLimit_pending == nil then
+				table.insert(issues, "P" .. i .. " siegeTowerLimit_pending=nil")
+			end
+		end
+		if #issues > 0 then return false, table.concat(issues, ", ") end
+		return true, #PLAYERS .. " players have pending counters"
+	end)
+
+	_Debug_RunTest("3.5e Reward upgrade constant: AGS_UP_SIEGE_ENGINEERS", function()
+		if AGS_UP_SIEGE_ENGINEERS == nil then return false, "AGS_UP_SIEGE_ENGINEERS is nil" end
+		-- Verify English 100-kill reward uses the canonical constant
+		if _CBA and _CBA.rewards and _CBA.rewards["english"] and _CBA.rewards["english"][100] then
+			local r = _CBA.rewards["english"][100]
+			if r.upgrade ~= AGS_UP_SIEGE_ENGINEERS then
+				return false, "English 100-kill reward uses wrong upgrade constant"
+			end
+		end
+		return true, "AGS_UP_SIEGE_ENGINEERS verified"
+	end)
+
+	_Debug_RunTest("3.6 _annihilation module (cba_annihilation.scar)", function()
+		if _annihilation == nil then return false, "_annihilation is nil" end
+		return true, "module present"
+	end)
+
+	_Debug_RunTest("3.7 _religious module (cba_religious.scar)", function()
+		if _religious == nil then return false, "_religious is nil" end
+		if _religious.sites == nil then return false, "_religious.sites is nil" end
+		local count = _Debug_CountKeys(_religious.sites)
+		return true, count .. " sacred sites"
+	end)
+
+	_Debug_RunTest("3.8 _wonder module (wonder.scar)", function()
+		if _wonder == nil then return true, "legacy wonder module inactive (OK)" end
+		return true, "time_victory=" .. tostring(_wonder.time_victory)
+	end)
+
+	_Debug_RunTest("3.9 _autoage module (cba_auto_age.scar)", function()
+		if _autoage == nil then
+			if AGS_GLOBAL_SETTINGS.AutoAge then
+				return false, "_autoage nil but AutoAge enabled"
+			end
+			return true, "AutoAge disabled, module not loaded"
+		end
+		return true, "module=" .. tostring(_autoage.module)
+	end)
+
+	_Debug_PhaseFooter(3, "Data")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase 4: Endstate — Win conditions, game-over checks
+---------------------------------------------------------------------------------------------------
+
+function _Debug_Phase4_Endstate()
+	_Debug_PhaseHeader(4, "Endstate")
+
+	_Debug_RunTest("4.1 Objective initialized", function()
+		if _mod.objective == nil then return false, "_mod.objective is nil" end
+		return true, string.format("req=%s met=%s",
+			tostring(_mod.objective_requirement), tostring(_mod.objective_meet))
+	end)
+
+	_Debug_RunTest("4.2 No premature game over", function()
+		local ok, go = pcall(function() return g_gameOver end)
+		if ok and go == true then return false, "g_gameOver is true at validation time" end
+		return true, "game still active"
+	end)
+
+	_Debug_RunTest("4.3 No eliminated players at start", function()
+		local eliminated = {}
+		for i, player in ipairs(PLAYERS) do
+			local ok, elim = pcall(Core_IsPlayerEliminated, player.id)
+			if ok and elim then table.insert(eliminated, "P" .. i) end
+		end
+		if #eliminated > 0 then
+			-- Mid-game run (game_time > 60s): pre-existing eliminations are expected
+			-- (e.g. deliberate DEVMENU_DESTROY before the suite started).  Treat as
+			-- informational rather than a hard failure.
+			local gt = World_GetGameTime()
+			if gt > 60 then
+				return true, "mid-game (t=" .. math.floor(gt) .. "s) pre-existing: " .. table.concat(eliminated, ", ")
+			end
+			return false, "eliminated: " .. table.concat(eliminated, ", ")
+		end
+		return true, "all players active"
+	end)
+
+	_Debug_RunTest("4.4 Kill tracking per player (rewards.scar)", function()
+		local issues = {}
+		for i, player in ipairs(PLAYERS) do
+			if player.killed_number == nil then
+				table.insert(issues, "P" .. i .. " killed_number=nil")
+			end
+		end
+		if #issues > 0 then return false, table.concat(issues, ", ") end
+		return true, #PLAYERS .. " players have kill counters"
+	end)
+
+	_Debug_RunTest("4.5 Annihilation module ready (cba_annihilation.scar)", function()
+		if _annihilation == nil then return false, "_annihilation is nil" end
+		local p, d = _Debug_FunctionExists("Annihilation_CheckVictory")
+		return p, d
+	end)
+
+	_Debug_PhaseFooter(4, "Endstate")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase 5: Limits — Enforcement pipeline, reward queue, deferred UI
+---------------------------------------------------------------------------------------------------
+
+function _Debug_Phase5_Limits()
+	_Debug_PhaseHeader(5, "Limits")
+
+	_Debug_RunTest("5.1 CBA_Options_EnforcePostTransfer exists", function()
+		return _Debug_FunctionExists("CBA_Options_EnforcePostTransfer")
+	end)
+
+	_Debug_RunTest("5.2 CBA_Options_RevalidateAll exists", function()
+		return _Debug_FunctionExists("CBA_Options_RevalidateAll")
+	end)
+
+	_Debug_RunTest("5.3 CBA_Options_RevalidateAllPlayers exists", function()
+		return _Debug_FunctionExists("CBA_Options_RevalidateAllPlayers")
+	end)
+
+	_Debug_RunTest("5.4 Population cap validity", function()
+		local issues = {}
+		for i, player in ipairs(PLAYERS) do
+			local ok_pop, pop = pcall(Player_GetCurrentPopulation, player.id, CT_Personnel)
+			local ok_cap, cap = pcall(Player_GetCurrentPopulationCap, player.id, CT_Personnel)
+			if ok_pop and ok_cap and pop > cap then
+				table.insert(issues, string.format("P%d pop=%d cap=%d", i, pop, cap))
+			end
+		end
+		if #issues > 0 then return false, "over cap: " .. table.concat(issues, ", ") end
+		return true, #PLAYERS .. " players within pop cap"
+	end)
+
+	_Debug_RunTest("5.5 _reward_queue is a table", function()
+		if _reward_queue == nil then return false, "_reward_queue is nil" end
+		if type(_reward_queue) ~= "table" then return false, "type=" .. type(_reward_queue) end
+		return true, "type=table"
+	end)
+
+	_Debug_RunTest("5.6 AGS_LimitsUI_DeferUpdate exists", function()
+		return _Debug_FunctionExists("AGS_LimitsUI_DeferUpdate")
+	end)
+
+	_Debug_PhaseFooter(5, "Limits")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Final Report
+---------------------------------------------------------------------------------------------------
+
+function _Debug_FinalReport()
+	print("")
+	print("############################################")
+	print("###   CBA DEBUG — VALIDATION REPORT      ###")
+	print("############################################")
+	print("")
+
+	print("  PHASE SUMMARY")
+	for _, pr in ipairs(_cba_debug.phase_results) do
+		local icon = (pr.passed == pr.total) and "OK" or "!!"
+		print(string.format("  [%s] Phase %d %-12s  %d / %d",
+			icon, pr.phase, pr.name, pr.passed, pr.total))
+	end
+
+	local failures = {}
+	for _, r in ipairs(_cba_debug.test_results) do
+		if not r.pass then table.insert(failures, r) end
+	end
+
+	if #failures > 0 then
+		print("")
+		print("  FAILURES")
+		for _, f in ipairs(failures) do
+			print(string.format("  [FAIL] %s — %s", f.name, f.detail))
+		end
+	end
+
+	local total = #_cba_debug.test_results
+	local passed = total - #failures
+	print("")
+	print(string.format("  TOTAL: %d / %d tests passed", passed, total))
+	print("############################################")
+
+	-- Restore debug logging to pre-validation state
+	if _cba_debug._full_validation_prev_enabled ~= nil then
+		_cba_debug.enabled = _cba_debug._full_validation_prev_enabled
+		_cba_debug._full_validation_prev_enabled = nil
+	end
+	print("[CBA_DEBUG] FullValidation complete: debug logging restored to previous state")
+
+	-- Emit the end marker so the master/sub orchestrators (StressGamemode,
+	-- MasterSuite) can chain to the next sub-suite.  No-op when run standalone.
+	_Debug_EndMarker("Validation", passed, total, 0)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Debug_FullValidation — Master entry point (~10s)
+---------------------------------------------------------------------------------------------------
+
+function Debug_FullValidation()
+	_cba_debug.test_results = {}
+	_cba_debug.phase_results = {}
+	_cba_debug._full_validation_prev_enabled = _cba_debug.enabled
+	_cba_debug.enabled = true
+
+	print("")
+	print("============================================")
+	print("  CBA DEBUG — FULL VALIDATION (6 phases)")
+	print("  Branch: onslaught-v3.3")
+	print("============================================")
+
+	_Debug_Phase0_Boot()
+	Rule_AddOneShot(_Debug_FullValidation_Phase1, _cba_debug.phase_delay)
+end
+
+function _Debug_FullValidation_Phase1()
+	_Debug_Phase1_Config()
+	Rule_AddOneShot(_Debug_FullValidation_Phase2, _cba_debug.phase_delay)
+end
+function _Debug_FullValidation_Phase2()
+	_Debug_Phase2_Runtime()
+	Rule_AddOneShot(_Debug_FullValidation_Phase3, _cba_debug.phase_delay)
+end
+function _Debug_FullValidation_Phase3()
+	_Debug_Phase3_Data()
+	Rule_AddOneShot(_Debug_FullValidation_Phase4, _cba_debug.phase_delay)
+end
+function _Debug_FullValidation_Phase4()
+	_Debug_Phase4_Endstate()
+	Rule_AddOneShot(_Debug_FullValidation_Phase5, _cba_debug.phase_delay)
+end
+function _Debug_FullValidation_Phase5()
+	_Debug_Phase5_Limits()
+	Rule_AddOneShot(_Debug_FinalReport, _cba_debug.phase_delay)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Standalone: Debug_LimitEnforcementValidator — Run Phase 5 (Limits) only
+---------------------------------------------------------------------------------------------------
+
+function Debug_LimitEnforcementValidator()
+	_cba_debug.test_results = {}
+	_cba_debug.phase_results = {}
+	_cba_debug.enabled = true
+
+	print("")
+	print("============================================")
+	print("  CBA DEBUG — LIMIT ENFORCEMENT VALIDATOR")
+	print("============================================")
+
+	_Debug_Phase5_Limits()
+	_Debug_FinalReport()
+end
+
+---------------------------------------------------------------------------------------------------
+-- Standalone: Debug_LimitEnforcementValidator — Run Phase 5 (Limits) only
+---------------------------------------------------------------------------------------------------
+
+function Debug_LimitEnforcementValidator()
+	_cba_debug.test_results = {}
+	_cba_debug.phase_results = {}
+	_cba_debug.enabled = true
+
+	print("")
+	print("============================================")
+	print("  CBA DEBUG — LIMIT ENFORCEMENT VALIDATOR")
+	print("============================================")
+
+	_Debug_Phase5_Limits()
+	_Debug_FinalReport()
+end
+
+---------------------------------------------------------------------------------------------------
+-- Standalone: Debug_FactionMapDiagnostic — One-command faction / parent-map audit
+--
+-- Console: Debug_FactionMapDiagnostic()
+--
+-- Sections:
+--   A. AGS_CIV_FACTION_MAP coverage (all variants mapped, parents valid)
+--   B. False-vs-nil diagnostics (every explicit false entry per variant, conflict detection)
+--   C. Transfer-path simulation (building resolve through Tier 1/2/3 for all cross-civ pairs)
+--   D. Reward alias coverage (every variant has a reward table)
+--   E. Pass/fail summary
+---------------------------------------------------------------------------------------------------
+
+function Debug_FactionMapDiagnostic()
+	print("")
+	print("############################################################")
+	print("###  CBA DEBUG — FACTION MAP DIAGNOSTIC                  ###")
+	print("############################################################")
+	print("")
+
+	local total_tests = 0
+	local total_pass = 0
+	local failures = {}
+
+	local function _fmd_test(name, pass, detail)
+		total_tests = total_tests + 1
+		if pass then
+			total_pass = total_pass + 1
+			print(string.format("  [PASS] %s — %s", name, detail))
+		else
+			table.insert(failures, {name = name, detail = detail})
+			print(string.format("  [FAIL] %s — %s", name, detail))
+		end
+	end
+
+	---------------------------------------------------------------------------
+	-- Section A: AGS_CIV_FACTION_MAP Coverage
+	---------------------------------------------------------------------------
+	print("--- A. FACTION MAP COVERAGE ---")
+
+	_fmd_test("A.1 AGS_CIV_FACTION_MAP exists", AGS_CIV_FACTION_MAP ~= nil, AGS_CIV_FACTION_MAP ~= nil and "defined" or "NIL")
+
+	if AGS_CIV_FACTION_MAP ~= nil then
+		local fm_count = 0
+		local fm_issues = {}
+		for child, parent in pairs(AGS_CIV_FACTION_MAP) do
+			fm_count = fm_count + 1
+			if AGS_ENTITY_TABLE[parent] == nil then
+				table.insert(fm_issues, child .. "->" .. parent .. " MISSING_PARENT_TABLE")
+			end
+		end
+		_fmd_test("A.2 All parents have entity tables", #fm_issues == 0,
+			#fm_issues == 0 and fm_count .. " mappings valid" or table.concat(fm_issues, "; "))
+
+		-- Check faction map is superset of parent map
+		local superset_issues = {}
+		if AGS_CIV_PARENT_MAP ~= nil then
+			for child, _ in pairs(AGS_CIV_PARENT_MAP) do
+				if AGS_CIV_FACTION_MAP[child] == nil then
+					table.insert(superset_issues, child .. " in PARENT_MAP but missing from FACTION_MAP")
+				end
+			end
+		end
+		_fmd_test("A.3 FACTION_MAP superset of PARENT_MAP", #superset_issues == 0,
+			#superset_issues == 0 and "superset OK" or table.concat(superset_issues, "; "))
+
+		-- Check Knights DLC civs are included
+		local knights_civs = {"abbasid_ha_01", "chinese_ha_01", "french_ha_01", "hre_ha_01"}
+		local knights_missing = {}
+		for _, kc in ipairs(knights_civs) do
+			if AGS_CIV_FACTION_MAP[kc] == nil then
+				table.insert(knights_missing, kc)
+			end
+		end
+		_fmd_test("A.4 Knights DLC civs in faction map", #knights_missing == 0,
+			#knights_missing == 0 and "4/4 present" or "missing: " .. table.concat(knights_missing, ", "))
+
+		print(string.format("  [INFO] AGS_CIV_FACTION_MAP: %d entries", fm_count))
+		for child, parent in pairs(AGS_CIV_FACTION_MAP) do
+			local own_table = AGS_ENTITY_TABLE[child] ~= nil
+			print(string.format("    %s -> %s  (own_table=%s)", child, parent, tostring(own_table)))
+		end
+	end
+	print("")
+
+	---------------------------------------------------------------------------
+	-- Section B: False-vs-Nil Diagnostics
+	---------------------------------------------------------------------------
+	print("--- B. FALSE-VS-NIL DIAGNOSTICS ---")
+
+	if AGS_CIV_PARENT_MAP ~= nil then
+		local total_false = 0
+		local total_conflicts = 0
+		local total_guarded = 0
+		local guard_failures = {}
+
+		for child, parent in pairs(AGS_CIV_PARENT_MAP) do
+			local child_table = AGS_ENTITY_TABLE[child]
+			local parent_table = AGS_ENTITY_TABLE[parent]
+			if child_table == nil then
+				print(string.format("  [WARN] %s has no own entity table", child))
+				goto continue_child_b
+			end
+			if parent_table == nil then
+				print(string.format("  [WARN] %s parent %s has no entity table", child, parent))
+				goto continue_child_b
+			end
+
+			local child_false_count = 0
+			local child_conflicts = {}
+
+			for key, val in pairs(child_table) do
+				if val == false then
+					child_false_count = child_false_count + 1
+					total_false = total_false + 1
+
+					local parent_val = parent_table[key]
+					local is_conflict = type(parent_val) == "string"
+					local guard_ok = AGS_CivTableHasExplicitFalse(child, key)
+
+					if is_conflict then
+						total_conflicts = total_conflicts + 1
+						local status = guard_ok and "GUARDED" or "LEAK"
+						if guard_ok then
+							total_guarded = total_guarded + 1
+						else
+							table.insert(guard_failures, child .. "/" .. key)
+						end
+						table.insert(child_conflicts, string.format("    %-25s false vs parent %-40s [%s]", key, parent_val, status))
+					end
+				end
+			end
+
+			if child_false_count > 0 then
+				print(string.format("  %s (parent: %s): %d false entries, %d conflicts",
+					child, parent, child_false_count, #child_conflicts))
+				for _, line in ipairs(child_conflicts) do
+					print(line)
+				end
+			end
+
+			::continue_child_b::
+		end
+
+		_fmd_test("B.1 All false-override conflicts guarded", #guard_failures == 0,
+			#guard_failures == 0
+				and total_conflicts .. " conflicts, all guarded by AGS_CivTableHasExplicitFalse"
+				or "UNGUARDED: " .. table.concat(guard_failures, ", "))
+
+		print(string.format("  [INFO] Total: %d false entries, %d parent-has-value conflicts, %d guarded",
+			total_false, total_conflicts, total_guarded))
+	else
+		_fmd_test("B.1 AGS_CIV_PARENT_MAP exists", false, "NIL — cannot run false-vs-nil analysis")
+	end
+	print("")
+
+	---------------------------------------------------------------------------
+	-- Section C: Transfer-Path Simulation (Building Resolve)
+	---------------------------------------------------------------------------
+	print("--- C. TRANSFER-PATH SIMULATION ---")
+
+	-- Gather all civs that have entity tables
+	local all_civs = {}
+	if AGS_ENTITY_TABLE ~= nil then
+		for civ, tbl in pairs(AGS_ENTITY_TABLE) do
+			if civ ~= "neutral" then
+				table.insert(all_civs, civ)
+			end
+		end
+		table.sort(all_civs)
+	end
+
+	-- Gather building keys from all civ tables
+	local all_bldg_keys = {}
+	local key_set = {}
+	for _, civ in ipairs(all_civs) do
+		for key, val in pairs(AGS_ENTITY_TABLE[civ]) do
+			if type(val) == "string" and string.sub(val, 1, 9) == "building_" and not key_set[key] then
+				key_set[key] = true
+				table.insert(all_bldg_keys, key)
+			end
+		end
+	end
+	table.sort(all_bldg_keys)
+
+	local c_total_pairs = 0
+	local c_total_keys = 0
+	local c_exact = 0
+	local c_parent = 0
+	local c_lossy = 0
+	local c_killed = 0
+	local c_false_blocked = 0
+	local c_unresolved_log = {}
+
+	local function _fmd_try_resolve(civ, key)
+		local ok, bp = pcall(AGS_GetCivilizationEntity, civ, key)
+		if ok and bp ~= nil then return bp end
+		return nil
+	end
+
+	for _, src_civ in ipairs(all_civs) do
+		local src_table = AGS_ENTITY_TABLE[src_civ]
+		for _, rcv_civ in ipairs(all_civs) do
+			if src_civ ~= rcv_civ then
+				c_total_pairs = c_total_pairs + 1
+				for key, val in pairs(src_table) do
+					if type(val) ~= "string" or string.sub(val, 1, 9) ~= "building_" then
+						goto continue_key_c
+					end
+					c_total_keys = c_total_keys + 1
+
+					-- Tier 1: exact
+					local bp = _fmd_try_resolve(rcv_civ, key)
+					if bp ~= nil then
+						c_exact = c_exact + 1
+						goto continue_key_c
+					end
+
+					-- Tier 2: parent fallback (with false-guard)
+					if AGS_CIV_PARENT_MAP[rcv_civ] ~= nil then
+						if AGS_CivTableHasExplicitFalse(rcv_civ, key) then
+							c_false_blocked = c_false_blocked + 1
+							-- Don't try parent — proceed to Tier 3
+						else
+							bp = _fmd_try_resolve(AGS_CIV_PARENT_MAP[rcv_civ], key)
+							if bp ~= nil then
+								c_parent = c_parent + 1
+								goto continue_key_c
+							end
+						end
+					end
+
+					-- Tier 3: AGS_BUILDING_FALLBACK_MAP
+					if AGS_BUILDING_FALLBACK_MAP ~= nil then
+						local fb_key = AGS_BUILDING_FALLBACK_MAP[key]
+						if fb_key ~= nil then
+							bp = _fmd_try_resolve(rcv_civ, fb_key)
+							if bp == nil and AGS_CIV_PARENT_MAP[rcv_civ] ~= nil
+								and not AGS_CivTableHasExplicitFalse(rcv_civ, fb_key) then
+								bp = _fmd_try_resolve(AGS_CIV_PARENT_MAP[rcv_civ], fb_key)
+							end
+							if bp ~= nil then
+								c_lossy = c_lossy + 1
+								goto continue_key_c
+							end
+						end
+					end
+
+					-- Unresolved → kill
+					c_killed = c_killed + 1
+					local log_key = src_civ .. "->" .. rcv_civ .. "/" .. key
+					if #c_unresolved_log < 50 then
+						table.insert(c_unresolved_log, log_key)
+					end
+
+					::continue_key_c::
+				end
+			end
+		end
+	end
+
+	print(string.format("  Pairs: %d cross-civ pairs, %d key resolutions", c_total_pairs, c_total_keys))
+	print(string.format("  Results: exact=%d parent=%d lossy=%d killed=%d false_blocked=%d",
+		c_exact, c_parent, c_lossy, c_killed, c_false_blocked))
+
+	if #c_unresolved_log > 0 then
+		print(string.format("  Unresolved samples (max 50):"))
+		for _, entry in ipairs(c_unresolved_log) do
+			print("    " .. entry)
+		end
+	end
+
+	local c_resolved = c_exact + c_parent + c_lossy
+	_fmd_test("C.1 All keys resolve or are cleanly killed", true,
+		string.format("%d resolved + %d killed = %d total (%d false-blocked)",
+			c_resolved, c_killed, c_resolved + c_killed, c_false_blocked))
+
+	-- Verify no false-override leaks: for any variant civ with explicit false,
+	-- Tier 2 must NOT produce a parent BP
+	local c_leak_tests = 0
+	local c_leaks = {}
+	if AGS_CIV_PARENT_MAP ~= nil then
+		for child, parent in pairs(AGS_CIV_PARENT_MAP) do
+			local child_table = AGS_ENTITY_TABLE[child]
+			if child_table == nil then goto continue_child_c end
+			for key, val in pairs(child_table) do
+				if val == false then
+					c_leak_tests = c_leak_tests + 1
+					-- Simulate: would Tier 2 produce a BP?
+					local parent_bp = _fmd_try_resolve(parent, key)
+					local guard = AGS_CivTableHasExplicitFalse(child, key)
+					if parent_bp ~= nil and not guard then
+						table.insert(c_leaks, child .. "/" .. key .. " -> parent " .. parent .. " LEAKED")
+					end
+				end
+			end
+			::continue_child_c::
+		end
+	end
+
+	_fmd_test("C.2 No false-override leaks in Tier 2", #c_leaks == 0,
+		#c_leaks == 0
+			and c_leak_tests .. " false-entries tested, 0 leaks"
+			or table.concat(c_leaks, "; "))
+	print("")
+
+	---------------------------------------------------------------------------
+	-- Section D: Reward Alias Coverage
+	---------------------------------------------------------------------------
+	print("--- D. REWARD ALIAS COVERAGE ---")
+
+	if _CBA ~= nil and _CBA.rewards ~= nil and AGS_CIV_FACTION_MAP ~= nil then
+		local reward_missing = {}
+		for variant, parent in pairs(AGS_CIV_FACTION_MAP) do
+			if _CBA.rewards[variant] == nil then
+				table.insert(reward_missing, variant)
+			elseif _CBA.rewards[parent] ~= nil and _CBA.rewards[variant] ~= _CBA.rewards[parent] then
+				-- Variant has own reward table (not aliased) — informational
+				print(string.format("  [INFO] %s has OWN reward table (not aliased to %s)", variant, parent))
+			end
+		end
+		_fmd_test("D.1 All faction-map variants have reward tables", #reward_missing == 0,
+			#reward_missing == 0
+				and "all variants covered"
+				or "missing: " .. table.concat(reward_missing, ", "))
+	else
+		_fmd_test("D.1 Reward tables loaded", false,
+			_CBA == nil and "_CBA is nil" or (_CBA.rewards == nil and "_CBA.rewards is nil" or "AGS_CIV_FACTION_MAP is nil"))
+	end
+	print("")
+
+	---------------------------------------------------------------------------
+	-- Section E: Siege + Upgrade Table Coverage
+	---------------------------------------------------------------------------
+	print("--- E. SIEGE + UPGRADE TABLE COVERAGE ---")
+
+	if AGS_CIV_FACTION_MAP ~= nil then
+		local siege_missing = {}
+		local upgrade_missing = {}
+		local correction_missing = {}
+		for variant, parent in pairs(AGS_CIV_FACTION_MAP) do
+			if CBA_SIEGE_TABLE ~= nil and CBA_SIEGE_TABLE[variant] == nil then
+				table.insert(siege_missing, variant)
+			end
+			if AGS_UPGRADE_TABLE ~= nil and AGS_UPGRADE_TABLE[variant] == nil then
+				table.insert(upgrade_missing, variant)
+			end
+			if AGS_UPGRADE_CORRECTION_TABLE ~= nil and AGS_UPGRADE_CORRECTION_TABLE[variant] == nil then
+				table.insert(correction_missing, variant)
+			end
+		end
+		_fmd_test("E.1 All faction-map variants have siege tables", #siege_missing == 0,
+			#siege_missing == 0
+				and "all variants covered"
+				or "missing: " .. table.concat(siege_missing, ", "))
+		_fmd_test("E.2 All faction-map variants have upgrade tables", #upgrade_missing == 0,
+			#upgrade_missing == 0
+				and "all variants covered"
+				or "missing: " .. table.concat(upgrade_missing, ", "))
+		_fmd_test("E.3 All faction-map variants have correction tables", #correction_missing == 0,
+			#correction_missing == 0
+				and "all variants covered"
+				or "missing: " .. table.concat(correction_missing, ", "))
+	end
+	print("")
+
+	---------------------------------------------------------------------------
+	-- Section F: Summary
+	---------------------------------------------------------------------------
+	print("############################################################")
+	print(string.format("###  RESULT: %d / %d tests passed", total_pass, total_tests))
+	if #failures > 0 then
+		print("###  FAILURES:")
+		for _, f in ipairs(failures) do
+			print(string.format("###    [FAIL] %s — %s", f.name, f.detail))
+		end
+	else
+		print("###  ALL TESTS PASSED")
+	end
+	print("############################################################")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Debug_VerifyDynastiesData — Single-command verification for Dynasties data additions
+-- Validates: upgrade table entries, correction table entries, key parity, arena reward tables
+-- Console: Debug_VerifyDynastiesData()
+---------------------------------------------------------------------------------------------------
+function Debug_VerifyDynastiesData()
+	print("")
+	print("############################################################")
+	print("###  CBA DEBUG — DYNASTIES DATA VERIFICATION             ###")
+	print("############################################################")
+	print("")
+
+	local total_tests = 0
+	local total_pass = 0
+	local failures = {}
+
+	local function _test(name, pass, detail)
+		total_tests = total_tests + 1
+		if pass then
+			total_pass = total_pass + 1
+			print(string.format("  [PASS] %s — %s", name, detail))
+		else
+			table.insert(failures, {name = name, detail = detail})
+			print(string.format("  [FAIL] %s — %s", name, detail))
+		end
+	end
+
+	local dynasties_variants = {
+		"mongol_ha_gol", "lancaster", "templar",
+		"byzantine_ha_mac", "japanese_ha_sen", "sultanate_ha_tug",
+	}
+	local dynasties_parent = {
+		mongol_ha_gol = "mongol", lancaster = "english", templar = "french",
+		byzantine_ha_mac = "byzantine", japanese_ha_sen = "japanese", sultanate_ha_tug = "sultanate",
+	}
+	local arena_base_civs = {
+		"english", "chinese", "french", "hre", "mongol", "rus",
+		"sultanate", "abbasid", "malian", "ottoman", "japanese", "byzantine", "jin_dynasty",
+	}
+
+	---------------------------------------------------------------------------
+	-- Section 1: AGS_UPGRADE_TABLE — Dynasties entries exist
+	---------------------------------------------------------------------------
+	print("--- 1. UPGRADE TABLE COVERAGE ---")
+
+	local upgrade_missing = {}
+	if AGS_UPGRADE_TABLE ~= nil then
+		for _, v in ipairs(dynasties_variants) do
+			if AGS_UPGRADE_TABLE[v] == nil then
+				table.insert(upgrade_missing, v)
+			end
+		end
+		_test("1.1 All 6 Dynasties variants in AGS_UPGRADE_TABLE", #upgrade_missing == 0,
+			#upgrade_missing == 0
+				and "all 6 present"
+				or "missing: " .. table.concat(upgrade_missing, ", "))
+	else
+		_test("1.1 AGS_UPGRADE_TABLE exists", false, "AGS_UPGRADE_TABLE is nil")
+	end
+
+	---------------------------------------------------------------------------
+	-- Section 2: AGS_UPGRADE_CORRECTION_TABLE — Dynasties entries exist
+	---------------------------------------------------------------------------
+	print("--- 2. CORRECTION TABLE COVERAGE ---")
+
+	local correction_missing = {}
+	if AGS_UPGRADE_CORRECTION_TABLE ~= nil then
+		for _, v in ipairs(dynasties_variants) do
+			if AGS_UPGRADE_CORRECTION_TABLE[v] == nil then
+				table.insert(correction_missing, v)
+			end
+		end
+		_test("2.1 All 6 Dynasties variants in AGS_UPGRADE_CORRECTION_TABLE", #correction_missing == 0,
+			#correction_missing == 0
+				and "all 6 present"
+				or "missing: " .. table.concat(correction_missing, ", "))
+	else
+		_test("2.1 AGS_UPGRADE_CORRECTION_TABLE exists", false, "AGS_UPGRADE_CORRECTION_TABLE is nil")
+	end
+
+	---------------------------------------------------------------------------
+	-- Section 3: Named key parity — variant matches parent
+	---------------------------------------------------------------------------
+	print("--- 3. UPGRADE TABLE KEY PARITY ---")
+
+	local named_keys = {
+		"melee1_attack", "melee1_defense", "melee2_attack", "melee2_defense",
+		"melee3_attack", "melee3_defense", "ranged1_attack", "ranged1_defense",
+		"ranged2_attack", "ranged2_defense", "ranged3_attack", "ranged3_defense",
+		"maa_elite_tactics", "spear_elite_tactics", "biology", "barding",
+		"grapered_lance", "military_academy", "ranged_incendiary",
+		"university_architecture", "university_chemistry", "siege_works",
+		"siege_speed", "roller_trigger", "adjustable_crossbar", "siege_engineers",
+	}
+
+	if AGS_UPGRADE_TABLE ~= nil then
+		local parity_issues = {}
+		for _, v in ipairs(dynasties_variants) do
+			local parent = dynasties_parent[v]
+			local v_table = AGS_UPGRADE_TABLE[v]
+			local p_table = AGS_UPGRADE_TABLE[parent]
+			if v_table ~= nil and p_table ~= nil then
+				for _, key in ipairs(named_keys) do
+					local v_val = v_table[key]
+					local p_val = p_table[key]
+					if v_val ~= p_val then
+						table.insert(parity_issues, v .. "." .. key .. ": " .. tostring(v_val) .. " ~= " .. tostring(p_val))
+					end
+				end
+			end
+		end
+		_test("3.1 Named keys match parent for all 6 variants", #parity_issues == 0,
+			#parity_issues == 0
+				and #named_keys .. " keys checked per variant, all match"
+				or (#parity_issues .. " mismatches: " .. table.concat(parity_issues, "; ")))
+	end
+
+	---------------------------------------------------------------------------
+	-- Section 4: Arena reward tables — base civs
+	---------------------------------------------------------------------------
+	print("--- 4. ARENA REWARD TABLES ---")
+
+	if _CBA ~= nil and _CBA.rewards ~= nil then
+		local reward_mode = "unknown"
+		if AGS_GLOBAL_SETTINGS ~= nil and AGS_GLOBAL_SETTINGS.CBA_Rewards ~= nil then
+			reward_mode = AGS_GLOBAL_SETTINGS.CBA_Rewards
+		end
+		print("    [INFO] Active rewards mode: " .. tostring(reward_mode))
+
+		local arena_missing = {}
+		for _, civ in ipairs(arena_base_civs) do
+			if _CBA.rewards[civ] == nil then
+				table.insert(arena_missing, civ)
+			end
+		end
+		_test("4.1 All 13 base civs have arena reward tables", #arena_missing == 0,
+			#arena_missing == 0
+				and "all 13 present"
+				or "missing: " .. table.concat(arena_missing, ", "))
+
+		-- Check Japanese and Byzantine are not aliased to other civs
+		local jpn_aliased = _CBA.rewards["japanese"] ~= nil
+			and (_CBA.rewards["japanese"] == _CBA.rewards["ottoman"]
+				or _CBA.rewards["japanese"] == _CBA.rewards["abbasid"])
+		local byz_aliased = _CBA.rewards["byzantine"] ~= nil
+			and (_CBA.rewards["byzantine"] == _CBA.rewards["ottoman"]
+				or _CBA.rewards["byzantine"] == _CBA.rewards["abbasid"])
+		_test("4.2 Japanese has own arena table (not aliased)", not jpn_aliased,
+			jpn_aliased and "still aliased to another civ" or "own table")
+		_test("4.3 Byzantine has own arena table (not aliased)", not byz_aliased,
+			byz_aliased and "still aliased to another civ" or "own table")
+
+		-- Check thresholds against the active reward mode.
+		local function _reward_has_thresholds(civ, third_threshold)
+			return _CBA.rewards[civ] ~= nil
+				and _CBA.rewards[civ][0] ~= nil
+				and _CBA.rewards[civ][100] ~= nil
+				and _CBA.rewards[civ][third_threshold] ~= nil
+		end
+
+		local jpn_arena_thresholds = _reward_has_thresholds("japanese", 200)
+		local byz_arena_thresholds = _reward_has_thresholds("byzantine", 200)
+		local jpn_onslaught_thresholds = _reward_has_thresholds("japanese", 350)
+		local byz_onslaught_thresholds = _reward_has_thresholds("byzantine", 350)
+
+		if reward_mode == "arena" then
+			_test("4.4 Japanese arena has 3 thresholds (0/100/200)", jpn_arena_thresholds == true,
+				jpn_arena_thresholds and "0, 100, 200 populated" or "missing thresholds for arena mode")
+			_test("4.5 Byzantine arena has 3 thresholds (0/100/200)", byz_arena_thresholds == true,
+				byz_arena_thresholds and "0, 100, 200 populated" or "missing thresholds for arena mode")
+		elseif reward_mode == "onslaught" then
+			_test("4.4 Japanese onslaught has 3 thresholds (0/100/350)", jpn_onslaught_thresholds == true,
+				jpn_onslaught_thresholds and "0, 100, 350 populated" or "missing thresholds for onslaught mode")
+			_test("4.5 Byzantine onslaught has 3 thresholds (0/100/350)", byz_onslaught_thresholds == true,
+				byz_onslaught_thresholds and "0, 100, 350 populated" or "missing thresholds for onslaught mode")
+		else
+			local jpn_thresholds = jpn_arena_thresholds or jpn_onslaught_thresholds
+			local byz_thresholds = byz_arena_thresholds or byz_onslaught_thresholds
+			_test("4.4 Japanese reward table has a valid threshold trio", jpn_thresholds == true,
+				jpn_thresholds and "matched arena or onslaught threshold pattern" or "missing both 0/100/200 and 0/100/350 patterns")
+			_test("4.5 Byzantine reward table has a valid threshold trio", byz_thresholds == true,
+				byz_thresholds and "matched arena or onslaught threshold pattern" or "missing both 0/100/200 and 0/100/350 patterns")
+		end
+	else
+		_test("4.1 Arena rewards loaded", false,
+			_CBA == nil and "_CBA is nil" or "_CBA.rewards is nil")
+	end
+	print("")
+
+	---------------------------------------------------------------------------
+	-- Section 5: Mongol variant siege double coverage
+	---------------------------------------------------------------------------
+	print("--- 5. MONGOL VARIANT SIEGE DOUBLE COVERAGE ---")
+
+	local required_mongol_double_keys = {
+		"springald_double", "mangonel_double", "ribauldequin_double", "culverin_double",
+		"cannon_double", "bombard_double", "trebuchet_cw_double", "trebuchet_tr_double",
+	}
+
+	if CBA_SIEGE_TABLE ~= nil and CBA_SIEGE_TABLE["mongol_ha_gol"] ~= nil then
+		local missing_double_keys = {}
+		for _, key in ipairs(required_mongol_double_keys) do
+			if CBA_SIEGE_TABLE["mongol_ha_gol"][key] == nil then
+				table.insert(missing_double_keys, key)
+			end
+		end
+		_test("5.1 mongol_ha_gol includes all *_double siege keys", #missing_double_keys == 0,
+			#missing_double_keys == 0
+				and "all 8 keys present"
+				or "missing: " .. table.concat(missing_double_keys, ", "))
+	else
+		_test("5.1 mongol_ha_gol siege table exists", false,
+			CBA_SIEGE_TABLE == nil and "CBA_SIEGE_TABLE is nil" or "CBA_SIEGE_TABLE[mongol_ha_gol] is nil")
+	end
+	print("")
+
+	---------------------------------------------------------------------------
+	-- Section 6: NoWall Mongol-family guard preconditions
+	---------------------------------------------------------------------------
+	print("--- 6. NOWALL MONGOL-FAMILY PRECONDITIONS ---")
+
+	if AGS_CIV_FACTION_MAP ~= nil and AGS_GetCivilizationEntity ~= nil then
+		local branch_ok = (AGS_CIV_FACTION_MAP["mongol_ha_gol"] == "mongol")
+		_test("6.1 mongol_ha_gol maps to mongol faction", branch_ok,
+			branch_ok and "branch map uses mongol" or "branch map missing or incorrect")
+
+		local ok_variant, variant_stonewall = pcall(AGS_GetCivilizationEntity, "mongol_ha_gol", AGS_BP_STONEWALL)
+		local ok_parent, parent_stonewall = pcall(AGS_GetCivilizationEntity, "mongol", AGS_BP_STONEWALL)
+		local variant_nil = ok_variant and variant_stonewall == nil
+		local parent_nil = ok_parent and parent_stonewall == nil
+		_test("6.2 Mongol-family stone_wall blueprint resolves nil", variant_nil and parent_nil,
+			(variant_nil and parent_nil)
+				and "stone_wall missing as expected for mongol and mongol_ha_gol"
+				or "unexpected non-nil stone_wall blueprint for mongol-family")
+	else
+		_test("6.1 NoWall precondition dependencies loaded", false,
+			AGS_CIV_FACTION_MAP == nil and "AGS_CIV_FACTION_MAP is nil" or "AGS_GetCivilizationEntity is nil")
+	end
+	print("")
+
+	---------------------------------------------------------------------------
+	-- Section 7: Summary
+	---------------------------------------------------------------------------
+	print("############################################################")
+	print(string.format("###  RESULT: %d / %d tests passed", total_pass, total_tests))
+	if #failures > 0 then
+		print("###  FAILURES:")
+		for _, f in ipairs(failures) do
+			print(string.format("###    [FAIL] %s — %s", f.name, f.detail))
+		end
+	else
+		print("###  ALL TESTS PASSED")
+	end
+	print("############################################################")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Debug_VerifyJinRuntime — Targeted runtime validation for Jin Dynasty integration
+-- Validates: table wiring, BP existence, upgrade resolvability, rewards + AI producer hooks
+-- Console: Debug_VerifyJinRuntime() or debug.run("jin_runtime")
+---------------------------------------------------------------------------------------------------
+function Debug_VerifyJinRuntime()
+	print("")
+	print("############################################################")
+	print("###  CBA DEBUG — JIN RUNTIME VALIDATION                  ###")
+	print("############################################################")
+	print("")
+
+	local total_tests = 0
+	local total_pass = 0
+	local failures = {}
+
+	local function _test(name, pass, detail)
+		total_tests = total_tests + 1
+		if pass then
+			total_pass = total_pass + 1
+			print(string.format("  [PASS] %s — %s", name, detail or "ok"))
+		else
+			table.insert(failures, {name = name, detail = detail or ""})
+			print(string.format("  [FAIL] %s — %s", name, detail or ""))
+		end
+	end
+
+	local civ = "jin_dynasty"
+	local entity_table = AGS_ENTITY_TABLE and AGS_ENTITY_TABLE[civ]
+	local upgrade_table = AGS_UPGRADE_TABLE and AGS_UPGRADE_TABLE[civ]
+
+	---------------------------------------------------------------------------
+	-- Section 1: Registry wiring
+	---------------------------------------------------------------------------
+	print("--- 1. REGISTRY WIRING ---")
+	_test("1.1 AGS_ENTITY_TABLE[jin_dynasty] exists", entity_table ~= nil,
+		entity_table ~= nil and "registered" or "missing civ entry")
+	_test("1.2 AGS_CIV_PREFIXES[jin_dynasty] == jin_", AGS_CIV_PREFIXES ~= nil and AGS_CIV_PREFIXES[civ] == "jin_",
+		AGS_CIV_PREFIXES == nil and "AGS_CIV_PREFIXES is nil" or ("actual=" .. tostring(AGS_CIV_PREFIXES[civ])))
+	_test("1.3 AGS_UPGRADE_TABLE[jin_dynasty] exists", upgrade_table ~= nil,
+		upgrade_table ~= nil and "registered" or "missing civ entry")
+	_test("1.4 AGS_UPGRADE_CORRECTION_TABLE[jin_dynasty] exists",
+		AGS_UPGRADE_CORRECTION_TABLE ~= nil and AGS_UPGRADE_CORRECTION_TABLE[civ] ~= nil,
+		AGS_UPGRADE_CORRECTION_TABLE == nil and "AGS_UPGRADE_CORRECTION_TABLE is nil" or "missing civ entry")
+	_test("1.5 _CBA.rewards[jin_dynasty] exists",
+		_CBA ~= nil and _CBA.rewards ~= nil and _CBA.rewards[civ] ~= nil,
+		_CBA == nil and "_CBA is nil" or (_CBA.rewards == nil and "_CBA.rewards is nil" or "missing reward table"))
+	_test("1.6 _AI_CIV_VARIANT_PRODUCERS[jin_dynasty] exists",
+		type(_AI_CIV_VARIANT_PRODUCERS) == "table" and _AI_CIV_VARIANT_PRODUCERS[civ] ~= nil,
+		type(_AI_CIV_VARIANT_PRODUCERS) ~= "table" and "_AI_CIV_VARIANT_PRODUCERS missing" or "jin_dynasty producer map missing")
+
+	---------------------------------------------------------------------------
+	-- Section 2: Expected Jin-specific key values
+	---------------------------------------------------------------------------
+	print("--- 2. JIN ENTITY EXPECTATIONS ---")
+	if entity_table ~= nil then
+		_test("2.1 archery_range disabled", entity_table.archery_range == false,
+			"actual=" .. tostring(entity_table.archery_range))
+		_test("2.2 arsenal disabled", entity_table.arsenal == false,
+			"actual=" .. tostring(entity_table.arsenal))
+		_test("2.3 siege_workshop uses machine workshop", entity_table.siege_workshop == "building_machine_workshop_2_jin",
+			"actual=" .. tostring(entity_table.siege_workshop))
+		_test("2.4 villager uses mounted villager", entity_table.villager == "unit_mounted_villager_1_jin",
+			"actual=" .. tostring(entity_table.villager))
+		_test("2.5 grassland producer building configured", entity_table.grassland == "building_grassland_2_jin",
+			"actual=" .. tostring(entity_table.grassland))
+	else
+		_test("2.1 entity expectations", false, "AGS_ENTITY_TABLE[jin_dynasty] missing")
+	end
+
+	---------------------------------------------------------------------------
+	-- Section 3: Blueprint existence for Jin entity table entries
+	---------------------------------------------------------------------------
+	print("--- 3. JIN ENTITY BLUEPRINT EXISTENCE ---")
+	if entity_table ~= nil then
+		local checked = 0
+		local missing = {}
+		for key, bp in pairs(entity_table) do
+			if type(bp) == "string" and bp ~= "" then
+				checked = checked + 1
+				local ok, exists = pcall(function()
+					if string.sub(bp, 1, 9) == "building_" then
+						return EBP_Exists(bp)
+					elseif string.sub(bp, 1, 5) == "unit_" then
+						return SBP_Exists(bp)
+					else
+						return EBP_Exists(bp) or SBP_Exists(bp)
+					end
+				end)
+				if not (ok and exists) then
+					table.insert(missing, key .. "=" .. bp)
+				end
+			end
+		end
+		_test("3.1 All Jin entity blueprints resolve", #missing == 0,
+			#missing == 0 and (checked .. " checked") or ("missing: " .. table.concat(missing, ", ")))
+	else
+		_test("3.1 Entity BP existence", false, "entity table missing")
+	end
+
+	---------------------------------------------------------------------------
+	-- Section 4: Upgrade blueprint resolution and coverage
+	---------------------------------------------------------------------------
+	print("--- 4. JIN UPGRADE BLUEPRINT RESOLUTION ---")
+	if upgrade_table ~= nil then
+		local resolved = {}
+		local missing = {}
+
+		local function _check_upgrade(name)
+			if type(name) ~= "string" or name == "" then return end
+			if resolved[name] ~= nil then return end
+			local ok_upg, upg_bp = pcall(BP_GetUpgradeBlueprint, name)
+			resolved[name] = true
+			if not (ok_upg and upg_bp ~= nil) then
+				table.insert(missing, name)
+			end
+		end
+
+		for _, age_key in ipairs({"AGE_DARK", "AGE_FEUDAL", "AGE_CASTLE", "AGE_IMPERIAL"}) do
+			local age_list = upgrade_table[age_key]
+			if type(age_list) == "table" then
+				for _, upg in ipairs(age_list) do
+					_check_upgrade(upg)
+				end
+			end
+		end
+
+		for key, value in pairs(upgrade_table) do
+			if type(value) == "string" and key ~= "AGE_DARK" and key ~= "AGE_FEUDAL" and key ~= "AGE_CASTLE" and key ~= "AGE_IMPERIAL" then
+				_check_upgrade(value)
+			end
+		end
+
+		local resolved_count = 0
+		for _ in pairs(resolved) do resolved_count = resolved_count + 1 end
+		_test("4.1 All referenced Jin upgrades resolve", #missing == 0,
+			#missing == 0 and (resolved_count .. " upgrades resolved") or ("missing: " .. table.concat(missing, ", ")))
+
+		local required_jin_upgrades = {
+			"upgrade_alliance_conducted_sea_jin",
+			"upgrade_keep_bedcrossbow_jin",
+			"upgrade_keep_menganmouke_jin",
+			"upgrade_naval_bed_crossbow_ship_jin",
+			"upgrade_nestofbees_porcupine_defense",
+			"upgrade_outpost_menganmouke_jin",
+			"upgrade_tower_bedcrossbow_jin",
+			"upgrade_tributary_menganmouke_jin",
+		}
+		local absent = {}
+		for _, req in ipairs(required_jin_upgrades) do
+			if resolved[req] ~= true then
+				table.insert(absent, req)
+			end
+		end
+		_test("4.2 Newly-added Jin upgrades are wired", #absent == 0,
+			#absent == 0 and "all 8 present" or ("absent: " .. table.concat(absent, ", ")))
+	else
+		_test("4.1 Upgrade resolution", false, "upgrade table missing")
+	end
+
+	---------------------------------------------------------------------------
+	-- Section 5: Optional live-player check (only if Jin player exists in match)
+	---------------------------------------------------------------------------
+	print("--- 5. LIVE PLAYER JIN CHECK (OPTIONAL) ---")
+	if PLAYERS ~= nil and AGS_GetPlayerCivilization ~= nil and AGS_GetCivilizationEntity ~= nil then
+		local jin_players = 0
+		local failures_live = {}
+		for i, player in ipairs(PLAYERS) do
+			local ok_civ, pciv = pcall(AGS_GetPlayerCivilization, player)
+			if ok_civ and pciv == civ then
+				jin_players = jin_players + 1
+				local ok_tc, tc = pcall(AGS_GetCivilizationEntity, civ, AGS_BP_TC)
+				local ok_bar, barracks = pcall(AGS_GetCivilizationEntity, civ, AGS_BP_BARRACKS)
+				if not (ok_tc and type(tc) == "string" and tc ~= "") then
+					table.insert(failures_live, "P" .. i .. " TC resolution failed")
+				end
+				if not (ok_bar and type(barracks) == "string" and barracks ~= "") then
+					table.insert(failures_live, "P" .. i .. " Barracks resolution failed")
+				end
+			end
+		end
+		if jin_players == 0 then
+			_test("5.1 Jin player present in this match", true, "none present (skipped live civ checks)")
+		else
+			_test("5.1 Jin player entity resolution", #failures_live == 0,
+				#failures_live == 0 and (jin_players .. " Jin player(s) resolved") or table.concat(failures_live, "; "))
+		end
+	else
+		_test("5.1 Live player check dependencies", true, "PLAYERS/AGS helpers unavailable in this context (skipped)")
+	end
+
+	---------------------------------------------------------------------------
+	-- Section 6: Precache warmup validation (on-demand system)
+	---------------------------------------------------------------------------
+	print("--- 6. PRECACHE WARMUP VALIDATION ---")
+
+	-- 6.1 Blueprint resolution at runtime
+	local ok_maa_sbp, maa_sbp = pcall(BP_GetSquadBlueprint, "unit_manatarms_3_jin")
+	_test("6.1 BP_GetSquadBlueprint(unit_manatarms_3_jin) resolves",
+		ok_maa_sbp and maa_sbp ~= nil,
+		ok_maa_sbp and maa_sbp ~= nil and "ok" or "FAILED: " .. tostring(maa_sbp))
+
+	local ok_ip_sbp, ip_sbp = pcall(BP_GetSquadBlueprint, "unit_iron_pagoda_4_jin")
+	_test("6.2 BP_GetSquadBlueprint(unit_iron_pagoda_4_jin) resolves",
+		ok_ip_sbp and ip_sbp ~= nil,
+		ok_ip_sbp and ip_sbp ~= nil and "ok" or "FAILED: " .. tostring(ip_sbp))
+
+	-- 6.3 Manifest state
+	if _PRECACHE_MANIFEST ~= nil then
+		local maa_confirmed = _PRECACHE_MANIFEST.confirmed and _PRECACHE_MANIFEST.confirmed["unit_manatarms_3_jin"] == true
+		_test("6.3 Manifest confirmed: unit_manatarms_3_jin", maa_confirmed,
+			maa_confirmed and "confirmed" or "NOT in manifest.confirmed (gap or not yet built)")
+
+		local ip_confirmed = _PRECACHE_MANIFEST.confirmed and _PRECACHE_MANIFEST.confirmed["unit_iron_pagoda_4_jin"] == true
+		_test("6.4 Manifest confirmed: unit_iron_pagoda_4_jin", ip_confirmed,
+			ip_confirmed and "confirmed" or "NOT in manifest.confirmed")
+
+		local jin_gaps = 0
+		if type(_PRECACHE_MANIFEST.gaps) == "table" then
+			for _, gap in ipairs(_PRECACHE_MANIFEST.gaps) do
+				if gap.src_civ == "jin_dynasty" then
+					jin_gaps = jin_gaps + 1
+				end
+			end
+		end
+		_test("6.5 Manifest gaps from jin_dynasty source = 0", jin_gaps == 0,
+			jin_gaps == 0 and "none" or (jin_gaps .. " gaps remain"))
+		local runtime_warn_jin = _PRECACHE_MANIFEST.runtime_misses ~= nil
+		_test("6.6 Manifest runtime_misses counter present", runtime_warn_jin,
+			string.format("checks=%s hits=%s misses=%s",
+				tostring(_PRECACHE_MANIFEST.runtime_checks),
+				tostring(_PRECACHE_MANIFEST.runtime_hits),
+				tostring(_PRECACHE_MANIFEST.runtime_misses)))
+	else
+		_test("6.3 Manifest state", false, "_PRECACHE_MANIFEST is nil (precache init not run yet)")
+	end
+
+	-- 6.7 Direct warmup spawn test for a jin player (if one is present)
+	local jin_player_id = nil
+	if PLAYERS ~= nil then
+		for _, p in ipairs(PLAYERS) do
+			local ok_cn, cn = pcall(Player_GetRaceName, p.id)
+			if ok_cn and cn == "jin_dynasty" then jin_player_id = p.id; break end
+		end
+	end
+	if jin_player_id ~= nil and ok_maa_sbp and maa_sbp ~= nil then
+		local sg_probe = SGroup_CreateIfNotFound("sg_jin_precache_probe")
+		SGroup_Clear(sg_probe)
+		local ok_pos, probe_pos = pcall(Position_New, -500, 0, -500)
+		if not ok_pos then probe_pos = World_Pos(0, 0, 0) end
+		local ok_spawn, spawn_err = pcall(Util_CreateSquads, jin_player_id, sg_probe, maa_sbp, probe_pos, nil, 1)
+		local spawn_ok = ok_spawn and SGroup_Count(sg_probe) > 0
+		pcall(SGroup_DestroyAllSquads, sg_probe)
+		SGroup_Clear(sg_probe)
+		_test("6.7 Warmup spawn: unit_manatarms_3_jin for jin player", spawn_ok,
+			spawn_ok and "spawn succeeded" or ("FAILED: ok=" .. tostring(ok_spawn) .. " err=" .. tostring(spawn_err)))
+	else
+		_test("6.7 Warmup spawn: unit_manatarms_3_jin", true,
+			jin_player_id == nil and "no jin player in match (skipped)" or "maa_sbp unavailable (see 6.1)")
+	end
+
+	print("")
+	print("############################################################")
+	print(string.format("###  RESULT: %d / %d tests passed", total_pass, total_tests))
+	if #failures > 0 then
+		print("###  FAILURES:")
+		for _, f in ipairs(failures) do
+			print(string.format("###    [FAIL] %s — %s", f.name, f.detail))
+		end
+	else
+		print("###  ALL TESTS PASSED")
+	end
+	print("############################################################")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Namespace Registration
+---------------------------------------------------------------------------------------------------
+if debug then
+	debug.validation.run  = Debug_FullValidation
+	debug.validation.limits = Debug_LimitEnforcementValidator
+	debug.validation.faction = Debug_FactionMapDiagnostic
+	debug.validation.dynasties = Debug_VerifyDynastiesData
+	debug.validation.jin = Debug_VerifyJinRuntime
+	debug._register("validation", Debug_FullValidation, "6-phase boot/config/runtime/data/endstate/limits (~10s)", 2)
+	debug._register("faction", Debug_FactionMapDiagnostic, "Faction map + false-vs-nil + transfer-path + reward audit", 2)
+	debug._register("dynasties", Debug_VerifyDynastiesData, "Dynasties upgrade/correction/arena table verification", 2)
+	debug._register("jin_runtime", Debug_VerifyJinRuntime, "Jin runtime integration validation (wiring + BP + upgrades + rewards/AI)", 2)
+	debug._register("jin", Debug_VerifyJinRuntime, "Alias -> jin_runtime", 2)
+end

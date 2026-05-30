@@ -1,0 +1,1971 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — Read-Only State Inspectors
+-- Console commands that dump current game state without modification.
+--
+-- Branch: onslaught-v3.3
+-- State tables inspected: _buildingLimit, _religious, _wonder, _mod, _CBA, _autoage,
+--   AGS_GLOBAL_SETTINGS (settings read from ags_global_settings.scar)
+---------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------
+-- Building Limit State
+---------------------------------------------------------------------------------------------------
+
+function Debug_GetBuildingLimitState()
+	print("")
+	print("[CBA_DEBUG] Building Limit State:")
+	if _buildingLimit == nil then
+		print("  _buildingLimit module not loaded")
+		return
+	end
+	local max_bld = AGS_GLOBAL_SETTINGS.MaximumProductionBuildings or "nil"
+	local max_ws = AGS_GLOBAL_SETTINGS.MaximumSiegeWorkshop or "nil"
+	print(string.format("  Max production buildings: %s (AGS_GLOBAL_SETTINGS.MaximumProductionBuildings)",
+		tostring(max_bld)))
+	print(string.format("  Max siege workshops: %s (AGS_GLOBAL_SETTINGS.MaximumSiegeWorkshop)",
+		tostring(max_ws)))
+	print("")
+	for i, player in ipairs(PLAYERS) do
+		local bld = player.obj_buildingLimit_count or "nil"
+		local ws = player.obj_buildingLimit_workshop_count or "nil"
+		local op = player.obj_buildingLimit_outpost_count or "nil"
+		local civ = _Debug_GetPlayerCiv(player)
+		local elim = ""
+		local ok, e = pcall(Core_IsPlayerEliminated, player.id)
+		if ok and e then elim = " [ELIMINATED]" end
+		-- English starter keep tracking
+		local sk_str = ""
+		local branch = AGS_CIV_PARENT_MAP and (AGS_CIV_PARENT_MAP[civ] or civ) or civ
+		if branch == "english" then
+			local sk_id = player.obj_buildingLimit_english_start_keep_id
+			local sk_alive = "?"
+			if sk_id ~= nil then
+				local ok2, alive = pcall(Entity_IsAlive, sk_id)
+				if ok2 then sk_alive = tostring(alive) else sk_alive = "invalid" end
+			end
+			sk_str = string.format(" starter_keep=%s(alive=%s)", tostring(sk_id), sk_alive)
+		end
+		print(string.format("  P%d (%s): bld=%s ws=%s outpost=%s%s%s",
+			i, civ, tostring(bld), tostring(ws), tostring(op), sk_str, elim))
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Siege Limit State
+---------------------------------------------------------------------------------------------------
+
+function Debug_GetSiegeLimitState()
+	print("")
+	print("[CBA_DEBUG] Siege Limit State:")
+	local max_siege = AGS_GLOBAL_SETTINGS.MaximumMedicPopulation or "nil"
+	print(string.format("  Siege limit setting: %s (AGS_GLOBAL_SETTINGS.MaximumMedicPopulation)",
+		tostring(max_siege)))
+	print(string.format("  NoSiege: %s", tostring(AGS_GLOBAL_SETTINGS.NoSiege)))
+	print(string.format("  RAM_LIMIT_MAX: %s", tostring(RAM_LIMIT_MAX)))
+	print(string.format("  SIEGE_TOWER_LIMIT_MAX: %s", tostring(SIEGE_TOWER_LIMIT_MAX)))
+	print("")
+	for i, player in ipairs(PLAYERS) do
+		local siege = player.siegeLimit_count or "nil"
+		local ram = player.ramLimit_count or "nil"
+		local tower = player.siegeTowerLimit_count or "nil"
+		local pending_ram = player.ramLimit_pending or 0
+		local pending_st = player.siegeTowerLimit_pending or 0
+		local civ = _Debug_GetPlayerCiv(player)
+		-- Siege Engineers unlocked state
+		local has_siege_eng = "N/A"
+		local ok_up, up_result = pcall(function()
+			return Player_HasUpgrade(player.id, AGS_GetCivilizationUpgrade(civ, AGS_UP_SIEGE_ENGINEERS))
+		end)
+		if ok_up then has_siege_eng = tostring(up_result) end
+		-- English age gate
+		local age_gate = ""
+		if civ == "english" then
+			local ok_age, age = pcall(Player_GetCurrentAge, player.id)
+			if ok_age then
+				age_gate = string.format(" age=%d pre_castle=%s", age, tostring(age < AGS_GS_AGE_CASTLE))
+			end
+		end
+		print(string.format("  P%d (%s): siege=%s ram=%s tower=%s pendingRam=%d pendingST=%d siege_eng=%s%s",
+			i, civ, tostring(siege), tostring(ram), tostring(tower),
+			pending_ram, pending_st, has_siege_eng, age_gate))
+	end
+end
+
+-- Ram/Siege Tower Limit detailed state dump
+function Debug_RamSiegeTowerLimitState()
+	print("")
+	print("[CBA_DEBUG] Ram/Siege Tower Limit State:")
+	if type(CBA_Options_GetRamLimitMax) ~= "function" or type(CBA_Options_GetSiegeTowerLimitMax) ~= "function" then
+		print("  ERROR: Ram/ST accessor functions not loaded. Ensure cba_options.scar exports them.")
+		return
+	end
+	print(string.format("  RAM_LIMIT_MAX=%d  SIEGE_TOWER_LIMIT_MAX=%d",
+		CBA_Options_GetRamLimitMax(), CBA_Options_GetSiegeTowerLimitMax()))
+	print("")
+	for i, player in ipairs(PLAYERS) do
+		local civ = _Debug_GetPlayerCiv(player)
+		local ok_gate, gate = pcall(CBA_Options_SiegeLimit_GetGateTotals, player)
+		if ok_gate and gate then
+			print(string.format("  P%d (%s): ram_total=%d/%d  st_total=%d/%d  (live_ram=%s queued_ram=%s pending_ram=%s | live_st=%s queued_st=%s pending_st=%s)",
+				i, civ,
+				gate.ram_total, gate.ram_cap,
+				gate.st_total, gate.st_cap,
+				tostring(player.ramLimit_count or 0),
+				tostring(CBA_Options_RamLimit_GetQueuedCount(player)),
+				tostring(player.ramLimit_pending or 0),
+				tostring(player.siegeTowerLimit_count or 0),
+				tostring(CBA_Options_SiegeTowerLimit_GetQueuedCount(player)),
+				tostring(player.siegeTowerLimit_pending or 0)
+			))
+		else
+			print(string.format("  P%d (%s): gate totals unavailable: %s", i, civ, tostring(gate)))
+		end
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Team Balance Cap State — all 6 per-player effective limits vs global base
+---------------------------------------------------------------------------------------------------
+
+function Debug_TeamBalanceCapState()
+	print("")
+	print("[CBA_DEBUG] Team Balance Cap State:")
+	print(string.format("  MaintainTeamBalance=%s  (NONE=0 POP=1 RES=2 FULL=3)",
+		tostring(AGS_GLOBAL_SETTINGS.MaintainTeamBalance)))
+	print(string.format("  Bases: prod=%s  siege=%s  ram=%s  st=%s  ws=%s  outpost=20",
+		tostring(AGS_GLOBAL_SETTINGS.MaximumProductionBuildings),
+		tostring(AGS_GLOBAL_SETTINGS.MaximumMedicPopulation),
+		tostring(RAM_LIMIT_MAX),
+		tostring(SIEGE_TOWER_LIMIT_MAX),
+		tostring(AGS_GLOBAL_SETTINGS.MaximumSiegeWorkshop)))
+	print("")
+	for i, player in ipairs(PLAYERS) do
+		local civ = _Debug_GetPlayerCiv(player)
+		local ok_elim, elim = pcall(Core_IsPlayerEliminated, player.id)
+		local elim_str = (ok_elim and elim) and " [ELIMINATED]" or ""
+		local eff_prod  = type(CBA_Options_GetPlayerProdLimit) == "function" and CBA_Options_GetPlayerProdLimit(player) or "?"
+		local eff_siege = type(CBA_Options_GetPlayerSiegeLimit) == "function" and CBA_Options_GetPlayerSiegeLimit(player) or "?"
+		local eff_ram   = type(CBA_Options_GetPlayerRamLimit) == "function" and CBA_Options_GetPlayerRamLimit(player) or "?"
+		local eff_st    = type(CBA_Options_GetPlayerSiegeTowerLimit) == "function" and CBA_Options_GetPlayerSiegeTowerLimit(player) or "?"
+		local eff_ws    = type(CBA_Options_GetPlayerWorkshopLimit) == "function" and CBA_Options_GetPlayerWorkshopLimit(player) or "?"
+		local eff_op    = type(CBA_Options_GetPlayerOutpostLimit) == "function" and CBA_Options_GetPlayerOutpostLimit(player) or "?"
+		print(string.format("  P%d (%s): prod=%s  siege=%s  ram=%s  st=%s  ws=%s  outpost=%s%s",
+			i, civ,
+			tostring(eff_prod), tostring(eff_siege),
+			tostring(eff_ram),  tostring(eff_st),
+			tostring(eff_ws),   tostring(eff_op),
+			elim_str))
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Keep Ownership Map
+---------------------------------------------------------------------------------------------------
+
+function Debug_GetKeepOwnershipMap()
+	print("")
+	print("[CBA_DEBUG] Keep Ownership Map:")
+	for i, player in ipairs(PLAYERS) do
+		if player.keep and player.keep.entity then
+			local alive = "?"
+			local ok_alive, a = pcall(Entity_IsAlive, player.keep.entity)
+			if ok_alive then alive = tostring(a) end
+			local owner = "?"
+			local ok_own, o = pcall(Entity_GetPlayerOwner, player.keep.entity)
+			if ok_own then
+				for j, p in ipairs(PLAYERS) do
+					if p.id == o then owner = "P" .. j break end
+				end
+			end
+			print(string.format("  P%d: alive=%s owner=%s", i, alive, owner))
+		else
+			print(string.format("  P%d: NO KEEP", i))
+		end
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Villager State
+---------------------------------------------------------------------------------------------------
+
+function Debug_GetVillagerState()
+	print("")
+	print("[CBA_DEBUG] Villager State:")
+	for i, player in ipairs(PLAYERS) do
+		local count = 0
+		local ok, eg = pcall(function()
+			local eg = Player_GetEntities(player.id)
+			EGroup_Filter(eg, "villager", FILTER_KEEP)
+			return eg
+		end)
+		if ok and eg then
+			local ok2, c = pcall(EGroup_Count, eg)
+			if ok2 then count = c end
+		end
+		local civ = _Debug_GetPlayerCiv(player)
+		print(string.format("  P%d (%s): villagers=%d", i, civ, count))
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Option Parse Results (from ags_global_settings.scar + cba_options.scar + cba_economy.scar)
+---------------------------------------------------------------------------------------------------
+
+function Debug_GetOptionParseResults()
+	print("")
+	print("[CBA_DEBUG] Option Parse Results:")
+	if _mod.options == nil then
+		print("  _mod.options is nil")
+	end
+	print("  _mod fields:")
+	print(string.format("    pop_cap = %s", tostring(_mod.pop_cap)))
+	print(string.format("    pop_start = %s", tostring(_mod.pop_start)))
+	print(string.format("    pop_interval = %s", tostring(_mod.pop_interval)))
+	print("")
+	print("  AGS_GLOBAL_SETTINGS:")
+	local keys = {
+		"MaximumPopulation", "MinimumPopulation", "AutoAge", "CBA_Rewards",
+		"NoSiege", "NoWall", "NoDock", "EliminatedLoseKeep",
+		"MaximumProductionBuildings", "MaximumSiegeWorkshop",
+		"StartingAge", "EndingAge", "StartingVillagers", "MaintainTeamBalance",
+	}
+	for _, k in ipairs(keys) do
+		print(string.format("    %s = %s", k, tostring(AGS_GLOBAL_SETTINGS[k])))
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Post-Defeat State
+---------------------------------------------------------------------------------------------------
+
+function Debug_GetPostDefeatState()
+	print("")
+	print("[CBA_DEBUG] Post-Defeat State:")
+	for i, player in ipairs(PLAYERS) do
+		local ok, elim = pcall(Core_IsPlayerEliminated, player.id)
+		local status = (ok and elim) and "ELIMINATED" or "ACTIVE"
+		local entities = 0
+		local ok2, eg = pcall(Player_GetEntities, player.id)
+		if ok2 and eg then
+			local ok3, c = pcall(EGroup_Count, eg)
+			if ok3 then entities = c end
+		end
+		local civ = _Debug_GetPlayerCiv(player)
+		print(string.format("  P%d (%s): %s entities=%d", i, civ, status, entities))
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Religious State (from cba_religious.scar)
+---------------------------------------------------------------------------------------------------
+
+function Debug_GetReligiousState()
+	print("")
+	print("[CBA_DEBUG] Religious State (cba_religious.scar):")
+	if _religious == nil then
+		print("  _religious module not loaded")
+		return
+	end
+	print(string.format("  time_victory = %s", tostring(_religious.time_victory)))
+	print(string.format("  conversion_radius = %s", tostring(_religious.conversion_radius)))
+	print(string.format("  update_interval = %s", tostring(_religious.update_interval)))
+	if _religious.sites then
+		local count = 0
+		for _, site in pairs(_religious.sites) do
+			count = count + 1
+			print(string.format("  Site %d: progress=%s player_last_capturing=%s",
+				count, tostring(site.progress), tostring(site.player_last_capturing)))
+		end
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Wonder State (from wonder.scar)
+---------------------------------------------------------------------------------------------------
+
+function Debug_GetWonderState()
+	print("")
+	print("[CBA_DEBUG] Wonder State (wonder.scar):")
+	if _wonder == nil then
+		print("  _wonder module not loaded")
+		return
+	end
+	print(string.format("  time_victory = %s", tostring(_wonder.time_victory)))
+	print(string.format("  FOWRadius = %s", tostring(_wonder.FOWRadius)))
+	for i, player in ipairs(PLAYERS) do
+		if player._wonder then
+			print(string.format("  P%d: wonder_eid=%s timer=%s",
+				i, tostring(player._wonder.entity_id),
+				tostring(player._wonder.timer_victory_deterministic)))
+		end
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Auto-Age Module State (from cba_auto_age.scar)
+---------------------------------------------------------------------------------------------------
+
+function Debug_GetAutoAgeState()
+	print("")
+	print("[CBA_DEBUG] Auto-Age State (cba_auto_age.scar):")
+	if _autoage == nil then
+		print("  _autoage module not loaded")
+		return
+	end
+	print(string.format("  module = %s", tostring(_autoage.module)))
+	print(string.format("  AGS_GLOBAL_SETTINGS.AutoAge = %s", tostring(AGS_GLOBAL_SETTINGS.AutoAge)))
+	for i, player in ipairs(PLAYERS) do
+		local age = 0
+		local ok, a = pcall(Player_GetCurrentAge, player.id)
+		if ok then age = a end
+		print(string.format("  P%d: current_age=%d build_count=%s",
+			i, age, tostring(player.obj_build_count)))
+	end
+end
+
+function Debug_CheckUpgradeBlueprint(upgrade_name)
+	print("")
+	print("[CBA_DEBUG] Upgrade Blueprint Check:")
+	if type(upgrade_name) ~= "string" or upgrade_name == "" then
+		print("  FAIL: provide a non-empty upgrade blueprint name")
+		return false
+	end
+
+	local ok_bp, ubp = pcall(BP_GetUpgradeBlueprint, upgrade_name)
+	if not ok_bp then
+		print(string.format("  MISSING: %s", upgrade_name))
+		return false
+	end
+
+	if ubp == nil then
+		print(string.format("  MISSING: %s", upgrade_name))
+		return false
+	end
+
+	print(string.format("  FOUND: %s", upgrade_name))
+		return true
+end
+
+function Debug_AutoAge_CheckSpecialUpgradeIds()
+	print("")
+	print("[CBA_DEBUG] Auto-Age Special Upgrade ID Check:")
+	if _AUTOAGE_SPECIAL_UPGRADES == nil then
+		print("  FAIL: _AUTOAGE_SPECIAL_UPGRADES is nil")
+		return false
+	end
+
+	local total = 0
+	local missing = 0
+	for civ_name, age_map in pairs(_AUTOAGE_SPECIAL_UPGRADES) do
+		print(string.format("  %s:", civ_name))
+		for age_name, upgrade_names in pairs(age_map) do
+			for _, upgrade_name in ipairs(upgrade_names) do
+				total = total + 1
+				local ok_bp, ubp = pcall(BP_GetUpgradeBlueprint, upgrade_name)
+				local exists = ok_bp and ubp ~= nil
+				if not exists then
+					missing = missing + 1
+				end
+				print(string.format("    %-8s %s %s",
+					age_name,
+					exists and "OK     " or "MISSING",
+					upgrade_name))
+			end
+		end
+	end
+
+	print(string.format("  Summary: %d checked, %d missing", total, missing))
+	return missing == 0
+end
+
+function Debug_KeepCap_CheckSpecialAgeAbilityResolution()
+	print("")
+	print("[CBA_DEBUG] Keep-Cap Special Age Ability Resolution:")
+	if _AUTOAGE_SPECIAL_UPGRADES == nil then
+		print("  FAIL: _AUTOAGE_SPECIAL_UPGRADES is nil")
+		return false
+	end
+
+	local unsupported_reason = {
+		templar = "upgrade_driven_commandery",
+		mongol_ha_gol = "upgrade_driven_tent",
+	}
+
+	local pbg_map = {
+		upgrade_age_dark_com_1_tem = 5000201,
+		upgrade_age_dark_com_2_tem = 5000202,
+		upgrade_age_dark_com_3_tem = 5000203,
+		upgrade_age_feudal_com_1_tem = 5000206,
+		upgrade_age_feudal_com_2_tem = 5000207,
+		upgrade_age_feudal_com_3_tem = 5000208,
+		upgrade_age_castle_com_1_tem = 5000210,
+		upgrade_age_castle_com_2_tem = 5000211,
+		upgrade_age_castle_com_3_tem = 5000212,
+		upgrade_tent_dark_1_khan_mon_ha_gol = 9001446,
+		upgrade_tent_dark_2_cart_mon_ha_gol = 9001447,
+		upgrade_tent_feudal_1_pasture_mon_ha_gol = 9001610,
+		upgrade_tent_feudal_2_relics_mon_ha_gol = 9001611,
+		upgrade_tent_castle_1_tribute_mon_ha_gol = 9001612,
+		upgrade_tent_castle_2_batch_production_mon_ha_gol = 9001613,
+	}
+
+	local total = 0
+	local missing_upg_bp = 0
+	local ability_by_pbg = 0
+	local ability_by_name = 0
+	local unresolved = 0
+	local unsupported = 0
+
+	for civ_name, age_map in pairs(_AUTOAGE_SPECIAL_UPGRADES) do
+		print(string.format("  %s:", civ_name))
+		local civ_reason = unsupported_reason[civ_name]
+		if civ_reason ~= nil then
+			print(string.format("    ability_injection_supported=NO reason=%s official_path=GE_UpgradeComplete(age_up_upgrade)", civ_reason))
+		end
+		for age_name, upgrade_names in pairs(age_map) do
+			for _, upgrade_name in ipairs(upgrade_names) do
+				total = total + 1
+
+				local ok_upg, upg_bp = pcall(BP_GetUpgradeBlueprint, upgrade_name)
+				local has_upg = ok_upg and upg_bp ~= nil
+				if not has_upg then
+					missing_upg_bp = missing_upg_bp + 1
+				end
+
+				local resolved = false
+				local resolved_tag = ""
+
+				if civ_reason ~= nil then
+					unsupported = unsupported + 1
+					resolved_tag = "N/A(unsupported)"
+				else
+					local pbg = pbg_map[upgrade_name]
+					if pbg ~= nil then
+						local ok_abp_pbg, abp_pbg = pcall(BP_GetAbilityBlueprintByPbgID, pbg)
+						if ok_abp_pbg and abp_pbg ~= nil then
+							resolved = true
+							resolved_tag = string.format("pbg:%d", pbg)
+							ability_by_pbg = ability_by_pbg + 1
+						end
+					end
+
+					if not resolved then
+						local stripped = string.gsub(upgrade_name, "^upgrade_", "")
+						local name_candidates = {
+							upgrade_name,
+							stripped,
+							"research_" .. upgrade_name,
+							"research_" .. stripped,
+							"ability_" .. upgrade_name,
+							"ability_" .. stripped,
+							"age_up_" .. upgrade_name,
+							"age_up_" .. stripped,
+						}
+
+						for _, candidate in ipairs(name_candidates) do
+							local ok_abp_name, abp_name = pcall(BP_GetAbilityBlueprint, candidate)
+							if ok_abp_name and abp_name ~= nil then
+								resolved = true
+								resolved_tag = string.format("name:%s", candidate)
+								ability_by_name = ability_by_name + 1
+								break
+							end
+						end
+					end
+
+					if not resolved then
+						unresolved = unresolved + 1
+						resolved_tag = "UNRESOLVED"
+					end
+				end
+
+				print(string.format("    %-8s upg=%s resolved=%s",
+					age_name,
+					has_upg and "OK" or "MISSING",
+					resolved_tag))
+			end
+		end
+	end
+
+	print(string.format("  Summary: total=%d missing_upg_bp=%d unsupported=%d ability_by_pbg=%d ability_by_name=%d unresolved=%d",
+		total, missing_upg_bp, unsupported, ability_by_pbg, ability_by_name, unresolved))
+
+	return unresolved == 0
+end
+
+---------------------------------------------------------------------------------------------------
+-- English Starter Keep Tracking State
+-- Console: Debug_GetStarterKeepState()
+-- Shows tracked starter keep entity, alive state, current owner, live keep count,
+-- and counter consistency for each English/Lancaster player.
+---------------------------------------------------------------------------------------------------
+
+function Debug_GetStarterKeepState()
+	print("")
+	print("[CBA_DEBUG] Starter Keep State:")
+	
+	local found_any = false
+	for i, player in ipairs(PLAYERS) do
+		local civ = _Debug_GetPlayerCiv(player)
+		local branch = AGS_CIV_PARENT_MAP and (AGS_CIV_PARENT_MAP[civ] or civ) or civ
+		if branch == "english" then
+			found_any = true
+			local sk_id = player.obj_buildingLimit_english_start_keep_id
+			local elim = ""
+			local ok_e, e = pcall(Core_IsPlayerEliminated, player.id)
+			if ok_e and e then elim = " [ELIMINATED]" end
+			print(string.format("  P%d (%s):%s", i, civ, elim))
+			
+			if sk_id == nil then
+				print("      starter_keep = nil (no pre-existing keep found at startup)")
+			else
+				local alive_str = "?"
+				local ok, alive = pcall(Entity_IsAlive, sk_id)
+				if ok then alive_str = tostring(alive) else alive_str = "invalid handle" end
+				print(string.format("      starter_keep = %s (alive=%s)", tostring(sk_id), alive_str))
+				
+				if ok and alive then
+					local ok2, owner = pcall(Entity_GetPlayerOwner, sk_id)
+					if ok2 and owner ~= nil then
+						local ok3, owner_idx = pcall(World_GetPlayerIndex, owner)
+						if ok3 then
+							local match = (owner_idx == i) and "MATCH" or "OWNER_MISMATCH"
+							print(string.format("      current_owner = P%d (%s)", owner_idx, match))
+						end
+					end
+				end
+			end
+			
+			local bld = player.obj_buildingLimit_count or "nil"
+			local ws = player.obj_buildingLimit_workshop_count or "nil"
+			print(string.format("      counters: bld=%s ws=%s", tostring(bld), tostring(ws)))
+			
+			-- Live entity scan: count current scar_keep entities
+			local ok_eg, eg_scan = pcall(Player_GetEntities, player.id)
+			if ok_eg and eg_scan then
+				local keep_count = 0
+				local keep_ids = {}
+				EGroup_ForEach(eg_scan, function(gid, idx, eid)
+					if Entity_IsOfType(eid, "scar_keep") then
+						keep_count = keep_count + 1
+						table.insert(keep_ids, tostring(eid))
+					end
+				end)
+				EGroup_Destroy(eg_scan)
+				print(string.format("      live_keeps = %d [%s]", keep_count, table.concat(keep_ids, ", ")))
+				
+				if sk_id ~= nil and keep_count == 0 then
+					print("      !! WARNING: starter keep was tracked but no keeps exist now")
+				end
+			end
+			if type(bld) == "number" and bld < 0 then
+				print("      !! WARNING: production count NEGATIVE")
+			end
+		end
+	end
+	
+	if not found_any then
+		print("  No English/Lancaster players in this match.")
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Full Siege Limit Diagnostic Dump
+-- Single-call comprehensive dump of ALL siege-related state to scarlog.
+-- Performs a fresh recount per-player and compares against stored values to detect drift.
+-- Console: Debug_SiegeLimitFullDump()
+---------------------------------------------------------------------------------------------------
+
+function Debug_SiegeLimitFullDump()
+	print("")
+	print("================================================================================")
+	print("[SIEGE_DUMP] Full Siege Limit Diagnostic — " .. tostring(World_GetGameTime()))
+	print("================================================================================")
+
+	-- Global settings
+	local max_siege = AGS_GLOBAL_SETTINGS.MaximumMedicPopulation or 0
+	print(string.format("[SIEGE_DUMP] Settings: MaxSiege=%s NoSiege=%s RAM_MAX=%s ST_MAX=%s",
+		tostring(max_siege),
+		tostring(AGS_GLOBAL_SETTINGS.NoSiege),
+		tostring(RAM_LIMIT_MAX),
+		tostring(SIEGE_TOWER_LIMIT_MAX)))
+	print("")
+
+	for i, player in ipairs(PLAYERS) do
+		local civ = _Debug_GetPlayerCiv(player)
+		local branch = AGS_CIV_PARENT_MAP and (AGS_CIV_PARENT_MAP[civ] or civ) or civ
+		local ok_elim, elim = pcall(Core_IsPlayerEliminated, player.id)
+		if ok_elim and elim then
+			print(string.format("[SIEGE_DUMP] P%d (%s) [ELIMINATED] — skipped", i, civ))
+		else
+			print(string.format("[SIEGE_DUMP] P%d (%s) branch=%s", i, civ, branch))
+
+			-- Age
+			local ok_age, age = pcall(Player_GetCurrentAge, player.id)
+			local age_str = ok_age and tostring(age) or "ERR"
+
+			-- Siege Engineers
+			local has_eng = false
+			if type(CBA_Options_HasSiegeEngineers) == "function" then
+				local ok_se, se = pcall(CBA_Options_HasSiegeEngineers, player)
+				has_eng = ok_se and se
+			end
+
+			print(string.format("  age=%s  siege_engineers=%s", age_str, tostring(has_eng)))
+
+			-- Stored counters (before recount)
+			local stored_siege = player.siegeLimit_count or 0
+			local stored_ram = player.ramLimit_count or 0
+			local stored_tower = player.siegeTowerLimit_count or 0
+			local pending_ram = player.ramLimit_pending or 0
+			local pending_st = player.siegeTowerLimit_pending or 0
+
+			print(string.format("  STORED:  siege=%d  ram=%d  tower=%d  pendingRam=%d  pendingST=%d",
+				stored_siege, stored_ram, stored_tower, pending_ram, pending_st))
+
+			-- Fresh recount
+			local fresh_siege = 0
+			local fresh_ram = 0
+			local fresh_tower = 0
+			if type(CBA_Options_SiegeLimit_Recount) == "function" then
+				local ok1, v1 = pcall(CBA_Options_SiegeLimit_Recount, player)
+				if ok1 then fresh_siege = v1 or player.siegeLimit_count or 0 end
+			end
+			if type(CBA_Options_RamLimit_Recount) == "function" then
+				local ok2, v2 = pcall(CBA_Options_RamLimit_Recount, player)
+				if ok2 then fresh_ram = v2 or player.ramLimit_count or 0 end
+			end
+			if type(CBA_Options_SiegeTowerLimit_Recount) == "function" then
+				local ok3, v3 = pcall(CBA_Options_SiegeTowerLimit_Recount, player)
+				if ok3 then fresh_tower = v3 or player.siegeTowerLimit_count or 0 end
+			end
+
+			print(string.format("  FRESH:   siege=%d  ram=%d  tower=%d",
+				fresh_siege, fresh_ram, fresh_tower))
+
+			-- Drift detection
+			if stored_siege ~= fresh_siege then
+				print(string.format("  !! DRIFT: siege stored=%d fresh=%d", stored_siege, fresh_siege))
+			end
+			if stored_ram ~= fresh_ram then
+				print(string.format("  !! DRIFT: ram stored=%d fresh=%d", stored_ram, fresh_ram))
+			end
+			if stored_tower ~= fresh_tower then
+				print(string.format("  !! DRIFT: tower stored=%d fresh=%d", stored_tower, fresh_tower))
+			end
+
+			-- Effective totals vs caps
+			local ram_effective = fresh_ram + pending_ram
+			local st_effective = fresh_tower + pending_st
+			local ram_locked = ram_effective >= RAM_LIMIT_MAX
+			local st_locked = st_effective >= SIEGE_TOWER_LIMIT_MAX
+			local siege_locked = fresh_siege >= max_siege
+
+			print(string.format("  EFFECTIVE: ram=%d/%d(%s)  tower=%d/%d(%s)  siege=%d/%d(%s)",
+				ram_effective, RAM_LIMIT_MAX, ram_locked and "LOCKED" or "open",
+				st_effective, SIEGE_TOWER_LIMIT_MAX, st_locked and "LOCKED" or "open",
+				fresh_siege, max_siege, siege_locked and "LOCKED" or "open"))
+
+			-- Live squad enumeration (type tags)
+			local sg_all = Player_GetSquads(player.id)
+			local sg_count = SGroup_Count(sg_all)
+			local type_counts = {}
+			local ram_squads = 0
+			local tower_squads = 0
+			local siege_squads = 0
+			for idx = 1, sg_count do
+				local squad = SGroup_GetSquadAt(sg_all, idx)
+				if squad ~= nil then
+					local is_siege = Squad_IsOfType(squad, "siege")
+					local is_ram = Squad_IsOfType(squad, "ram") or Squad_IsOfType(squad, "scar_ram") or Squad_IsOfType(squad, "fire_ram") or Squad_IsOfType(squad, "scar_fire_ram")
+					local is_tower = Squad_IsOfType(squad, "siege_tower")
+					local is_ram_tower = Squad_IsOfType(squad, "ram_tower")
+					if is_siege or is_ram or is_tower then
+						-- Build tag string
+						local tags = {}
+						if is_siege then table.insert(tags, "siege") end
+						if Squad_IsOfType(squad, "ram") then table.insert(tags, "ram") end
+						if Squad_IsOfType(squad, "scar_ram") then table.insert(tags, "scar_ram") end
+						if Squad_IsOfType(squad, "fire_ram") then table.insert(tags, "fire_ram") end
+						if Squad_IsOfType(squad, "scar_fire_ram") then table.insert(tags, "scar_fire_ram") end
+						if is_ram_tower then table.insert(tags, "ram_tower") end
+						if is_tower then table.insert(tags, "siege_tower") end
+						if Squad_IsOfType(squad, "scar_springald") then table.insert(tags, "scar_springald") end
+						if Squad_IsOfType(squad, "scar_mangonel") then table.insert(tags, "scar_mangonel") end
+						if Squad_IsOfType(squad, "scar_bombard") then table.insert(tags, "scar_bombard") end
+						if Squad_IsOfType(squad, "great_bombard") then table.insert(tags, "great_bombard") end
+						if Squad_IsOfType(squad, "scar_trebuchet_traction") then table.insert(tags, "scar_trebuchet_traction") end
+						if Squad_IsOfType(squad, "scar_trebuchet_cw") then table.insert(tags, "scar_trebuchet_cw") end
+						if Squad_IsOfType(squad, "scar_culverin") then table.insert(tags, "scar_culverin") end
+						if Squad_IsOfType(squad, "scar_cannon") then table.insert(tags, "scar_cannon") end
+						if Squad_IsOfType(squad, "nest_of_bees") then table.insert(tags, "nest_of_bees") end
+						if Squad_IsOfType(squad, "scar_ribauldequin") then table.insert(tags, "scar_ribauldequin") end
+						local tag_str = table.concat(tags, "+")
+						type_counts[tag_str] = (type_counts[tag_str] or 0) + 1
+
+						if is_ram and not is_ram_tower then ram_squads = ram_squads + 1 end
+						if is_tower then tower_squads = tower_squads + 1 end
+						if is_siege and not is_ram and not is_tower then siege_squads = siege_squads + 1 end
+					end
+				end
+			end
+
+			print(string.format("  SQUADS: siege_only=%d  ram=%d  tower=%d  (total scanned=%d)",
+				siege_squads, ram_squads, tower_squads, sg_count))
+
+			for tag_str, cnt in pairs(type_counts) do
+				print(string.format("    [%s] x%d", tag_str, cnt))
+			end
+
+			-- Field-built entity enumeration
+			local eg_all = Player_GetEntities(player.id)
+			local eg_count = EGroup_CountSpawned(eg_all)
+			local field_rams = 0
+			local field_towers = 0
+			local field_scaffolds_ram = 0
+			local field_scaffolds_tower = 0
+			local field_siege_other = 0
+			for idx = 1, eg_count do
+				local entity = EGroup_GetSpawnedEntityAt(eg_all, idx)
+				if entity ~= nil then
+					local is_siege = Entity_IsOfType(entity, "siege")
+					local is_ram = Entity_IsOfType(entity, "ram") or Entity_IsOfType(entity, "scar_ram") or Entity_IsOfType(entity, "fire_ram") or Entity_IsOfType(entity, "scar_fire_ram")
+					local is_tower = Entity_IsOfType(entity, "siege_tower")
+					local is_ram_tower = Entity_IsOfType(entity, "ram_tower")
+					if is_siege or is_ram or is_tower then
+						local progress = 0
+						local ok_bp, bp = pcall(Entity_GetBuildingProgress, entity)
+						if ok_bp then progress = bp end
+						local complete = (progress >= 1.0)
+						if is_ram and not is_ram_tower then
+							if complete then field_rams = field_rams + 1
+							else field_scaffolds_ram = field_scaffolds_ram + 1 end
+						elseif is_tower then
+							if complete then field_towers = field_towers + 1
+							else field_scaffolds_tower = field_scaffolds_tower + 1 end
+						elseif is_siege then
+							if complete then field_siege_other = field_siege_other + 1 end
+						end
+					end
+				end
+			end
+			EGroup_Destroy(eg_all)
+
+			print(string.format("  ENTITIES: field_ram=%d(scaff=%d)  field_tower=%d(scaff=%d)  field_siege=%d",
+				field_rams, field_scaffolds_ram, field_towers, field_scaffolds_tower, field_siege_other))
+
+			-- Consistency checks
+			if field_scaffolds_ram ~= pending_ram then
+				print(string.format("  !! MISMATCH: field ram scaffolds=%d vs ramLimit_pending=%d", field_scaffolds_ram, pending_ram))
+			end
+			if field_scaffolds_tower ~= pending_st then
+				print(string.format("  !! MISMATCH: field tower scaffolds=%d vs siegeTowerLimit_pending=%d", field_scaffolds_tower, pending_st))
+			end
+		end
+		print("")
+	end
+
+	print("================================================================================")
+	print("[SIEGE_DUMP] End of dump")
+	print("================================================================================")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Ram Limit Full Trace
+-- Focused diagnostic for the ram/siege-tower limit system.
+-- Performs an independent recount (no state mutation) and compares against stored values.
+-- Two ram counts: "gated" mirrors RamLimit_Recount (requires squad siege tag) vs "raw" (all ram tags).
+-- If gated ~= raw, the recount's Squad_IsOfType(squad,"siege") prerequisite is filtering out rams.
+-- Console: Debug_RamLimitFullTrace()
+---------------------------------------------------------------------------------------------------
+
+function Debug_RamLimitFullTrace()
+	print("")
+	print("================================================================================")
+	print("[RAM_TRACE] Ram Limit Full Trace — t=" .. tostring(World_GetGameTime()))
+	print("================================================================================")
+
+	-- Section 1: Global constants
+	print("[RAM_TRACE] === CONSTANTS ===")
+	print(string.format("  RAM_LIMIT_MAX = %s", tostring(RAM_LIMIT_MAX)))
+	print(string.format("  SIEGE_TOWER_LIMIT_MAX = %s", tostring(SIEGE_TOWER_LIMIT_MAX)))
+	print(string.format("  MaximumMedicPopulation = %s", tostring(AGS_GLOBAL_SETTINGS.MaximumMedicPopulation)))
+	print(string.format("  NoSiege = %s", tostring(AGS_GLOBAL_SETTINGS.NoSiege)))
+	print("")
+
+	for i, player in ipairs(PLAYERS) do
+		local civ = _Debug_GetPlayerCiv(player)
+		local branch = AGS_CIV_PARENT_MAP and (AGS_CIV_PARENT_MAP[civ] or civ) or civ
+		local ok_elim, elim = pcall(Core_IsPlayerEliminated, player.id)
+		if ok_elim and elim then
+			print(string.format("[RAM_TRACE] P%d (%s) [ELIMINATED] — skipped", i, civ))
+			print("")
+		else
+			print(string.format("[RAM_TRACE] === P%d (%s) branch=%s ===", i, civ, branch))
+
+			-- Section 2: Age + Siege Engineers
+			local ok_age, age = pcall(Player_GetCurrentAge, player.id)
+			local age_val = ok_age and age or -1
+			local has_eng = false
+			if type(CBA_Options_HasSiegeEngineers) == "function" then
+				local ok_se, se = pcall(CBA_Options_HasSiegeEngineers, player)
+				has_eng = ok_se and se
+			end
+			print(string.format("  age=%s  siege_engineers=%s",
+				ok_age and tostring(age) or "ERR", tostring(has_eng)))
+
+			-- Section 3: Stored counters
+			local stored_siege = player.siegeLimit_count or 0
+			local stored_ram = player.ramLimit_count or 0
+			local stored_tower = player.siegeTowerLimit_count or 0
+			local pending_ram = player.ramLimit_pending or 0
+			local pending_st = player.siegeTowerLimit_pending or 0
+			print(string.format("  STORED: siege=%d  ram=%d  tower=%d  ramPending=%d  stPending=%d",
+				stored_siege, stored_ram, stored_tower, pending_ram, pending_st))
+
+			-- Section 4: Independent squad walk (no state mutation)
+			-- Two ram counts:
+			--   gated = what RamLimit_Recount produces (requires siege tag)
+			--   raw   = all ram-tagged squads regardless of siege tag
+			local recount_siege = 0
+			local ram_sq_gated = 0
+			local ram_sq_raw = 0
+			local tower_sq_gated = 0
+			local tower_sq_raw = 0
+			local ram_details = {}
+			local tower_details = {}
+			local siege_details = {}
+			local sg_all = Player_GetSquads(player.id)
+			local sg_count = SGroup_Count(sg_all)
+
+			for idx = 1, sg_count do
+				local squad = SGroup_GetSquadAt(sg_all, idx)
+				if squad ~= nil then
+					local is_siege = Squad_IsOfType(squad, "siege")
+					local is_ram = Squad_IsOfType(squad, "ram") or Squad_IsOfType(squad, "scar_ram")
+						or Squad_IsOfType(squad, "fire_ram") or Squad_IsOfType(squad, "scar_fire_ram")
+					local is_tower = Squad_IsOfType(squad, "siege_tower")
+					local is_ram_tower = Squad_IsOfType(squad, "ram_tower")
+
+					if is_siege or is_ram or is_tower then
+						-- Build tag string
+						local tags = {}
+						if is_siege then table.insert(tags, "siege") end
+						if Squad_IsOfType(squad, "ram") then table.insert(tags, "ram") end
+						if Squad_IsOfType(squad, "scar_ram") then table.insert(tags, "scar_ram") end
+						if Squad_IsOfType(squad, "fire_ram") then table.insert(tags, "fire_ram") end
+						if Squad_IsOfType(squad, "scar_fire_ram") then table.insert(tags, "scar_fire_ram") end
+						if is_ram_tower then table.insert(tags, "ram_tower") end
+						if is_tower then table.insert(tags, "siege_tower") end
+						if Squad_IsOfType(squad, "scar_springald") then table.insert(tags, "scar_springald") end
+						if Squad_IsOfType(squad, "scar_mangonel") then table.insert(tags, "scar_mangonel") end
+						if Squad_IsOfType(squad, "scar_bombard") then table.insert(tags, "scar_bombard") end
+						if Squad_IsOfType(squad, "great_bombard") then table.insert(tags, "great_bombard") end
+						if Squad_IsOfType(squad, "scar_trebuchet_traction") then table.insert(tags, "scar_trebuchet_traction") end
+						if Squad_IsOfType(squad, "scar_trebuchet_cw") then table.insert(tags, "scar_trebuchet_cw") end
+						if Squad_IsOfType(squad, "scar_culverin") then table.insert(tags, "scar_culverin") end
+						if Squad_IsOfType(squad, "scar_cannon") then table.insert(tags, "scar_cannon") end
+						if Squad_IsOfType(squad, "nest_of_bees") then table.insert(tags, "nest_of_bees") end
+						if Squad_IsOfType(squad, "scar_ribauldequin") then table.insert(tags, "scar_ribauldequin") end
+						local tag_str = table.concat(tags, "+")
+
+						-- Classify
+						if (is_ram) and not is_ram_tower then
+							ram_sq_raw = ram_sq_raw + 1
+							if is_siege then
+								ram_sq_gated = ram_sq_gated + 1
+								table.insert(ram_details, string.format("  SQ [%s]", tag_str))
+							else
+								table.insert(ram_details, string.format("  SQ [%s] !! NO_SIEGE_TAG", tag_str))
+							end
+						elseif is_tower then
+							tower_sq_raw = tower_sq_raw + 1
+							if is_siege then
+								tower_sq_gated = tower_sq_gated + 1
+								table.insert(tower_details, string.format("  SQ [%s]", tag_str))
+							else
+								table.insert(tower_details, string.format("  SQ [%s] !! NO_SIEGE_TAG", tag_str))
+							end
+						elseif is_siege then
+							-- Standard siege unit: compute point value
+							local pts = 0
+							if branch == "ottoman" and (Squad_IsOfType(squad, "great_bombard") or Squad_IsOfType(squad, "bombard") or Squad_IsOfType(squad, "scar_bombard")) then
+								pts = 4
+							elseif Squad_IsOfType(squad, "scar_springald") then
+								pts = 1
+							elseif Squad_IsOfType(squad, "scar_trebuchet_traction") or Squad_IsOfType(squad, "scar_culverin") then
+								pts = 2
+							elseif Squad_IsOfType(squad, "scar_mangonel") or Squad_IsOfType(squad, "scar_trebuchet_cw")
+								or Squad_IsOfType(squad, "scar_cannon") or Squad_IsOfType(squad, "scar_bombard")
+								or Squad_IsOfType(squad, "nest_of_bees") or Squad_IsOfType(squad, "scar_ribauldequin") then
+								pts = 3
+							end
+							recount_siege = recount_siege + pts
+							table.insert(siege_details, string.format("  SQ [%s] %dpts", tag_str, pts))
+						end
+					end
+				end
+			end
+
+			-- Section 5: Independent entity walk (field-built)
+			local ram_ent_gated = 0
+			local ram_ent_raw = 0
+			local tower_ent_gated = 0
+			local tower_ent_raw = 0
+			local scaffold_ram = 0
+			local scaffold_tower = 0
+			local eg_all = Player_GetEntities(player.id)
+			local eg_count = EGroup_CountSpawned(eg_all)
+
+			for idx = 1, eg_count do
+				local entity = EGroup_GetSpawnedEntityAt(eg_all, idx)
+				if entity ~= nil then
+					local is_siege = Entity_IsOfType(entity, "siege")
+					local is_ram = Entity_IsOfType(entity, "ram") or Entity_IsOfType(entity, "scar_ram")
+						or Entity_IsOfType(entity, "fire_ram") or Entity_IsOfType(entity, "scar_fire_ram")
+					local is_tower = Entity_IsOfType(entity, "siege_tower")
+					local is_ram_tower = Entity_IsOfType(entity, "ram_tower")
+
+					if is_ram or is_tower then
+						local progress = 0
+						local ok_bp, bp = pcall(Entity_GetBuildingProgress, entity)
+						if ok_bp then progress = bp end
+						local complete = (progress >= 1.0)
+
+						local tags = {}
+						if is_siege then table.insert(tags, "siege") end
+						if Entity_IsOfType(entity, "ram") then table.insert(tags, "ram") end
+						if Entity_IsOfType(entity, "scar_ram") then table.insert(tags, "scar_ram") end
+						if Entity_IsOfType(entity, "fire_ram") then table.insert(tags, "fire_ram") end
+						if Entity_IsOfType(entity, "scar_fire_ram") then table.insert(tags, "scar_fire_ram") end
+						if is_ram_tower then table.insert(tags, "ram_tower") end
+						if is_tower then table.insert(tags, "siege_tower") end
+						local tag_str = table.concat(tags, "+")
+
+						if is_ram and not is_ram_tower then
+							if complete then
+								ram_ent_raw = ram_ent_raw + 1
+								if is_siege then
+									ram_ent_gated = ram_ent_gated + 1
+									table.insert(ram_details, string.format("  ENT [%s] complete", tag_str))
+								else
+									table.insert(ram_details, string.format("  ENT [%s] complete !! NO_SIEGE_TAG", tag_str))
+								end
+							else
+								scaffold_ram = scaffold_ram + 1
+								local suffix = is_siege and "" or " !! NO_SIEGE_TAG"
+								table.insert(ram_details, string.format("  ENT [%s] scaffold(%.0f%%)%s", tag_str, progress * 100, suffix))
+							end
+						elseif is_tower then
+							if complete then
+								tower_ent_raw = tower_ent_raw + 1
+								if is_siege then
+									tower_ent_gated = tower_ent_gated + 1
+									table.insert(tower_details, string.format("  ENT [%s] complete", tag_str))
+								else
+									table.insert(tower_details, string.format("  ENT [%s] complete !! NO_SIEGE_TAG", tag_str))
+								end
+							else
+								scaffold_tower = scaffold_tower + 1
+								local suffix = is_siege and "" or " !! NO_SIEGE_TAG"
+								table.insert(tower_details, string.format("  ENT [%s] scaffold(%.0f%%)%s", tag_str, progress * 100, suffix))
+							end
+						end
+					end
+				end
+			end
+			EGroup_Destroy(eg_all)
+
+			-- Section 6: Recount summary + gated vs raw comparison
+			local gated_ram = ram_sq_gated + ram_ent_gated
+			local raw_ram = ram_sq_raw + ram_ent_raw
+			local gated_tower = tower_sq_gated + tower_ent_gated
+			local raw_tower = tower_sq_raw + tower_ent_raw
+
+			print(string.format("  RECOUNT_GATED: ram=%d(sq=%d+ent=%d)  tower=%d(sq=%d+ent=%d)  siege=%d",
+				gated_ram, ram_sq_gated, ram_ent_gated,
+				gated_tower, tower_sq_gated, tower_ent_gated,
+				recount_siege))
+			print(string.format("  RECOUNT_RAW:   ram=%d(sq=%d+ent=%d)  tower=%d(sq=%d+ent=%d)",
+				raw_ram, ram_sq_raw, ram_ent_raw,
+				raw_tower, tower_sq_raw, tower_ent_raw))
+			print(string.format("  SCAFFOLDS: ram=%d  tower=%d", scaffold_ram, scaffold_tower))
+
+			-- Gated vs raw divergence = siege tag filtering issue
+			if gated_ram ~= raw_ram then
+				print(string.format("  !! GATE_FILTER: %d ram(s) MISSING from recount — lack 'siege' tag (gated=%d raw=%d)",
+					raw_ram - gated_ram, gated_ram, raw_ram))
+			end
+			if gated_tower ~= raw_tower then
+				print(string.format("  !! GATE_FILTER: %d tower(s) MISSING from recount — lack 'siege' tag (gated=%d raw=%d)",
+					raw_tower - gated_tower, gated_tower, raw_tower))
+			end
+
+			-- Section 7: Drift detection (stored vs recount)
+			if stored_ram ~= gated_ram then
+				print(string.format("  !! DRIFT: ram stored=%d gated_recount=%d", stored_ram, gated_ram))
+			end
+			if stored_tower ~= gated_tower then
+				print(string.format("  !! DRIFT: tower stored=%d gated_recount=%d", stored_tower, gated_tower))
+			end
+			if stored_siege ~= recount_siege then
+				print(string.format("  !! DRIFT: siege stored=%d recount=%d", stored_siege, recount_siege))
+			end
+
+			-- Pending vs scaffold mismatch
+			if scaffold_ram ~= pending_ram then
+				print(string.format("  !! MISMATCH: ramPending=%d but scaffold_ram=%d", pending_ram, scaffold_ram))
+			end
+			if scaffold_tower ~= pending_st then
+				print(string.format("  !! MISMATCH: stPending=%d but scaffold_tower=%d", pending_st, scaffold_tower))
+			end
+
+			-- Section 8: Effective totals + expected lock states
+			local max_siege = AGS_GLOBAL_SETTINGS.MaximumMedicPopulation or 0
+			local eff_ram = gated_ram + pending_ram
+			local eff_tower = gated_tower + pending_st
+
+			local expected_ram_lock = "UNLOCKED"
+			local expected_tower_lock = "UNLOCKED"
+			local reason_ram = ""
+			local reason_tower = ""
+
+			if not has_eng then
+				expected_ram_lock = "LOCKED"
+				expected_tower_lock = "LOCKED"
+				reason_ram = "no_siege_engineers"
+				reason_tower = "no_siege_engineers"
+			else
+				if eff_ram >= RAM_LIMIT_MAX then
+					expected_ram_lock = "LOCKED"
+					reason_ram = string.format("eff=%d>=max=%d", eff_ram, RAM_LIMIT_MAX)
+				else
+					reason_ram = string.format("eff=%d<max=%d", eff_ram, RAM_LIMIT_MAX)
+				end
+				if eff_tower >= SIEGE_TOWER_LIMIT_MAX then
+					expected_tower_lock = "LOCKED"
+					reason_tower = string.format("eff=%d>=max=%d", eff_tower, SIEGE_TOWER_LIMIT_MAX)
+				else
+					reason_tower = string.format("eff=%d<max=%d", eff_tower, SIEGE_TOWER_LIMIT_MAX)
+				end
+			end
+
+			print(string.format("  EFFECTIVE: ram=%d/%d  tower=%d/%d  siege=%d/%d",
+				eff_ram, RAM_LIMIT_MAX, eff_tower, SIEGE_TOWER_LIMIT_MAX, recount_siege, max_siege))
+			print(string.format("  EXPECTED_LOCK: ram=%s(%s)  tower=%s(%s)",
+				expected_ram_lock, reason_ram, expected_tower_lock, reason_tower))
+
+			-- Section 9: Lock state consistency (stored values vs recount)
+			local stored_eff_ram = stored_ram + pending_ram
+			local stored_eff_tower = stored_tower + pending_st
+			local stored_ram_lock = "UNLOCKED"
+			local stored_tower_lock = "UNLOCKED"
+			if not has_eng then
+				stored_ram_lock = "LOCKED"
+				stored_tower_lock = "LOCKED"
+			else
+				if stored_eff_ram >= RAM_LIMIT_MAX then stored_ram_lock = "LOCKED" end
+				if stored_eff_tower >= SIEGE_TOWER_LIMIT_MAX then stored_tower_lock = "LOCKED" end
+			end
+
+			if stored_ram_lock ~= expected_ram_lock then
+				print(string.format("  !! LOCK_STATE: ram gate INCONSISTENT — stored→%s(eff=%d) vs recount→%s(eff=%d)",
+					stored_ram_lock, stored_eff_ram, expected_ram_lock, eff_ram))
+			end
+			if stored_tower_lock ~= expected_tower_lock then
+				print(string.format("  !! LOCK_STATE: tower gate INCONSISTENT — stored→%s(eff=%d) vs recount→%s(eff=%d)",
+					stored_tower_lock, stored_eff_tower, expected_tower_lock, eff_tower))
+			end
+
+			-- Section 10: Object enumeration
+			if #ram_details > 0 then
+				print("  OBJECTS — RAM:")
+				for _, line in ipairs(ram_details) do print("  " .. line) end
+			end
+			if #tower_details > 0 then
+				print("  OBJECTS — TOWER:")
+				for _, line in ipairs(tower_details) do print("  " .. line) end
+			end
+			if #siege_details > 0 then
+				print("  OBJECTS — SIEGE:")
+				for _, line in ipairs(siege_details) do print("  " .. line) end
+			end
+		end
+		print("")
+	end
+
+	print("================================================================================")
+	print("[RAM_TRACE] End of trace")
+	print("================================================================================")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Siege Limit Cross-Validation Inspector
+-- Compares stored counters against independent recount, reports drift per-player.
+-- Console command: Debug_SiegeLimitCrossValidation()
+---------------------------------------------------------------------------------------------------
+
+function Debug_SiegeLimitCrossValidation()
+	print("")
+	print("[CBA_DEBUG] Siege Limit Cross-Validation:")
+	print("  Comparing stored counters vs fresh recount per player")
+	print("")
+
+	local drift_found = false
+	for i, player in ipairs(PLAYERS) do
+		local ok_e, elim = pcall(Core_IsPlayerEliminated, player.id)
+		if ok_e and elim then
+			print(string.format("  P%d: [ELIMINATED] skip", i))
+		else
+			local civ = _Debug_GetPlayerCiv(player)
+
+			-- Save current stored values
+			local stored_siege = player.siegeLimit_count or 0
+			local stored_ram = player.ramLimit_count or 0
+			local stored_st = player.siegeTowerLimit_count or 0
+			local stored_ram_pend = player.ramLimit_pending or 0
+			local stored_st_pend = player.siegeTowerLimit_pending or 0
+
+			-- Run independent recount (overwrites stored)
+			CBA_Options_SiegeLimit_Recount(player)
+			CBA_Options_RamLimit_Recount(player)
+			CBA_Options_SiegeTowerLimit_Recount(player)
+
+			local fresh_siege = player.siegeLimit_count or 0
+			local fresh_ram = player.ramLimit_count or 0
+			local fresh_st = player.siegeTowerLimit_count or 0
+			local fresh_ram_pend = player.ramLimit_pending or 0
+			local fresh_st_pend = player.siegeTowerLimit_pending or 0
+
+			-- Compare
+			local drift_siege = fresh_siege ~= stored_siege
+			local drift_ram = fresh_ram ~= stored_ram
+			local drift_st = fresh_st ~= stored_st
+			local drift_ram_p = fresh_ram_pend ~= stored_ram_pend
+			local drift_st_p = fresh_st_pend ~= stored_st_pend
+
+			local has_drift = drift_siege or drift_ram or drift_st or drift_ram_p or drift_st_p
+			if has_drift then drift_found = true end
+
+			local marker = has_drift and "DRIFT" or "OK"
+			print(string.format("  P%d (%s) [%s]:", i, civ, marker))
+			print(string.format("    siege:     stored=%d  fresh=%d%s", stored_siege, fresh_siege, drift_siege and " !!" or ""))
+			print(string.format("    ram:       stored=%d  fresh=%d%s", stored_ram, fresh_ram, drift_ram and " !!" or ""))
+			print(string.format("    st:        stored=%d  fresh=%d%s", stored_st, fresh_st, drift_st and " !!" or ""))
+			print(string.format("    ram_pend:  stored=%d  fresh=%d%s", stored_ram_pend, fresh_ram_pend, drift_ram_p and " !!" or ""))
+			print(string.format("    st_pend:   stored=%d  fresh=%d%s", stored_st_pend, fresh_st_pend, drift_st_p and " !!" or ""))
+		end
+	end
+
+	if not drift_found then
+		print("")
+		print("  All players: no counter drift detected")
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase 2: Cross-Civ Siege Classification Validator
+-- Phase 3: Cross-Path Consistency Audit
+-- Resolves every CBA_SIEGE_TABLE blueprint offline (no spawning, no active players needed),
+-- checks type tags against CBA_SIEGE_TAG_REGISTRY, and simulates all limit path logic to
+-- detect classification gaps or path divergences.
+-- Console command: Debug_ValidateSiegeClassifications()
+---------------------------------------------------------------------------------------------------
+
+-- Helper: check a type tag on a resolved SBP or EBP.
+local function _SiegeAudit_CheckTag(bp, tag, is_entity)
+	if bp == nil or tag == nil then return false end
+	local ok, result
+	if is_entity then
+		ok, result = pcall(Entity_IsEBPOfType, bp, tag)
+	else
+		ok, result = pcall(Squad_IsSBPOfType, bp, tag)
+	end
+	return ok and result
+end
+
+local function _SiegeAudit_AddIssue(issues, severity, kind, civ, key, detail)
+	table.insert(issues, string.format("[%s] %s: %s > %s > %s", severity, kind, civ, key, detail))
+end
+
+-- Path audit: simulate all limit path logic for one resolved blueprint.
+-- Returns (path_ok, path_line, issues_added).
+local function _SiegeAudit_CheckPaths(civ, key, bp_name, bp, cls, is_entity, issues)
+	local function chk(tag) return _SiegeAudit_CheckTag(bp, tag, is_entity) end
+	local runtime_pts = 0
+	if cls ~= "ram" and cls ~= "ram_tower" and cls ~= "tower" and cls ~= "building" then
+		if is_entity then
+			runtime_pts = CBA_Options_GetSiegeWeaponPointsEBP(bp, civ) or 0
+		else
+			runtime_pts = CBA_Options_GetSiegeWeaponPointsSBP(bp, civ) or 0
+		end
+	end
+
+	-- Probe all relevant tags
+	local has_siege       = chk("siege")
+	local has_ram         = chk("ram")
+	local has_scar_ram    = chk("scar_ram")
+	local has_fire_ram    = chk("fire_ram")
+	local has_scar_fire   = chk("scar_fire_ram")
+	local has_ram_tower   = chk("ram_tower")
+	local has_siege_tower = chk("siege_tower")
+	-- Mirror production ram_tower fallback (type tag OR civ-resolved BP identity).
+	local is_ram_tower_prod = false
+	if is_entity then
+		is_ram_tower_prod = CBA_Options_IsRamTowerEBP(bp, civ)
+	else
+		is_ram_tower_prod = CBA_Options_IsRamTowerSBP(bp, civ)
+	end
+	local is_any_ram = has_ram or has_scar_ram or has_fire_ram or has_scar_fire or is_ram_tower_prod
+	local alias_note = nil
+
+	-- Key-based expected siege values mirror production intent better than strict BP tag aliases.
+	local key_expected_value = {
+		springald = 1,
+		springald_clocktower_chi = 1,
+		springald_double = 1,
+		culverin = 2,
+		royal_culverin = 2,
+		trebuchet_tr = 2,
+		trebuchet_tr_double = 2,
+		mangonel = 3,
+		mangonel_clocktower_chi = 3,
+		mangonel_double = 3,
+		ribauldequin = 3,
+		royal_ribauldequin = 3,
+		ribauldequin_double = 3,
+		cannon = 3,
+		royal_cannon = 3,
+		cannon_double = 3,
+		bombard = 3,
+		bombard_clocktower_chi = 3,
+		bombard_double = 3,
+		trebuchet_cw = 3,
+		trebuchet_clocktower_chi = 3,
+		trebuchet_cw_double = 3,
+		nest_of_bees = 3,
+		nestofbees_clocktower_chi = 3,
+	}
+	local expected_value = key_expected_value[key]
+	if key == "bombard" and civ == "ottoman" then
+		expected_value = 4
+	end
+
+	-- 1) Simulate SiegeLimit_Recount (general siege point assignment)
+	local siege_result = "NO"
+	if cls == "buildable" then
+		siege_result = "N/A(buildable)"
+	elseif has_siege and not has_siege_tower and not is_any_ram then
+		local value = 0
+		if chk("scar_springald") then
+			value = 1
+		elseif chk("scar_trebuchet_traction") or chk("scar_culverin") then
+			value = 2
+		elseif chk("scar_mangonel") or chk("scar_trebuchet_cw") or chk("scar_cannon")
+			or chk("scar_bombard") or chk("nest_of_bees") or chk("scar_ribauldequin") then
+			value = 3
+		elseif chk("great_bombard") or chk("bombard") then
+			value = 4
+		end
+		siege_result = value > 0 and (tostring(value) .. "pt") or "0pt(!)"
+	elseif has_siege and (has_siege_tower or is_any_ram) then
+		siege_result = "SKIP"
+	end
+
+	-- 2) Simulate RamLimit_Recount
+	local ram_result = "NO"
+	if is_ram_tower_prod then
+		ram_result = "YES(w2)"
+	elseif has_ram or has_scar_ram or has_fire_ram or has_scar_fire then
+		ram_result = "YES(w1)"
+	end
+
+	-- 3) Simulate SiegeTowerLimit_Recount
+	local tower_result = "NO"
+	if has_siege and has_siege_tower then
+		tower_result = "YES"
+	end
+
+	-- 4) Event trigger (BuildItemComplete / SquadKilled / ConstructionStart)
+	local event_trigger = has_siege or is_any_ram or has_siege_tower
+
+	-- 5) Validate expected path behavior by classification
+	local path_ok = true
+	local path_issue = nil
+
+	if cls == "ram" then
+		if ram_result == "NO" then
+			path_ok = false
+			path_issue = "ram class but not counted by ram limit"
+		end
+		if siege_result ~= "SKIP" and siege_result ~= "NO" then
+			path_ok = false
+			path_issue = "ram class but not skipped by siege recount"
+		end
+	elseif cls == "ram_tower" then
+		if ram_result ~= "YES(w2)" then
+			path_ok = false
+			path_issue = "ram_tower class but ram weight != 2"
+		end
+	elseif cls == "tower" then
+		if tower_result ~= "YES" then
+			path_ok = false
+			path_issue = "tower class but not counted by siege tower limit"
+		end
+	elseif cls == "weapon" then
+		if siege_result == "NO" or siege_result == "SKIP" then
+			path_ok = false
+			path_issue = "weapon class but not counted by siege recount"
+		end
+		if path_ok and expected_value ~= nil and siege_result == "0pt(!)" then
+			alias_note = string.format("weapon likely %dpt at runtime; BP tag alias mismatch", expected_value)
+		end
+	elseif cls == "buildable" then
+		if not has_siege then
+			path_ok = false
+			path_issue = "buildable without siege tag (ConstructionStart gate would miss it)"
+		end
+	end
+
+	local marker = path_ok and "" or " [PATH_ISSUE]"
+	if path_ok and alias_note ~= nil then
+		marker = " [TAG_ALIAS]"
+	end
+	if runtime_pts > 0 then
+		marker = marker .. string.format(" [RUNTIME=%dpt]", runtime_pts)
+	elseif cls == "weapon" or cls == "buildable" then
+		marker = marker .. " [RUNTIME=0pt]"
+	end
+	local line = string.format("  %s (\"%s\"): siege=%s ram=%s tower=%s events=%s%s",
+		key, bp_name, siege_result, ram_result, tower_result,
+		event_trigger and "YES" or "NO", marker)
+
+	if (cls == "weapon" or cls == "buildable") and expected_value ~= nil and runtime_pts <= 0 then
+		path_ok = false
+		path_issue = string.format("runtime classifier returned 0pt for expected %dpt %s", expected_value, cls)
+	end
+
+	if not path_ok and path_issue ~= nil then
+		_SiegeAudit_AddIssue(issues, "PROBABLE_BUG", "PATH_DIVERGENCE", civ, key, path_issue)
+	elseif alias_note ~= nil then
+		_SiegeAudit_AddIssue(issues, "TAG_ALIAS_MISMATCH", "PATH_NOTE", civ, key, alias_note)
+	end
+
+	return path_ok, line
+end
+
+-- Main validator: resolves all CBA_SIEGE_TABLE blueprints across all civs and runs
+-- tag validation (Phase 2) + path simulation (Phase 3) in a single pass.
+function Debug_ValidateSiegeClassifications()
+	local reg = CBA_SIEGE_TAG_REGISTRY
+	if reg == nil then
+		print("[SIEGE_AUDIT] ERROR: CBA_SIEGE_TAG_REGISTRY not found")
+		return
+	end
+
+	local issues = {}
+	local checks = 0
+	local ok_count = 0
+
+	print("")
+	print("[SIEGE_AUDIT] === Cross-Civ Siege Classification Audit ===")
+
+	-- Build combined civ list: direct tables + faction-map variant civs (includes Knights DLC)
+	local all_civs = {}
+	for _, civ in ipairs(reg.expected_direct_civs) do
+		table.insert(all_civs, { name = civ, is_fallback = false })
+	end
+	if AGS_CIV_FACTION_MAP ~= nil then
+		for variant, parent in pairs(AGS_CIV_FACTION_MAP) do
+			table.insert(all_civs, { name = variant, is_fallback = true, parent = parent })
+		end
+	end
+
+	local n_direct = #reg.expected_direct_civs
+	local n_fallback = #all_civs - n_direct
+	print(string.format("[SIEGE_AUDIT] Civs: %d direct + %d fallback = %d total", n_direct, n_fallback, #all_civs))
+	print("")
+
+	for _, civ_info in ipairs(all_civs) do
+		local civ = civ_info.name
+		local civ_table = CBA_SIEGE_TABLE[civ]
+		if civ_table == nil and civ_info.is_fallback then
+			civ_table = CBA_SIEGE_TABLE[civ_info.parent]
+		end
+
+		if civ_table == nil then
+			table.insert(issues, string.format("[PROBABLE_BUG] MISSING_TABLE: %s", civ))
+			print(string.format("[SIEGE_AUDIT] ---- %s ---- MISSING_TABLE", civ))
+		else
+			local label = civ_info.is_fallback
+				and string.format("%s (->%s)", civ, civ_info.parent) or civ
+			print(string.format("[SIEGE_AUDIT] ---- %s ----", label))
+
+			-- Phase 2a: Check required base keys present
+			for _, rkey in ipairs(reg.required_base_keys) do
+				if civ_table[rkey] == nil then
+					_SiegeAudit_AddIssue(issues, "PROBABLE_BUG", "MISSING_KEY", civ, rkey, "required_base_keys")
+					print(string.format("[SIEGE_AUDIT]   MISSING_KEY: %s", rkey))
+				end
+			end
+
+			-- Phase 2b: Check required civ-specific extras
+			local extras = reg.required_civ_extras[civ]
+			if extras == nil and civ_info.is_fallback then
+				extras = reg.required_civ_extras[civ_info.parent]
+			end
+			if extras ~= nil then
+				for _, ekey in ipairs(extras) do
+					if civ_table[ekey] == nil then
+						_SiegeAudit_AddIssue(issues, "PROBABLE_BUG", "MISSING_EXTRA", civ, ekey, "required_civ_extras")
+						print(string.format("[SIEGE_AUDIT]   MISSING_EXTRA: %s", ekey))
+					end
+				end
+			end
+
+			-- Phase 2c + Phase 3: Validate each table entry
+			for key, bp_name in pairs(civ_table) do
+				checks = checks + 1
+				local cls = reg.key_class[key]
+
+				if cls == nil then
+					_SiegeAudit_AddIssue(issues, "PROBABLE_BUG", "UNKNOWN_KEY", civ, key, bp_name)
+					print(string.format("[SIEGE_AUDIT]   UNKNOWN_KEY: %s = \"%s\"", key, bp_name))
+				else
+					local is_entity = (cls == "buildable" or cls == "building")
+
+					-- Resolve blueprint
+					local resolve_ok, bp
+					if is_entity then
+						resolve_ok, bp = pcall(BP_GetEntityBlueprint, bp_name)
+					else
+						resolve_ok, bp = pcall(BP_GetSquadBlueprint, bp_name)
+					end
+
+					if not resolve_ok or bp == nil then
+						_SiegeAudit_AddIssue(issues, "PROBABLE_BUG", "RESOLVE_FAIL", civ, key, bp_name)
+						print(string.format("[SIEGE_AUDIT]   RESOLVE_FAIL: %s > \"%s\" (%s)",
+							key, bp_name, is_entity and "EBP" or "SBP"))
+					else
+						-- Check expected minimum tags
+						local expected = reg.expected_tags[cls] or {}
+						local missing = {}
+						local found = {}
+						for _, tag in ipairs(expected) do
+							if _SiegeAudit_CheckTag(bp, tag, is_entity) then
+								table.insert(found, tag)
+							else
+								table.insert(missing, tag)
+							end
+						end
+
+						-- Parity with runtime ram tower fallback: some civ variants rely on
+						-- identity match instead of explicit ram_tower type tag.
+						if cls == "ram_tower" then
+							local keep = {}
+							local removed = false
+							for _, miss_tag in ipairs(missing) do
+								if miss_tag == "ram_tower" then
+									local rt_bp = is_entity and AGS_GetSiegeEntity(civ, "ram_tower") or AGS_GetSiegeUnit(civ, "ram_tower")
+									if rt_bp ~= nil and rt_bp == bp then
+										removed = true
+									else
+										table.insert(keep, miss_tag)
+									end
+								else
+									table.insert(keep, miss_tag)
+								end
+							end
+							if removed then
+								table.insert(found, "ram_tower(identity)")
+								missing = keep
+							end
+						end
+
+						if #missing > 0 then
+							_SiegeAudit_AddIssue(issues, "PROBABLE_BUG", "MISSING_TAG", civ, key,
+								string.format("missing {%s}", table.concat(missing, ",")))
+							print(string.format("[SIEGE_AUDIT]   MISSING_TAG: %s (\"%s\") missing={%s} found={%s}",
+								key, bp_name, table.concat(missing, ","), table.concat(found, ",")))
+						else
+							-- Phase 3: Path audit for combat units
+							if cls ~= "building" then
+								local path_ok, path_line = _SiegeAudit_CheckPaths(
+									civ, key, bp_name, bp, cls, is_entity, issues)
+								print("[SIEGE_AUDIT] " .. path_line)
+							else
+								print(string.format("[SIEGE_AUDIT]   %s (\"%s\"): building (no combat tags expected)",
+									key, bp_name))
+							end
+							ok_count = ok_count + 1
+						end
+					end
+				end
+			end
+		end
+	end
+
+	-- Summary
+	print("")
+	if #issues == 0 then
+		print(string.format("[SIEGE_AUDIT] === Summary: %d checks, %d ok, 0 issues ===", checks, ok_count))
+	else
+		local n_probable = 0
+		local n_alias = 0
+		local n_other = 0
+		for _, issue in ipairs(issues) do
+			if string.find(issue, "^%[PROBABLE_BUG%]") then
+				n_probable = n_probable + 1
+			elseif string.find(issue, "^%[TAG_ALIAS_MISMATCH%]") then
+				n_alias = n_alias + 1
+			else
+				n_other = n_other + 1
+			end
+		end
+		print("[SIEGE_AUDIT] ---- ISSUES ----")
+		for _, issue in ipairs(issues) do
+			print("[SIEGE_AUDIT]   " .. issue)
+		end
+		print(string.format("[SIEGE_AUDIT] Severity buckets: probable=%d alias=%d other=%d", n_probable, n_alias, n_other))
+		print(string.format("[SIEGE_AUDIT] === Summary: %d checks, %d ok, %d issues ===",
+			checks, ok_count, #issues))
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Team Balance Per-Limit Breakdown
+-- Shows stored teamBalance_* fields per player and module registration status.
+-- Console: Debug_TeamBalancePerLimit()
+---------------------------------------------------------------------------------------------------
+
+function Debug_TeamBalancePerLimit()
+	print("")
+	print("[CBA_DEBUG] Team Balance Per-Limit Breakdown:")
+	local mode = AGS_GLOBAL_SETTINGS.MaintainTeamBalance or 0
+	local mode_names = {[0]="NONE", [1]="POPULATION", [2]="RESOURCES", [3]="FULL"}
+	print(string.format("  MaintainTeamBalance = %d (%s)", mode, mode_names[mode] or "?"))
+	local module_active = Core_IsModuleRegistered and Core_IsModuleRegistered("AGS_TeamBalance")
+	if module_active == nil then
+		-- Fallback: check if the update function is still reachable
+		module_active = (type(AGS_TeamBalance_OnPlayerDefeated) == "function") and "maybe" or false
+	end
+	print(string.format("  AGS_TeamBalance module registered = %s", tostring(module_active)))
+	print(string.format("  TEAM_BONUS table = %s  MEDIC_BONUS table = %s",
+		tostring(AGS_TEAM_BALANCE_TEAM_BONUS), tostring(AGS_TEAM_BALANCE_MEDIC_BONUS)))
+	print("")
+	for i, player in ipairs(PLAYERS) do
+		local civ = _Debug_GetPlayerCiv(player)
+		local ok_elim, elim = pcall(Core_IsPlayerEliminated, player.id)
+		local elim_str = (ok_elim and elim) and " [ELIMINATED]" or ""
+		local tb_prod = player.teamBalance_prodLimit
+		local tb_siege = player.teamBalance_siegeLimit
+		local tb_ram = player.teamBalance_ramLimit
+		local tb_st = player.teamBalance_siegeTowerLimit
+		local tb_ws = player.teamBalance_workshopLimit
+		local tb_op = player.teamBalance_outpostLimit
+		local tb_pop = player.teamBalance_popBonus
+		print(string.format("  P%d (%s):%s", i, civ, elim_str))
+		print(string.format("    stored: prod=%s siege=%s ram=%s st=%s ws=%s outpost=%s pop_bonus=%s",
+			tostring(tb_prod), tostring(tb_siege), tostring(tb_ram),
+			tostring(tb_st), tostring(tb_ws), tostring(tb_op), tostring(tb_pop)))
+		-- Effective (what getter returns)
+		local eff_prod  = type(CBA_Options_GetPlayerProdLimit) == "function" and CBA_Options_GetPlayerProdLimit(player) or "?"
+		local eff_siege = type(CBA_Options_GetPlayerSiegeLimit) == "function" and CBA_Options_GetPlayerSiegeLimit(player) or "?"
+		local eff_ram   = type(CBA_Options_GetPlayerRamLimit) == "function" and CBA_Options_GetPlayerRamLimit(player) or "?"
+		local eff_st    = type(CBA_Options_GetPlayerSiegeTowerLimit) == "function" and CBA_Options_GetPlayerSiegeTowerLimit(player) or "?"
+		local eff_ws    = type(CBA_Options_GetPlayerWorkshopLimit) == "function" and CBA_Options_GetPlayerWorkshopLimit(player) or "?"
+		local eff_op    = type(CBA_Options_GetPlayerOutpostLimit) == "function" and CBA_Options_GetPlayerOutpostLimit(player) or "?"
+		local eff_pop   = pcall(Player_GetCurrentPopulationCap, player.id, CT_Personnel) and Player_GetCurrentPopulationCap(player.id, CT_Personnel) or "?"
+		print(string.format("    effective: prod=%s siege=%s ram=%s st=%s ws=%s outpost=%s pop_cap=%s",
+			tostring(eff_prod), tostring(eff_siege), tostring(eff_ram),
+			tostring(eff_st), tostring(eff_ws), tostring(eff_op), tostring(eff_pop)))
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Leaver Summary — one-call comprehensive dump of everything after a player defeat
+-- Console: Debug_LeaverSummary()
+---------------------------------------------------------------------------------------------------
+
+function Debug_LeaverSummary()
+	print("")
+	print("================================================================================")
+	print("[LEAVER_SUMMARY] Full Post-Defeat Diagnostic — " .. tostring(World_GetGameTime()))
+	print("================================================================================")
+
+	-- 1. Option parse results (inline, not calling sub-function to keep output contiguous)
+	print("")
+	print("[LEAVER_SUMMARY] === Settings ===")
+	print(string.format("  MaintainTeamBalance = %s", tostring(AGS_GLOBAL_SETTINGS.MaintainTeamBalance)))
+	print(string.format("  MaximumProductionBuildings = %s", tostring(AGS_GLOBAL_SETTINGS.MaximumProductionBuildings)))
+	print(string.format("  MaximumSiegeWorkshop = %s", tostring(AGS_GLOBAL_SETTINGS.MaximumSiegeWorkshop)))
+	print(string.format("  MaximumMedicPopulation = %s", tostring(AGS_GLOBAL_SETTINGS.MaximumMedicPopulation)))
+	print(string.format("  RAM_LIMIT_MAX = %s", tostring(RAM_LIMIT_MAX)))
+	print(string.format("  SIEGE_TOWER_LIMIT_MAX = %s", tostring(SIEGE_TOWER_LIMIT_MAX)))
+	print(string.format("  MaximumPopulation = %s", tostring(AGS_GLOBAL_SETTINGS.MaximumPopulation)))
+	print(string.format("  NoSiege = %s", tostring(AGS_GLOBAL_SETTINGS.NoSiege)))
+
+	-- 2. Team balance module status
+	print("")
+	print("[LEAVER_SUMMARY] === Team Balance Module ===")
+	local mode_names = {[0]="NONE", [1]="POPULATION", [2]="RESOURCES", [3]="FULL"}
+	local mode = AGS_GLOBAL_SETTINGS.MaintainTeamBalance or 0
+	print(string.format("  Mode: %d (%s)", mode, mode_names[mode] or "?"))
+	-- Check if module is still registered (it unregisters when mode=0)
+	local tb_fn_alive = type(AGS_TeamBalance_OnPlayerDefeated) == "function"
+	print(string.format("  OnPlayerDefeated handler exists: %s", tostring(tb_fn_alive)))
+	print(string.format("  TEAM_BONUS = %s", tostring(AGS_TEAM_BALANCE_TEAM_BONUS)))
+	print(string.format("  MEDIC_BONUS = %s", tostring(AGS_TEAM_BALANCE_MEDIC_BONUS)))
+	if AGS_TEAM_BALANCE_TEAM_BONUS then
+		for team_idx, bonus in pairs(AGS_TEAM_BALANCE_TEAM_BONUS) do
+			print(string.format("    TEAM_BONUS[%s] = %s", tostring(team_idx), tostring(bonus)))
+		end
+	end
+
+	-- 3. Per-player status
+	print("")
+	print("[LEAVER_SUMMARY] === Per-Player State ===")
+	local alive_count = 0
+	local elim_count = 0
+	for i, player in ipairs(PLAYERS) do
+		local civ = _Debug_GetPlayerCiv(player)
+		local ok_elim, elim = pcall(Core_IsPlayerEliminated, player.id)
+		local is_elim = ok_elim and elim
+		if is_elim then elim_count = elim_count + 1 else alive_count = alive_count + 1 end
+		local status = is_elim and "ELIMINATED" or "ACTIVE"
+		local team_idx = player.AGS_Team and player.AGS_Team.index or "?"
+
+		-- Effective caps
+		local eff_prod  = type(CBA_Options_GetPlayerProdLimit) == "function" and CBA_Options_GetPlayerProdLimit(player) or "?"
+		local eff_siege = type(CBA_Options_GetPlayerSiegeLimit) == "function" and CBA_Options_GetPlayerSiegeLimit(player) or "?"
+		local eff_ram   = type(CBA_Options_GetPlayerRamLimit) == "function" and CBA_Options_GetPlayerRamLimit(player) or "?"
+		local eff_st    = type(CBA_Options_GetPlayerSiegeTowerLimit) == "function" and CBA_Options_GetPlayerSiegeTowerLimit(player) or "?"
+		local eff_ws    = type(CBA_Options_GetPlayerWorkshopLimit) == "function" and CBA_Options_GetPlayerWorkshopLimit(player) or "?"
+		local eff_op    = type(CBA_Options_GetPlayerOutpostLimit) == "function" and CBA_Options_GetPlayerOutpostLimit(player) or "?"
+
+		-- Stored team balance fields
+		local tb_prod = player.teamBalance_prodLimit
+		local tb_ram  = player.teamBalance_ramLimit
+		local tb_st   = player.teamBalance_siegeTowerLimit
+		local tb_ws   = player.teamBalance_workshopLimit
+
+		-- Current counts
+		local bld = player.obj_buildingLimit_count or 0
+		local ws = player.obj_buildingLimit_workshop_count or 0
+		local op = player.obj_buildingLimit_outpost_count or 0
+		local siege = player.siegeLimit_count or 0
+		local ram = player.ramLimit_count or 0
+		local tower = player.siegeTowerLimit_count or 0
+		local pending_ram = player.ramLimit_pending or 0
+		local pending_st = player.siegeTowerLimit_pending or 0
+
+		-- Entity count
+		local entity_count = 0
+		local ok_eg, eg = pcall(Player_GetEntities, player.id)
+		if ok_eg and eg then
+			local ok_c, c = pcall(EGroup_Count, eg)
+			if ok_c then entity_count = c end
+		end
+
+		-- Pop
+		local pop_cur = 0
+		local pop_cap = 0
+		local ok_pop, pc = pcall(Player_GetCurrentPopulation, player.id, CT_Personnel)
+		if ok_pop then pop_cur = pc end
+		local ok_cap, cc = pcall(Player_GetCurrentPopulationCap, player.id, CT_Personnel)
+		if ok_cap then pop_cap = cc end
+
+		print(string.format("  P%d (%s) team=%s %s  pop=%d/%d  entities=%d",
+			i, civ, tostring(team_idx), status, pop_cur, pop_cap, entity_count))
+		print(string.format("    caps: prod=%s/%s  siege=%s/%s  ram=%s/%s  st=%s/%s  ws=%s/%s  outpost=%s/%s",
+			tostring(bld), tostring(eff_prod),
+			tostring(siege), tostring(eff_siege),
+			tostring(ram + pending_ram), tostring(eff_ram),
+			tostring(tower + pending_st), tostring(eff_st),
+			tostring(ws), tostring(eff_ws),
+			tostring(op), tostring(eff_op)))
+		if tb_prod or tb_ram or tb_st or tb_ws then
+			print(string.format("    tb_stored: prod=%s ram=%s st=%s ws=%s",
+				tostring(tb_prod), tostring(tb_ram), tostring(tb_st), tostring(tb_ws)))
+		end
+	end
+	print(string.format("  Totals: %d alive, %d eliminated", alive_count, elim_count))
+
+	-- 4. Auto-rate scaling state
+	print("")
+	print("[LEAVER_SUMMARY] === Auto-Rates ===")
+	if _mod then
+		print(string.format("  resource_amount = %s (base=%s)",
+			tostring(_mod.resource_amount), tostring(_mod._base_resource_amount)))
+		print(string.format("  pop_interval = %s (base=%s)",
+			tostring(_mod.pop_cap_incease_on_interval), tostring(_mod._base_pop_interval_amount)))
+		print(string.format("  start_player_count = %s", tostring(_mod.start_player_count)))
+	else
+		print("  _mod is nil")
+	end
+
+	print("")
+	print("================================================================================")
+	print("[LEAVER_SUMMARY] End of dump")
+	print("================================================================================")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Auto-Pop House Guard Inspector
+-- Read-only validation that the auto-pop house guard is functioning correctly.
+-- Checks: auto-pop state, transfer stats counter, audit log entries, live entity scan.
+-- Returns the number of issues found (0 = PASS).
+-- Console: Debug_AutoPopHouseGuard()
+---------------------------------------------------------------------------------------------------
+function Debug_AutoPopHouseGuard()
+	print("")
+	print("============================================================")
+	print("  [POP_GUARD] Auto-Pop Population Guard Validation")
+	print("============================================================")
+
+	local issues = 0
+
+	-- 1. Auto-pop state
+	local autopop_active = _mod ~= nil and _mod.pop_cap_incease_on_interval ~= nil
+		and _mod.pop_cap_incease_on_interval ~= 0
+	print(string.format("  Auto-pop active: %s (pop_cap_incease_on_interval=%s)",
+		tostring(autopop_active),
+		_mod ~= nil and tostring(_mod.pop_cap_incease_on_interval) or "nil"))
+
+	if not autopop_active then
+		print("  [POP_GUARD] Auto-pop inactive — guard is bypassed. No issues.")
+		print("  [POP_GUARD] PASS (0 issues, guard not applicable)")
+		return 0
+	end
+
+	-- 2. Transfer stats counters
+	local house_kills = 0
+	local tc_kills = 0
+	if _leaver_last_transfer_stats ~= nil then
+		house_kills = _leaver_last_transfer_stats.bldg_killed_autopop_house or 0
+		tc_kills = _leaver_last_transfer_stats.bldg_killed_autopop_tc or 0
+		print(string.format("  Last transfer stats: pop_house=%d pop_tc=%d (src=%s→rcv=%s)",
+			house_kills, tc_kills,
+			tostring(_leaver_last_transfer_stats.src_civ),
+			tostring(_leaver_last_transfer_stats.rcv_civ)))
+	else
+		print("  Last transfer stats: none (no completed transfer)")
+	end
+
+	-- 3. Audit log scan (catches both class-level and resolved-key guard decisions)
+	local audit_house = 0
+	local audit_tc = 0
+	local audit_bps = {}
+	if _LEAVER_AUDIT_LOG ~= nil then
+		for _, entry in ipairs(_LEAVER_AUDIT_LOG) do
+			if entry.decision == "KILLED_AUTOPOP_POP_BUILDING" then
+				if entry.bld_class == "house" then
+					audit_house = audit_house + 1
+				elseif entry.bld_class == "town_center" then
+					audit_tc = audit_tc + 1
+				end
+				table.insert(audit_bps, string.format("%s (class=%s)",
+					tostring(entry.bp), tostring(entry.bld_class)))
+			elseif entry.decision == "KILLED_AUTOPOP_RESOLVED" then
+				local pop_type = (entry.resolved_key == AGS_BP_HOUSE) and "house" or "tc"
+				if pop_type == "house" then
+					audit_house = audit_house + 1
+				else
+					audit_tc = audit_tc + 1
+				end
+				table.insert(audit_bps, string.format("%s (key=%s→%s, resolved-guard)",
+					tostring(entry.bp), tostring(entry.ags_key), tostring(entry.resolved_key)))
+			end
+		end
+	end
+	print(string.format("  Audit log: %d house + %d TC population kills (log size=%d)",
+		audit_house, audit_tc, _LEAVER_AUDIT_LOG ~= nil and #_LEAVER_AUDIT_LOG or 0))
+	for _, desc in ipairs(audit_bps) do
+		print(string.format("    → %s", desc))
+	end
+
+	-- 4. Live entity scan (informational — pre-existing houses/TCs are expected on some maps)
+	local house_found = 0
+	local tc_found = 0
+	local pop_details = {}
+	for i, player in ipairs(PLAYERS) do
+		local ok_elim, elim = pcall(Core_IsPlayerEliminated, player.id)
+		if ok_elim and not elim then
+			local ok_eg, eg = pcall(Player_GetEntities, player.id)
+			if ok_eg and eg then
+				EGroup_ForEach(eg, function(gid, idx, eid)
+					local ok_bp, bp = pcall(Entity_GetBlueprint, eid)
+					local bp_name = "unknown"
+					if ok_bp and bp then
+						local ok_n, n = pcall(BP_GetName, bp)
+						if ok_n then bp_name = n end
+					end
+					if string.find(bp_name, "building_house") then
+						house_found = house_found + 1
+						table.insert(pop_details, string.format("P%d (%s): %s [house]",
+							i, Player_GetRaceName(player.id), bp_name))
+					elseif string.find(bp_name, "building_town_center") then
+						tc_found = tc_found + 1
+						table.insert(pop_details, string.format("P%d (%s): %s [TC]",
+							i, Player_GetRaceName(player.id), bp_name))
+					end
+				end)
+				EGroup_Destroy(eg)
+			end
+		end
+	end
+	print(string.format("  Live entity scan: %d houses + %d TCs across alive players (informational)",
+		house_found, tc_found))
+	for _, detail in ipairs(pop_details) do
+		print(string.format("    → %s", detail))
+	end
+
+	-- 5. Verdict (audit log + stats counters drive PASS/FAIL)
+	print("")
+	if issues == 0 then
+		print(string.format("  [POP_GUARD] PASS (house_kills=%d, tc_kills=%d, audit_house=%d, audit_tc=%d, live_houses=%d, live_tcs=%d)",
+			house_kills, tc_kills, audit_house, audit_tc, house_found, tc_found))
+	else
+		print(string.format("  [POP_GUARD] FAIL (%d issues — check audit log entries above)",
+			issues))
+	end
+
+	return issues
+end
+
+---------------------------------------------------------------------------------------------------
+-- Workshop Independence Inspector
+-- Verifies that workshop and production building counters are independent.
+-- Console: debug.inspect.wsindep() or Debug_GetWorkshopIndependenceState()
+---------------------------------------------------------------------------------------------------
+
+function Debug_GetWorkshopIndependenceState()
+	print("")
+	print("===== WORKSHOP INDEPENDENCE STATE =====")
+
+	for i, player in ipairs(PLAYERS) do
+		if player ~= nil then
+			local ok, is_human = pcall(Player_IsHuman, player.id)
+			if ok and is_human then
+				local civ = Player_GetRaceName(player.id)
+				local prod_count = player.obj_buildingLimit_count or 0
+				local ws_count = player.obj_buildingLimit_workshop_count or 0
+				local prod_cap = CBA_Options_GetPlayerProdLimit(player)
+				local ws_cap = CBA_Options_GetPlayerWorkshopLimit(player)
+
+				print(string.format("  P%d (%s):", i, civ))
+				print(string.format("    Prod buildings: %d / %d", prod_count, prod_cap))
+				print(string.format("    Workshops:      %d / %d", ws_count, ws_cap))
+
+				-- Recount and compare
+				local old_prod = prod_count
+				local old_ws = ws_count
+				CBA_Options_BuildingLimit_RecountPlayer(player)
+				local new_prod = player.obj_buildingLimit_count or 0
+				local new_ws = player.obj_buildingLimit_workshop_count or 0
+
+				if new_prod ~= old_prod or new_ws ~= old_ws then
+					print(string.format("    [DRIFT] Recount: prod %d→%d  ws %d→%d",
+						old_prod, new_prod, old_ws, new_ws))
+				else
+					print("    [OK] Recount consistent")
+				end
+
+				-- Workshop entity scan: verify no workshop counted as prod
+				local ws_in_prod = 0
+				local eg = Player_GetEntities(player.id)
+				EGroup_ForEach(eg, function(gid, idx, eid)
+					if Entity_IsOfType(eid, "scar_siegeworkshop") then
+						if Entity_IsOfType(eid, "military_production_building") then
+							ws_in_prod = ws_in_prod + 1
+						end
+					end
+				end)
+				EGroup_Destroy(eg)
+
+				if ws_in_prod > 0 then
+					print(string.format("    [INFO] %d workshop(s) have military_production_building tag (excluded from prod count by filter)", ws_in_prod))
+				end
+			end
+		end
+	end
+	print("=======================================")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Queue Preservation Inspector
+-- Shows current queue contents across all workshops — confirms no cancellations occurred.
+-- Console: debug.inspect.queuepres() or Debug_GetQueuePreservationState()
+---------------------------------------------------------------------------------------------------
+
+function Debug_GetQueuePreservationState()
+	print("")
+	print("===== QUEUE PRESERVATION STATE =====")
+
+	for i, player in ipairs(PLAYERS) do
+		if player ~= nil then
+			local ok, is_human = pcall(Player_IsHuman, player.id)
+			if ok and is_human then
+				local civ = Player_GetRaceName(player.id)
+				local ram_queued = CBA_Options_RamLimit_GetQueuedCount(player)
+				local st_queued = CBA_Options_SiegeTowerLimit_GetQueuedCount(player)
+				local siege_queued_pts = CBA_Options_SiegeLimit_GetQueuedPoints(player)
+
+				print(string.format("  P%d (%s):", i, civ))
+				print(string.format("    Ram    queued: %d  (count=%d/%d pend=%d)",
+					ram_queued, player.ramLimit_count or 0, RAM_LIMIT_MAX, player.ramLimit_pending or 0))
+				print(string.format("    ST     queued: %d  (count=%d/%d pend=%d)",
+					st_queued, player.siegeTowerLimit_count or 0, SIEGE_TOWER_LIMIT_MAX, player.siegeTowerLimit_pending or 0))
+				print(string.format("    Siege  queued: %d pts  (count=%d/%d pend=%d)",
+					siege_queued_pts, player.siegeLimit_count or 0,
+					AGS_GLOBAL_SETTINGS.MaximumMedicPopulation or 0, player.siegeLimit_pending or 0))
+
+				-- Per-workshop queue detail
+				local eg = Player_GetEntities(player.id)
+				local ws_idx = 0
+				EGroup_ForEach(eg, function(gid, idx, eid)
+					if Entity_IsOfType(eid, "scar_siegeworkshop") then
+						ws_idx = ws_idx + 1
+						local ok_q, q = pcall(Entity_GetProductionQueueSize, eid)
+						local queue_size = (ok_q and q) or 0
+						print(string.format("    Workshop #%d: queue_size=%d", ws_idx, queue_size))
+					end
+				end)
+				EGroup_Destroy(eg)
+
+				if ws_idx == 0 then
+					print("    (no workshops)")
+				end
+			end
+		end
+	end
+	print("====================================")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Namespace Registration
+---------------------------------------------------------------------------------------------------
+if debug then
+	debug.inspect.buildings     = Debug_GetBuildingLimitState
+	debug.inspect.siege         = Debug_GetSiegeLimitState
+	debug.inspect.ramtower      = Debug_RamSiegeTowerLimitState
+	debug.inspect.teambalance   = Debug_TeamBalanceCapState
+	debug.inspect.keeps         = Debug_GetKeepOwnershipMap
+	debug.inspect.villagers     = Debug_GetVillagerState
+	debug.inspect.options       = Debug_GetOptionParseResults
+	debug.inspect.postdefeat    = Debug_GetPostDefeatState
+	debug.inspect.religious     = Debug_GetReligiousState
+	debug.inspect.wonder        = Debug_GetWonderState
+	debug.inspect.autoage       = Debug_GetAutoAgeState
+	debug.inspect.starterkeep   = Debug_GetStarterKeepState
+	debug.inspect.siegefull     = Debug_SiegeLimitFullDump
+	debug.inspect.ramtrace      = Debug_RamLimitFullTrace
+	debug.inspect.siegecross    = Debug_SiegeLimitCrossValidation
+	debug.inspect.siegeclass    = Debug_ValidateSiegeClassifications
+	debug.inspect.teamlimits    = Debug_TeamBalancePerLimit
+	debug.inspect.leaversummary = Debug_LeaverSummary
+	debug.inspect.houseguard    = Debug_AutoPopHouseGuard
+	debug.inspect.wsindep       = Debug_GetWorkshopIndependenceState
+	debug.inspect.queuepres     = Debug_GetQueuePreservationState
+	debug._register("inspect", Debug_GetBuildingLimitState, "Read-only state inspectors (buildings, siege, keeps, etc.)", 1)
+end

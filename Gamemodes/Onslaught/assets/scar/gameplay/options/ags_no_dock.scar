@@ -1,0 +1,167 @@
+---------------------------------------------------------------------------------------------------
+-- Authors:
+-- Relic
+-- Woprock
+--
+-- Description:
+-- Disables Dock in any age.
+-- Disables Siege in any age.
+-- Disables Stone Wall in any age.
+---------------------------------------------------------------------------------------------------
+
+import("gameplay/cba_siege_data.scar")
+
+AGS_NO_DOCK_MODULE = "AGS_NoDock"
+AGS_NO_WALL_MODULE = "AGS_NoWall"
+AGS_NO_SIEGE_MODULE = "AGS_NoSiege"
+AGS_NO_ARSENAL_MODULE = "AGS_NoArsenal"
+
+---------------------------------------------------------------------------------------------------
+-- Delegates:
+---------------------------------------------------------------------------------------------------
+
+Core_RegisterModule(AGS_NO_DOCK_MODULE)	
+
+-- Dock
+function AGS_NoDock_UpdateModuleSettings()
+	AGS_Print("AGS_NoDock_UpdateModuleSettings")
+	if not AGS_GLOBAL_SETTINGS.NoDock then
+		Core_UnregisterModule(AGS_NO_DOCK_MODULE)
+	end
+end
+
+function AGS_NoDock_PresetFinalize()
+	AGS_Print("AGS_NoDock_PresetFinalize")
+	AGS_NoDock_Lock()
+end
+
+Core_RegisterModule(AGS_NO_WALL_MODULE)	
+
+-- Stone Wall
+function AGS_NoWall_UpdateModuleSettings()
+	AGS_Print("AGS_NoWall_UpdateModuleSettings")
+	if not AGS_GLOBAL_SETTINGS.NoWall then
+		Core_UnregisterModule(AGS_NO_WALL_MODULE)
+	end
+end
+
+function AGS_NoWall_PresetFinalize()
+	AGS_Print("AGS_NoWall_PresetFinalize")
+	AGS_NoWall_Lock()
+end
+
+Core_RegisterModule(AGS_NO_SIEGE_MODULE)
+
+-- Siege
+function AGS_NoSiege_UpdateModuleSettings()
+	AGS_Print("AGS_NoSiege_UpdateModuleSettings")
+	if not AGS_GLOBAL_SETTINGS.NoSiege then
+		Core_UnregisterModule(AGS_NO_SIEGE_MODULE)
+	end
+end
+
+function AGS_NoSiege_PresetFinalize()
+	AGS_Print("AGS_NoSiege_PresetFinalize")
+	AGS_NoSiege_Lock()
+end
+
+Core_RegisterModule(AGS_NO_ARSENAL_MODULE)
+-- Arsenal
+function AGS_NoArsenal_UpdateModuleSettings()
+	AGS_Print("AGS_NoArsenal_UpdateModuleSettings")
+	if not AGS_GLOBAL_SETTINGS.NoArsenal then
+		Core_UnregisterModule(AGS_NO_ARSENAL_MODULE)
+	end
+end
+
+function AGS_NoArsenal_PresetFinalize()
+	AGS_Print("AGS_NoArsenal_PresetFinalize")
+	AGS_NoArsenal_Lock()
+end
+---------------------------------------------------------------------------------------------------
+-- Functions:
+---------------------------------------------------------------------------------------------------
+
+-- Dock
+function AGS_NoDock_Lock()
+	for _, player in ipairs(PLAYERS) do
+		AGS_SetEntityProductionAvailabilitySafe(player.id, AGS_GetCivilizationEntity(player.raceName, AGS_BP_DOCK), ITEM_REMOVED, "AGS_NoDock_Lock/dock/" .. tostring(player.raceName))
+	end
+end
+
+-- Stone Wall
+function AGS_NoWall_Lock()
+	for _, player in ipairs(PLAYERS) do
+		local player_civ = Player_GetRaceName(player.id)
+		local branch_civ = AGS_CIV_FACTION_MAP[player_civ] or player_civ
+		if branch_civ ~= "mongol" then
+			AGS_SetEntityProductionAvailabilitySafe(player.id, AGS_GetCivilizationEntity(player.raceName, AGS_BP_STONEWALL), ITEM_REMOVED, "AGS_NoWall_Lock/stone_wall/" .. tostring(player.raceName))
+		end
+		if player_civ == "chinese" then
+			Player_SetEntityProductionAvailability(player.id, EBP.CHINESE.BUILDING_LANDMARK_AGE3_GREAT_WALL_CONTROL_CHI, ITEM_REMOVED)
+		end
+	end
+end
+
+function AGS_NoSiege_Lock()
+
+	for _, player in ipairs(PLAYERS) do
+		local player_civ = Player_GetRaceName(player.id)
+		local branch_civ = AGS_CIV_FACTION_MAP[player_civ] or player_civ
+		-- ALL FACTIONS
+		AGS_SetEntityProductionAvailabilitySafe(player.id, AGS_GetCivilizationEntity(player.raceName, AGS_BP_WORKSHOP), ITEM_REMOVED, "AGS_NoSiege_Lock/workshop/" .. tostring(player.raceName))
+		for id, unit_blueprint in pairs(CBA_SIEGE_UNITS.siege_faction_all) do
+			AGS_SetSquadProductionAvailabilitySafe(player.id, AGS_GetSiegeUnit(player.raceName, unit_blueprint), ITEM_REMOVED, "AGS_NoSiege_Lock/all/" .. tostring(player.raceName) .. "/" .. tostring(unit_blueprint))	
+		end
+		
+		if branch_civ == "mongol" then
+			for id, unit_blueprint in pairs(CBA_SIEGE_UNITS.siege_faction_mon) do
+				AGS_SetSquadProductionAvailabilitySafe(player.id, AGS_GetSiegeUnit(player.raceName, unit_blueprint), ITEM_REMOVED, "AGS_NoSiege_Lock/mongol/" .. tostring(player.raceName) .. "/" .. tostring(unit_blueprint))
+			end
+			for id, entity_blueprint in pairs(CBA_SIEGE_UNITS.siege_buildable_mon) do
+				AGS_SetEntityProductionAvailabilitySafe(player.id, BP_GetEntityBlueprint(entity_blueprint), ITEM_REMOVED, "AGS_NoSiege_Lock/mongol_buildable/" .. tostring(entity_blueprint)) -- Field Constructed = Entity
+			end
+			
+		elseif player_civ == "abbasid" then
+			for id, entity_blueprint in pairs(CBA_SIEGE_UNITS.siege_buildable_abb) do
+				AGS_SetEntityProductionAvailabilitySafe(player.id, BP_GetEntityBlueprint(entity_blueprint), ITEM_REMOVED, "AGS_NoSiege_Lock/abbasid_buildable/" .. tostring(entity_blueprint)) -- Field Constructed = Entity
+			end
+			-- Expansion
+		elseif player_civ == "abbasid_ha_01" then
+			for id, entity_blueprint in pairs(CBA_SIEGE_UNITS.siege_buildable_abb_ha_01) do
+				AGS_SetEntityProductionAvailabilitySafe(player.id, BP_GetEntityBlueprint(entity_blueprint), ITEM_REMOVED, "AGS_NoSiege_Lock/abbasid_ha_buildable/" .. tostring(entity_blueprint)) -- Field Constructed = Entity
+			end
+			Player_SetEntityProductionAvailability(player.id, EBP.ABBASID_HA_01.UNIT_RAM_TOWER_3_ABB_HA_01, ITEM_REMOVED) -- Field Constructed = Entity
+			
+		elseif player_civ == "french" or player_civ == "french_ha_01" then
+			for id, unit_blueprint in pairs(CBA_SIEGE_UNITS.siege_faction_fre) do
+				AGS_SetSquadProductionAvailabilitySafe(player.id, AGS_GetSiegeUnit(player.raceName, unit_blueprint), ITEM_REMOVED, "AGS_NoSiege_Lock/french/" .. tostring(player.raceName) .. "/" .. tostring(unit_blueprint))
+			end
+			
+		elseif player_civ == "chinese" then
+			for id, unit_blueprint in pairs(CBA_SIEGE_UNITS.siege_faction_chi) do
+				AGS_SetSquadProductionAvailabilitySafe(player.id, AGS_GetSiegeUnit(player.raceName, unit_blueprint), ITEM_REMOVED, "AGS_NoSiege_Lock/chinese/" .. tostring(player.raceName) .. "/" .. tostring(unit_blueprint))
+			end
+			-- Expansion
+		elseif player_civ == "chinese_ha_01" then
+				Player_SetSquadProductionAvailability(player.id, SBP.CHINESE_HA_01.UNIT_NEST_OF_BEES_4_CHI_HA_01, ITEM_REMOVED)
+			
+		elseif branch_civ == "byzantine" then
+			AGS_SetSquadProductionAvailabilitySafe(player.id, AGS_GetSiegeUnit(player.raceName, BP_SIEGE_RIBAULDEQUIN), ITEM_REMOVED, "AGS_NoSiege_Lock/byzantine_ribauldequin/" .. tostring(player.raceName))
+			Player_SetEntityProductionAvailability(player.id, EBP.BYZANTINE.UNIT_RAM_FIRE_3_BYZ, ITEM_REMOVED)
+			
+		else
+			AGS_SetSquadProductionAvailabilitySafe(player.id, AGS_GetSiegeUnit(player.raceName, BP_SIEGE_RIBAULDEQUIN), ITEM_REMOVED, "AGS_NoSiege_Lock/ribauldequin/" .. tostring(player.raceName))
+		end
+	end
+end
+
+-- Arsenal
+function AGS_NoArsenal_Lock()
+	for _, player in ipairs(PLAYERS) do
+		local ebp = AGS_GetCivilizationEntity(player.raceName, AGS_BP_ARSENAL)
+		if ebp ~= nil then
+			Player_SetEntityProductionAvailability(player.id, ebp, ITEM_REMOVED)
+		end
+	end
+end

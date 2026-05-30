@@ -1,0 +1,203 @@
+-- ============================================================
+-- Debug & Test Functions (console-callable)
+-- ============================================================
+-- Consolidated from main .scar and data.scar for cleaner separation.
+-- All functions here are safe to call from the AoE4 Content Editor console.
+-- ============================================================
+
+-- Dump all player slot states: human/AI, personality, original type, transfer status
+function Debug_PlayerSlots()
+	for i = 1, 6 do
+		local pid = ALL_PLAYER_SLOTS[i]
+		local is_human = Player_IsHuman(pid)
+		local personality = is_human and "N/A (human)" or AI_GetPersonality(pid)
+		local original = g_original_player_types[i] and "HUMAN" or "AI"
+		local transferred = g_transferred_slots[i] and "YES" or "no"
+		print(string.format("player%d | now: %s | was: %s | personality: %s | transferred: %s",
+			i, is_human and "HUMAN" or "AI", original, personality, transferred))
+	end
+end
+
+-- Dump resources for all human co-op players (1–4)
+function Debug_Resources()
+	for i = 1, 4 do
+		local pid = ALL_PLAYER_SLOTS[i]
+		local food = Player_GetResource(pid, RT_Food)
+		local wood = Player_GetResource(pid, RT_Wood)
+		local gold = Player_GetResource(pid, RT_Gold)
+		local stone = Player_GetResource(pid, RT_Stone)
+		print(string.format("player%d | Food: %d | Wood: %d | Gold: %d | Stone: %d",
+			i, food, wood, gold, stone))
+	end
+end
+
+-- Dump squad count for all player slots
+function Debug_SquadCounts()
+	for i = 1, 6 do
+		local pid = ALL_PLAYER_SLOTS[i]
+		Player_GetAll(pid)
+		local count = SGroup_CountSpawned(sg_allsquads)
+		print(string.format("player%d | squads: %d", i, count))
+	end
+end
+
+-- ============================================================
+-- DLC Resolver Debug Helpers (from data.scar)
+-- ============================================================
+
+---DebugPrint_Resolver: Conditional print — only outputs when DLC_DEBUG is true.
+function DebugPrint_Resolver(msg)
+	if DLC_DEBUG then
+		print("[DLC-DBG] " .. msg)
+	end
+end
+
+---Validator_PlayerCivDump: Log each human player's raw civ, resolved civ,
+-- and composition map entries. Call in Mission_SetupVariables for diagnostics.
+function Validator_PlayerCivDump()
+	for _, player in ipairs(PLAYERS) do
+		local raw = string.lower(Player_GetRaceName(player.id))
+		local resolved = GetPlayerCiv(player.id)
+		local melee_key = ResolveCivMapKey(CIV_MELEE_MAP, raw, "start_player_melee")
+		local ranged_key = ResolveCivMapKey(CIV_RANGED_MAP, raw, "start_player_ranged")
+		local reinf_melee = ResolveCivMapKey(REINFORCE_MELEE_MAP, raw, "units_player_melee_reinforce")
+		local reinf_ranged = ResolveCivMapKey(REINFORCE_RANGED_MAP, raw, "units_player_ranged_reinforce")
+		
+		print("[DLC-DUMP] Player " .. tostring(player.id)
+			.. " | raw: " .. raw
+			.. " | resolved: " .. resolved
+			.. " | melee: " .. melee_key
+			.. " | ranged: " .. ranged_key
+			.. " | reinf_melee: " .. reinf_melee
+			.. " | reinf_ranged: " .. reinf_ranged)
+	end
+end
+
+-- ============================================================
+-- DLC Composition Test Functions (from data.scar)
+-- ============================================================
+
+-- Debug: Validate and dump DLC civ composition mappings
+-- Does NOT spawn units (generic scar_ types always resolve to spawning player's faction)
+-- Instead, dumps the full mapping chain so you can verify correctness
+-- civ_name: Civilization identifier (base or DLC, e.g., "mongol", "english", "lancaster")
+function Test_SpawnDLCGroup(civ_name)
+    local resolved = ResolveCivKey(civ_name)
+    if resolved == nil then
+        print("[TEST] FAIL: Civ '" .. civ_name .. "' unresolvable")
+        return
+    end
+    
+    -- Melee mapping
+    local melee_key = CIV_MELEE_MAP[civ_name] or CIV_MELEE_MAP[resolved] or "start_player_melee"
+    local melee_valid = Unit_Types[melee_key] ~= nil
+    
+    -- Ranged mapping
+    local ranged_key = CIV_RANGED_MAP[civ_name] or CIV_RANGED_MAP[resolved] or "start_player_ranged"
+    local ranged_valid = Unit_Types[ranged_key] ~= nil
+    
+    -- Reinforce melee
+    local reinf_melee = REINFORCE_MELEE_MAP[civ_name] or REINFORCE_MELEE_MAP[resolved] or "units_player_melee_reinforce"
+    local reinf_melee_valid = Unit_Types[reinf_melee] ~= nil
+    
+    -- Reinforce ranged
+    local reinf_ranged = REINFORCE_RANGED_MAP[civ_name] or REINFORCE_RANGED_MAP[resolved] or "units_player_ranged_reinforce"
+    local reinf_ranged_valid = Unit_Types[reinf_ranged] ~= nil
+    
+    -- Print header
+    print("[TEST] === DLC Composition Dump: " .. civ_name .. " ===")
+    print("[TEST] Resolved parent: " .. resolved)
+    
+    -- Print mappings with pass/fail
+    print("[TEST] melee: " .. melee_key .. (melee_valid and " [OK]" or " [MISSING]"))
+    if melee_valid then
+        for _, u in ipairs(Unit_Types[melee_key]) do
+            print("[TEST]   " .. (u.type or "sbp") .. " x" .. u.numSquads)
+        end
+    end
+    
+    print("[TEST] ranged: " .. ranged_key .. (ranged_valid and " [OK]" or " [MISSING]"))
+    if ranged_valid then
+        for _, u in ipairs(Unit_Types[ranged_key]) do
+            print("[TEST]   " .. (u.type or "sbp") .. " x" .. u.numSquads)
+        end
+    end
+    
+    print("[TEST] reinf_melee: " .. reinf_melee .. (reinf_melee_valid and " [OK]" or " [MISSING]"))
+    print("[TEST] reinf_ranged: " .. reinf_ranged .. (reinf_ranged_valid and " [OK]" or " [MISSING]"))
+    
+    -- Overall result
+    local all_ok = melee_valid and ranged_valid and reinf_melee_valid and reinf_ranged_valid
+    print("[TEST] Result: " .. civ_name .. " -> " .. (all_ok and "PASS" or "FAIL"))
+end
+
+-- Debug: Run composition validation for all DLC civs at once
+function Test_AllDLCCivs()
+    print("[TEST] ======== DLC Composition Validation ========")
+    for civ, parent in pairs(DLC_CIV_PARENT_MAP) do
+        Test_SpawnDLCGroup(civ)
+        print("")
+    end
+    print("[TEST] ======== End DLC Validation ========")
+end
+
+function Test_ListDLCCivs()
+    print("[DLC REGISTRY]")
+    for civ, parent in pairs(DLC_CIV_PARENT_MAP) do
+        print("  " .. civ .. " -> parent: " .. parent)
+    end
+end
+
+-- ============================================================
+-- Refactor Smoke Tests (quick console checks)
+-- ============================================================
+
+-- Verifies that key refactored functions are loaded and callable.
+-- Usage (console): Debug_QuickRefactorSmoke()
+function Debug_QuickRefactorSmoke()
+    local checks = {
+        "GetAIDifficulty", "Difficulty_Init",
+        "AGS_GetCivilizationEntity", "TryGetCivilizationEntity", "AGS_GetSiegeEntity", "AGS_GetSiegeSquad",
+        "DynastyUI_unlocked", "SGroup_Tracker",
+        "Reset_AI", "Reset_AI_OnTakeOver", "CheckPlayerDisconnects",
+        "FindRecipientPlayer", "TransferResources", "ConvertBuildings", "ConvertSquads",
+        "_ConvertBuildingEntity", "_TransferOrConvertSquad",
+        "Debug_PlayerSlots", "Debug_Resources", "Debug_SquadCounts",
+        "Patrol_Cycle", "Units_Deploy", "Garrison_Building",
+        "_DeployAlliedSiege", "_RespawnPatrol", "Patrol_Respawn",
+        "Allied_Siege_1", "Allied_Siege_2", "Allied_Siege_3", "Setup_Spawns_Phase2",
+        "Tribute_Init", "Tribute_Cleanup"
+    }
+
+    local missing = 0
+    for _, name in ipairs(checks) do
+        local fn = _G[name]
+        if type(fn) ~= "function" then
+            print("[SMOKE] MISSING: " .. name)
+            missing = missing + 1
+        end
+    end
+
+    if missing > 0 then
+        print(string.format("[SMOKE] FAIL: %d missing function(s)", missing))
+        return false
+    end
+
+    print(string.format("[SMOKE] PASS: %d/%d functions present", #checks, #checks))
+    return true
+end
+
+-- One-command quick status dump after the smoke check.
+-- Usage (console): Debug_QuickRefactorStatus()
+function Debug_QuickRefactorStatus()
+    local ok = Debug_QuickRefactorSmoke()
+    if not ok then
+        return false
+    end
+
+    print("[SMOKE] Slot/resource/squad snapshot:")
+    Debug_PlayerSlots()
+    Debug_Resources()
+    Debug_SquadCounts()
+    return true
+end

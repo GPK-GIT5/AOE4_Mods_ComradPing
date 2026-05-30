@@ -1,0 +1,49 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Kill Point Values
+-- Configurable scoring table for entity kills
+-- Modify point values here without touching reward engine or reward trees
+-- Split from rewards.scar for maintainability
+---------------------------------------------------------------------------------------------------
+
+-- Kill point values by entity type
+-- Each entry: { types = {type1, type2, ...}, points = N, require_all = true/false }
+-- require_all: if true, ALL types must match (AND); if false/nil, ANY type matches (OR)
+-- Entries are checked in order; first match wins
+CBA_KILL_POINTS = {
+	{ types = {"hq", "castle"}, points = 250, require_all = true },
+	{ types = {"scar_keep", "landmark"}, points = 50 },
+	{ types = {"town_center", "military_production_building"}, points = 25 },
+	{ types = {"defensive_structure", "research_building", "medium_ship"}, points = 15 },
+	{ types = {"house", "economy_building", "hero", "siege", "war_elephant", "ship"}, points = 10 },
+	{ types = {"heavy", "gunpowder", "small_ship"}, points = 5 },
+	{ types = {"cavalry", "armored", "crossbowman"}, points = 3 },
+	{ types = {"human", "wall"}, points = 1 },
+}
+
+-- Returns the kill point value for a victim entity based on CBA_KILL_POINTS
+function CBA_GetKillPoints(victim)
+	if victim == nil then
+		return 0
+	end
+	for _, entry in ipairs(CBA_KILL_POINTS) do
+		if entry.require_all then
+			local all_match = true
+			for _, etype in ipairs(entry.types) do
+				if not Entity_IsOfType(victim, etype) then
+					all_match = false
+					break
+				end
+			end
+			if all_match then
+				return entry.points
+			end
+		else
+			for _, etype in ipairs(entry.types) do
+				if Entity_IsOfType(victim, etype) then
+					return entry.points
+				end
+			end
+		end
+	end
+	return 0
+end

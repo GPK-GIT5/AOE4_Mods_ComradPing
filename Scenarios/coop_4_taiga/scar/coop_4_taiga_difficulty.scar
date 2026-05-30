@@ -1,0 +1,399 @@
+-- Difficulty check / Thanks to AGameAnx		
+function GetAIDifficulty(player)
+	local AIPlayerNames = {
+		[Loc_ToAnsi(1309)] = 0,     -- A.I. Easy
+		[Loc_ToAnsi(1310)] = 1,     -- A.I. Intermediate
+		[Loc_ToAnsi(1311)] = 2,     -- A.I. Hard
+		[Loc_ToAnsi(1312)] = 3,     -- A.I. Hardest
+		[Loc_ToAnsi(11250912)] = 4, -- A.I. Ridiculous
+		[Loc_ToAnsi(11250913)] = 5, -- A.I. Outrageous
+		[Loc_ToAnsi(11250914)] = 6, -- A.I. Absurd
+	}
+	-- Strip number prefix from display name (e.g., "5 A.I. Absurd" -> "A.I. Absurd")
+	local display_name = Loc_ToAnsi(Player_GetDisplayName(player))
+	local clean_name = string.match(display_name, "^%d+%s+(.+)") or display_name
+	return AIPlayerNames[clean_name] or 2
+end
+
+-- ============================================================
+-- DIFFICULTY CONFIGURATION — Taiga Co-op Scenario
+-- ============================================================
+--
+-- This file centralizes EVERY difficulty setting so you can
+-- tune the scenario without touching any game-logic files.
+--
+-- HOW IT WORKS
+--   1. The game reads the AI difficulty selected in lobby.
+--   2. Difficulty_Init() picks the matching tier below and
+--      stores it in the global "DC" (Difficulty Config).
+--   3. All game logic reads from DC instead of raw numbers.
+--
+-- TIER REFERENCE
+--   0 = Easy          Beginner-friendly, extra resources
+--   1 = Intermediate  Baseline difficulty
+--   2 = Hard          Standard challenge, siege locked
+--   3 = Hardest       Extra waves, fewer resources
+--   4 = Ridiculous    No reinforcements, hard patrols
+--   5 = Outrageous    Workshop locked
+--   6 = Absurd        Everything maxed, workshop locked
+--
+-- ============================================================
+
+-- ---------------------------------------------------------
+-- _MergeTier: Shallow-copy TIER_DEFAULTS, then overlay.
+-- ---------------------------------------------------------
+local function _MergeTier(overrides)
+	local tier = {}
+	for k, v in pairs(TIER_DEFAULTS) do
+		tier[k] = v
+	end
+	for k, v in pairs(overrides) do
+		tier[k] = v
+	end
+	return tier
+end
+
+-- ============================================================
+-- TIER_DEFAULTS — INTERMEDIATE BASELINE (Tier 1)
+-- ============================================================
+TIER_DEFAULTS = {
+
+	-- ===== PLAYER RESTRICTIONS =====
+	player_starting_upgrades_bonus          = true,      -- Grant free melee/ranged + faction upgrades
+	disable_conversion                      = false,     -- Block monk conversion ability
+	restrict_keep                           = true,      -- Lock keep building
+	restrict_keep_landmarks                 = true,      -- Lock keep-related landmarks
+	restrict_siege                          = true,      -- Lock siege units (mangonel, etc.)
+	restrict_engineers                      = false,     -- Lock siege engineers upgrade
+	restrict_workshop                       = false,     -- Lock siege workshop building
+	restrict_age4                           = false,     -- Cap max age to Castle, lock Age 4
+
+	-- ===== PROFILE TRANSITIONS (after Phase 3 siege capture) =====
+	-- "siege_available": unlock mangonel/ribauldequin/etc but NOT engineers
+	-- "engineers_available": unlock siege engineers upgrade + field constructs
+	phase3_siege_profile                    = "siege_available",
+	phase3_workshop_unlock                  = false,     -- Also unlock workshop on siege capture
+
+	-- ===== PLAYER REINFORCEMENTS =====
+	player_reinforcements                   = true,      -- Enable reinforcement respawn rule
+	reinforcement_squad_count              = 3,         -- Budget: max reinforcement spawns per player
+	player_reinforcement_thresholds        = {0.7, 0.5, 0.3},  -- Unit depletion thresholds
+
+	-- ===== ENEMY DEFENDERS =====
+	checkpoint_defender_strength             = "easy",    -- "easy" | "hard" checkpoint camps
+	outpost_ranged_defenders                 = false,     -- Spawn ranged defenders at outposts
+	village_ranged_defenders                 = true,      -- Spawn ranged defenders at village
+	camp_defender_strength                   = "easy",    -- "easy" | "hard" camp guards
+
+	-- ===== PATROLS =====
+	patrol_respawn                          = true,      -- Enable respawning patrol groups
+	patrol_strength                         = "easy",    -- "easy" | "hard" patrol unit type
+
+	-- ===== ATTACK WAVES =====
+	waves_5min_flank                        = true,      -- Extra flank wave at 5 min
+	waves_late_extra                        = false,     -- Extra waves at 40/45 min
+	waves_hardest_extra                     = false,     -- Hardest-tier waves
+
+	-- ===== CITY DEFENSE (Phase 3) =====
+	hard_waves_enabled                      = false,     -- Hard city waves
+	city_hardest_extra                      = false,     -- Hardest-tier city waves
+
+	-- ===== VILLAGER SPAWNS =====
+	villager_hard_defenders                 = false,     -- Extra villager defenders at village south
+	north_attacker_respawn_timer            = 180,       -- Raid defender respawn delay (seconds)
+
+	-- ===== STARTING RESOURCES (granted after village capture) =====
+	starting_food                           = 2000,      -- Food grant after village defense
+	starting_gold                           = 1500,      -- Gold grant after village defense
+	starting_wood                           = 750,       -- Wood grant after village defense
+	starting_stone                          = 400,       -- Stone grant after village defense
+	tc_health_multiplier                    = 10,        -- NPC town center HP scale (higher = tougher)
+}
+
+-- ============================================================
+-- TIER OVERRIDES
+-- ============================================================
+Difficulty_Config = {
+
+-- ===========================================
+-- TIER 0: EASY
+-- ===========================================
+[0] = _MergeTier({
+	label                                   = "Easy",
+
+	-- ===== PLAYER RESTRICTIONS =====
+	restrict_keep                           = false,
+	restrict_keep_landmarks                 = false,
+	restrict_siege                          = false,
+
+	-- ===== PATROLS =====
+	patrol_respawn                          = false,
+
+	-- ===== ATTACK WAVES =====
+	waves_5min_flank                        = false,
+
+	-- ===== ENEMY DEFENDERS =====
+	village_ranged_defenders                = false,
+
+	-- ===== PLAYER REINFORCEMENTS =====
+	reinforcement_squad_count              = 4,         -- Extra reinforcement budget for Easy
+	player_reinforcement_thresholds        = {0.75, 0.55, 0.35, 0.2},
+
+	-- ===== STARTING RESOURCES =====
+	starting_food                           = 2500,
+	starting_gold                           = 2000,
+	starting_wood                           = 1250,
+	north_attacker_respawn_timer            = 180,
+	tc_health_multiplier                    = 15,
+}),
+
+-- ===========================================
+-- TIER 1: INTERMEDIATE
+-- ===========================================
+[1] = _MergeTier({
+	label                                   = "Intermediate",
+	north_attacker_respawn_timer            = 180,
+	tc_health_multiplier                    = 5,
+}),  
+
+-- ===========================================
+-- TIER 2: HARD
+-- ===========================================
+[2] = _MergeTier({
+	label                                   = "Hard",
+
+	-- ===== PLAYER RESTRICTIONS =====
+	player_starting_upgrades_bonus          = false,
+	disable_conversion                      = true,
+	restrict_age4                           = true,
+
+	-- ===== PROFILE TRANSITIONS =====
+	phase3_siege_profile                    = "engineers_available",
+
+	-- ===== PLAYER REINFORCEMENTS =====
+	reinforcement_squad_count              = 2,         -- Reduced reinforcement budget
+
+	-- ===== ENEMY DEFENDERS =====
+	checkpoint_defender_strength             = "hard",
+	outpost_ranged_defenders                 = true,
+	camp_defender_strength                   = "hard",
+
+	-- ===== ATTACK WAVES =====
+	waves_late_extra                        = true,
+
+	-- ===== CITY DEFENSE =====
+	hard_waves_enabled                      = true,
+
+	-- ===== VILLAGER SPAWNS =====
+	villager_hard_defenders                 = true,
+
+	-- ===== STARTING RESOURCES =====
+	starting_food                           = 750,
+	starting_gold                           = 500,
+	starting_wood                           = 250,
+	north_attacker_respawn_timer            = 210,
+	tc_health_multiplier                    = 5,
+}),
+
+-- ===========================================
+-- TIER 3: HARDEST
+-- ===========================================
+[3] = _MergeTier({
+	label                                   = "Hardest",
+
+	-- ===== PLAYER RESTRICTIONS =====
+	player_starting_upgrades_bonus          = false,
+	disable_conversion                      = true,
+	restrict_engineers                      = true,
+	restrict_age4                           = true,
+
+	-- ===== PROFILE TRANSITIONS =====
+	phase3_siege_profile                    = "engineers_available",
+
+	-- ===== PLAYER REINFORCEMENTS =====
+	player_reinforcements                   = false,
+	reinforcement_squad_count              = 1,         -- Minimal reinforcement budget
+
+	-- ===== ENEMY DEFENDERS =====
+	checkpoint_defender_strength             = "hard",
+	outpost_ranged_defenders                 = true,
+	camp_defender_strength                   = "hard",
+
+	-- ===== PATROLS =====
+	patrol_strength                         = "hard",
+
+	-- ===== ATTACK WAVES =====
+	waves_late_extra                        = true,
+	waves_hardest_extra                     = true,
+
+	-- ===== CITY DEFENSE =====
+	hard_waves_enabled                      = true,
+	city_hardest_extra                      = true,
+
+	-- ===== VILLAGER SPAWNS =====
+	villager_hard_defenders                 = true,
+
+	-- ===== STARTING RESOURCES =====
+	starting_food                           = 750,
+	starting_gold                           = 500,
+	starting_wood                           = 250,
+	north_attacker_respawn_timer            = 240,
+	tc_health_multiplier                    = 5,
+}),
+
+-- ===========================================
+-- TIER 4: RIDICULOUS
+-- ===========================================
+[4] = _MergeTier({
+	label                                   = "Ridiculous",
+
+	-- ===== PLAYER RESTRICTIONS =====
+	player_starting_upgrades_bonus          = false,
+	disable_conversion                      = true,
+	restrict_engineers                      = true,
+	restrict_age4                           = true,
+
+	-- ===== PROFILE TRANSITIONS =====
+	phase3_siege_profile                    = "engineers_available",
+
+	-- ===== PLAYER REINFORCEMENTS =====
+	player_reinforcements                   = false,
+	reinforcement_squad_count              = 1,         -- Minimal reinforcement budget
+
+	-- ===== ENEMY DEFENDERS =====
+	checkpoint_defender_strength             = "hard",
+	outpost_ranged_defenders                 = true,
+	camp_defender_strength                   = "hard",
+
+	-- ===== PATROLS =====
+	patrol_strength                         = "hard",
+
+	-- ===== ATTACK WAVES =====
+	waves_late_extra                        = true,
+	waves_hardest_extra                     = true,
+
+	-- ===== CITY DEFENSE =====
+	hard_waves_enabled                      = true,
+	city_hardest_extra                      = true,
+
+	-- ===== VILLAGER SPAWNS =====
+	villager_hard_defenders                 = true,
+
+	-- ===== STARTING RESOURCES =====
+	starting_food                           = 750,
+	starting_gold                           = 500,
+	starting_wood                           = 250,
+	north_attacker_respawn_timer            = 270,
+	tc_health_multiplier                    = 5,
+}),
+
+-- ===========================================
+-- TIER 5: OUTRAGEOUS
+-- ===========================================
+[5] = _MergeTier({
+	label                                   = "Outrageous",
+
+	-- ===== PLAYER RESTRICTIONS =====
+	player_starting_upgrades_bonus          = false,
+	disable_conversion                      = true,
+	restrict_engineers                      = true,
+	restrict_workshop                       = true,
+	restrict_age4                           = true,
+
+	-- ===== PROFILE TRANSITIONS =====
+	phase3_siege_profile                    = "engineers_available",
+	phase3_workshop_unlock                  = true,
+
+	-- ===== PLAYER REINFORCEMENTS =====
+	player_reinforcements                   = false,
+	reinforcement_squad_count              = 1,         -- Minimal reinforcement budget
+
+	-- ===== ENEMY DEFENDERS =====
+	checkpoint_defender_strength             = "hard",
+	outpost_ranged_defenders                 = true,
+	camp_defender_strength                   = "hard",
+
+	-- ===== PATROLS =====
+	patrol_strength                         = "hard",
+
+	-- ===== ATTACK WAVES =====
+	waves_late_extra                        = true,
+	waves_hardest_extra                     = true,
+
+	-- ===== CITY DEFENSE =====
+	hard_waves_enabled                      = true,
+	city_hardest_extra                      = true,
+
+	-- ===== VILLAGER SPAWNS =====
+	villager_hard_defenders                 = true,
+
+	-- ===== STARTING RESOURCES =====
+	starting_food                           = 750,
+	starting_gold                           = 500,
+	starting_wood                           = 250,
+	north_attacker_respawn_timer            = 300,
+	tc_health_multiplier                    = 5,
+}),
+
+-- ===========================================
+-- TIER 6: ABSURD
+-- ===========================================
+[6] = _MergeTier({
+	label                                   = "Absurd",
+
+	-- ===== PLAYER RESTRICTIONS =====
+	player_starting_upgrades_bonus          = false,
+	disable_conversion                      = true,
+	restrict_engineers                      = true,
+	restrict_workshop                       = true,
+	restrict_age4                           = true,
+
+	-- ===== PROFILE TRANSITIONS =====
+	phase3_siege_profile                    = "engineers_available",
+	phase3_workshop_unlock                  = true,
+
+	-- ===== PLAYER REINFORCEMENTS =====
+	player_reinforcements                   = false,
+	reinforcement_squad_count              = 1,         -- Minimal reinforcement budget
+
+	-- ===== ENEMY DEFENDERS =====
+	checkpoint_defender_strength             = "hard",
+	outpost_ranged_defenders                 = true,
+	camp_defender_strength                   = "hard",
+
+	-- ===== PATROLS =====
+	patrol_strength                         = "hard",
+
+	-- ===== ATTACK WAVES =====
+	waves_late_extra                        = true,
+	waves_hardest_extra                     = true,
+
+	-- ===== CITY DEFENSE =====
+	hard_waves_enabled                      = true,
+	city_hardest_extra                      = true,
+
+	-- ===== VILLAGER SPAWNS =====
+	villager_hard_defenders                 = true,
+
+	-- ===== STARTING RESOURCES =====
+	starting_food                           = 750,
+	starting_gold                           = 500,
+	starting_wood                           = 250,
+	north_attacker_respawn_timer            = 330,
+	tc_health_multiplier                    = 5,
+}),
+
+} -- end Difficulty_Config
+
+-- ============================================================
+-- Difficulty_Init: Call once after AI_Difficulty is set.
+-- Sets the global DC (Difficulty Config) to the active tier.
+-- ============================================================
+function Difficulty_Init()
+	DC = Difficulty_Config[AI_Difficulty]
+	if DC == nil then
+		print(string.format("[DIFFICULTY] WARNING: No config for tier %d, falling back to Hard (2)", AI_Difficulty))
+		DC = Difficulty_Config[2]
+	end
+	print(string.format("[DIFFICULTY] Initialized: %s (tier %d)", DC.label, AI_Difficulty))
+end

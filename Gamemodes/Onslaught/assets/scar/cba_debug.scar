@@ -1,0 +1,13 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — Entry Point Shim
+-- Loaded by cba.scar via: import("cba_debug.scar")
+-- Forwards to the split debug architecture in debug/ directory.
+--
+-- The actual debug code lives in debug/cba_debug.scar (entry point) which imports
+-- 11 sub-files: core, helpers, validation, inspectors, stress, coverage,
+-- event_probes, destructive, limits_ui, leaver, scenario.
+--
+-- Monolith backup: cba_debug_monolith.scar.bak
+---------------------------------------------------------------------------------------------------
+
+import("debug/cba_debug.scar")

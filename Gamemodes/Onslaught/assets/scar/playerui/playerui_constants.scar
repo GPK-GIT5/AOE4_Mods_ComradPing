@@ -1,0 +1,99 @@
+-----------------------------------------------------------------------
+-- PlayerUI Constants
+-----------------------------------------------------------------------
+
+PlayerUiConstants = {
+	RESOURCE_NAME_TO_ICON = {
+		food = "pack://application:,,,/WPFGUI;component/icons/resources/resource_food_icon.png",
+		wood = "pack://application:,,,/WPFGUI;component/icons/resources/resource_wood_icon.png",
+		gold = "pack://application:,,,/WPFGUI;component/icons/resources/resource_gold_icon.png",
+		stone = "pack://application:,,,/WPFGUI;component/icons/resources/resource_stone_icon.png",
+	},
+}
+
+-----------------------------------------------------------------------
+-- Elimination Transition Animation Constants
+-----------------------------------------------------------------------
+
+_PLAYERUI_ELIM_ANIM_DURATION = 0.5         -- animation duration in seconds
+_PLAYERUI_ELIM_ANIM_FADE_TARGET = 0.4      -- final opacity multiplier (0.4 = standard dim)
+_PLAYERUI_ELIM_ANIM_SCALE_MIN = 0.95       -- scale floor (animates from 0.95 back to 1.0)
+_PLAYERUI_ELIM_ANIM_SEED_PROGRESS = 0.08   -- immediate first-frame progress so fade is visible on trigger pass
+_PLAYERUI_ELIM_ANIM_MAX_PROGRESS_STEP = 0.35 -- clamp per tick to avoid skip-to-complete on delayed frames
+_PLAYERUI_ELIM_ANIM_DEBUG = false          -- debug output toggle
+
+-----------------------------------------------------------------------
+-- Elimination Reveal Animation Constants (Phase 1)
+-- After the dim animation settles, the eliminated label/icon/overlay
+-- fade in instead of appearing instantly.
+-----------------------------------------------------------------------
+
+_PLAYERUI_ELIM_REVEAL_DURATION = 0.25       -- reveal fade-in duration in seconds
+_PLAYERUI_ELIM_REVEAL_SEED_PROGRESS = 0.10  -- immediate first-frame progress so reveal is visible on trigger
+_PLAYERUI_ELIM_REVEAL_MAX_PROGRESS_STEP = 0.40 -- clamp per tick to avoid skip-to-complete
+
+-----------------------------------------------------------------------
+-- Elimination Glow Pulse Constants (Phase 2)
+-- Brief colour flash at reveal, decaying from peak opacity → 0.
+-----------------------------------------------------------------------
+
+_PLAYERUI_ELIM_GLOW_DURATION = 0.30         -- glow pulse duration in seconds
+_PLAYERUI_ELIM_GLOW_PEAK_OPACITY = 0.30     -- starting opacity of glow overlay
+_PLAYERUI_ELIM_GLOW_SEED_PROGRESS = 0.10    -- immediate first-frame progress
+_PLAYERUI_ELIM_GLOW_MAX_PROGRESS_STEP = 0.40 -- clamp per tick to avoid skip-to-complete
+
+-----------------------------------------------------------------------
+-- Phase 3A: Crossfade + Score Foreground + Margin Slide Constants
+-----------------------------------------------------------------------
+
+_PLAYERUI_ELIM_MARGIN_SLIDE_PX = 3              -- vertical slide distance in px
+_PLAYERUI_ELIM_SCORE_COLOR_ALIVE = "#FFFFFFFF"  -- white (alive score colour)
+_PLAYERUI_ELIM_SCORE_COLOR_FINAL = "#FF888888"  -- grey (eliminated score colour)
+_PLAYERUI_ELIM_STATUS_COLOR_START = "#FF888888"  -- grey (status label start colour for lerp)
+
+-----------------------------------------------------------------------
+-- Reward Icon Smoothing Constants (safe phase: per-slot fade + border crossfade)
+-- Presentation only — never affects gameplay, scoring, or queue logic.
+-----------------------------------------------------------------------
+
+_PLAYERUI_REWARD_ICON_FADE_IN_RATE = 0.15       -- opacity increase per 0.1s tick (~0.7s full fade)
+_PLAYERUI_REWARD_ICON_FADE_SEED = 0.25          -- starting opacity when slot content changes
+_PLAYERUI_REWARD_ICON_BORDER_LERP = 0.20        -- border colour lerp factor per 0.1s tick
+
+-----------------------------------------------------------------------
+-- Reward Completion Animation Constants
+-- Phases: completion_center → completion_highlight → completion_fadeout → reshuffle → advance
+-- Replaces the old fill→reveal playback with direct completion effects.
+-- Presentation only — never affects gameplay, scoring, or queue logic.
+-----------------------------------------------------------------------
+
+_PLAYERUI_REWARD_HIGHLIGHT_DURATION = 1.0       -- seconds to hold completed icon with glow + de-emphasis
+_PLAYERUI_REWARD_FADEOUT_DURATION = 0.55         -- seconds for completed icon to fade out (was 0.4)
+_PLAYERUI_REWARD_RESHUFFLE_DURATION = 0.6        -- seconds for remaining icons to restore and reposition (was 0.4)
+_PLAYERUI_REWARD_DEEMPHASIS_OPACITY = 0.30       -- queued icon opacity during highlight/fadeout
+_PLAYERUI_REWARD_GLOW_PEAK_OPACITY = 0.35        -- peak gold overlay opacity on completed icon
+_PLAYERUI_REWARD_GLOW_HOLD_RATIO = 0.30          -- fraction of highlight duration to hold peak before decay
+_PLAYERUI_REWARD_DEEMPH_RAMP_RATIO = 0.50        -- fraction of highlight to ramp de-emphasis (was hard-coded 0.3)
+_PLAYERUI_REWARD_ADVANCE_DWELL = 0.15            -- seconds to pause between reshuffle and next milestone
+_PLAYERUI_REWARD_RESHUFFLE_STAGGER = 0.08        -- seconds per slot of staggered reshuffle entry
+
+-----------------------------------------------------------------------
+-- Reward Icon Motion Constants (gated by EnableRewardIconMotion)
+-- Per-icon offset/scale transitions and completion_center phase.
+-- Expressive profile: larger offsets and stronger scale emphasis.
+-----------------------------------------------------------------------
+
+_PLAYERUI_REWARD_ICON_OFFSET_LERP = 0.25         -- lerp factor per 0.1s tick for offsetX convergence
+_PLAYERUI_REWARD_ICON_OFFSET_EPSILON = 0.5        -- px threshold to snap offsetX to target
+_PLAYERUI_REWARD_ICON_SCALE_LERP = 0.25           -- lerp factor per 0.1s tick for scale convergence
+_PLAYERUI_REWARD_ICON_SCALE_EPSILON = 0.01        -- threshold to snap scale to target
+_PLAYERUI_REWARD_ICON_SCALE_HIGHLIGHT = 1.20      -- completed icon scale during highlight (expressive)
+_PLAYERUI_REWARD_ICON_SCALE_DEEMPH = 0.80         -- queued icon scale during highlight/fadeout
+_PLAYERUI_REWARD_ICON_OFFSET_SLIDE = 20           -- px: new lead icon slides left during reshuffle
+_PLAYERUI_REWARD_CENTER_DURATION = 0.35           -- seconds: completion_center convergence phase
+_PLAYERUI_REWARD_CENTER_TIMEOUT = 0.6             -- seconds: max time before force-advancing past center
+_PLAYERUI_REWARD_FADEOUT_SCALE_END = 0.60          -- completed icon scale at end of fadeout (shrink)
+_PLAYERUI_REWARD_STRIP_OFFSET_LERP = 0.20         -- strip-level pan lerp factor per tick
+_PLAYERUI_REWARD_ICON_SLOT_WIDTH = 36              -- px: icon natural width in StackPanel (30 icon + 6 margin)
+_PLAYERUI_REWARD_FILL_BASE_DURATION = 1.35         -- seconds for bar to smoothly fill 0→100% (center + highlight)
+_PLAYERUI_REWARD_FILL_QUEUE_ACCEL = 0.25           -- extra speed multiplier per queued item (more queue = faster fill)

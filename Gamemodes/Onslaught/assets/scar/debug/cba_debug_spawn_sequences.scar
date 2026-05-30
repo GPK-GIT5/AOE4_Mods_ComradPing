@@ -1,0 +1,227 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — Spawn Sequences
+-- Table-driven spawn plans: define {bp, player, count, delay, validate_fn} steps,
+-- then run them with Debug_RunSpawnPlan(). Respects step-mode.
+--
+-- Branch: onslaught-v3.3
+-- Depends: cba_debug_core.scar (step-mode, EndMarker, ScheduleNextPhase)
+---------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------
+-- Spawn Plan Engine
+---------------------------------------------------------------------------------------------------
+
+-- plan = { name = "PlanName", steps = { {bp=, player_idx=, count=, delay=, validate_fn=}, ... } }
+-- validate_fn(player, count, bp) → pass (bool), detail (string)
+
+function Debug_RunSpawnPlan(plan)
+	if plan == nil or plan.steps == nil or #plan.steps == 0 then
+		print("[CBA_DEBUG] Invalid spawn plan")
+		return
+	end
+
+	_cba_debug.enabled = true
+	_cba_debug._spawn_plan = {
+		plan = plan,
+		current_step = 0,
+		results = {},
+	}
+
+	local ok, gt = pcall(World_GetGameTime)
+	_cba_debug._spawn_plan.start_time = ok and gt or 0
+
+	print("")
+	print("============================================")
+	print(string.format("  CBA DEBUG — SPAWN PLAN: %s (%d steps)", plan.name or "Unnamed", #plan.steps))
+	print("============================================")
+
+	_SpawnPlan_RunNextStep()
+end
+
+function _SpawnPlan_RunNextStep()
+	local sp = _cba_debug._spawn_plan
+	if sp == nil then return end
+
+	sp.current_step = sp.current_step + 1
+	local step_idx = sp.current_step
+	local steps = sp.plan.steps
+
+	if step_idx > #steps then
+		_SpawnPlan_FinalReport()
+		return
+	end
+
+	local step = steps[step_idx]
+	local player_idx = step.player_idx or 1
+	local player = PLAYERS[player_idx]
+	local count = step.count or 1
+	local bp_name = step.bp or "unknown"
+
+	print(string.format("  [STEP %d/%d] Spawning %d x %s for P%d",
+		step_idx, #steps, count, bp_name, player_idx))
+
+	if player == nil then
+		table.insert(sp.results, {name = bp_name, pass = false, detail = "Invalid player_idx=" .. player_idx})
+		_SpawnPlan_AdvanceOrPause(step)
+		return
+	end
+
+	-- Spawn
+	local pos = _Debug_GetPlayerSpawnAnchor(player)
+	if pos == nil then
+		table.insert(sp.results, {name = bp_name, pass = false, detail = "No spawn anchor"})
+		_SpawnPlan_AdvanceOrPause(step)
+		return
+	end
+
+	local spawned = 0
+	local ok_sbp, sbp = pcall(BP_GetSquadBlueprint, bp_name)
+	if ok_sbp and sbp then
+		for n = 1, count do
+			local ok_s, err = pcall(function()
+				local sg = SGroup_CreateUnique()
+				UnitEntry_DeploySquads(player.id, sg, {{sbp = sbp, numSquads = 1}}, pos)
+			end)
+			if ok_s then
+				spawned = spawned + 1
+			else
+				print(string.format("    Spawn error at #%d: %s", n, tostring(err)))
+			end
+		end
+	else
+		table.insert(sp.results, {name = bp_name, pass = false, detail = "Cannot resolve SBP"})
+		_SpawnPlan_AdvanceOrPause(step)
+		return
+	end
+
+	-- Validate
+	if step.validate_fn ~= nil then
+		local ok_v, pass, detail = pcall(step.validate_fn, player, spawned, bp_name)
+		if ok_v then
+			table.insert(sp.results, {name = bp_name, pass = pass, detail = detail or ""})
+			print(string.format("    %s %s", pass and "[PASS]" or "[FAIL]", detail or ""))
+		else
+			table.insert(sp.results, {name = bp_name, pass = false, detail = "validate_fn error: " .. tostring(pass)})
+		end
+	else
+		table.insert(sp.results, {name = bp_name, pass = true, detail = string.format("Spawned %d/%d", spawned, count)})
+	end
+
+	_SpawnPlan_AdvanceOrPause(step)
+end
+
+function _SpawnPlan_AdvanceOrPause(step)
+	local delay = step.delay or 1
+	local sp = _cba_debug._spawn_plan
+	local step_label = string.format("Spawn Step %d", sp.current_step + 1)
+	_Debug_ScheduleNextPhase(_SpawnPlan_RunNextStep, delay, step_label, "SpawnPlan")
+end
+
+function _SpawnPlan_FinalReport()
+	local sp = _cba_debug._spawn_plan
+	if sp == nil then return end
+
+	local total = #sp.results
+	local fails = 0
+	for _, r in ipairs(sp.results) do
+		if not r.pass then fails = fails + 1 end
+	end
+
+	print("")
+	print(string.format("  SPAWN PLAN: %d/%d steps passed", total - fails, total))
+	if fails > 0 then
+		print("  FAILURES:")
+		for _, r in ipairs(sp.results) do
+			if not r.pass then
+				print(string.format("    [FAIL] %s — %s", r.name, r.detail))
+			end
+		end
+	end
+
+	local ok, gt = pcall(World_GetGameTime)
+	local elapsed = (ok and sp.start_time) and (gt - sp.start_time) or 0
+	_Debug_EndMarker("SpawnPlan:" .. (sp.plan.name or "Unnamed"), total - fails, total, elapsed)
+
+	_cba_debug._spawn_plan = nil
+end
+
+---------------------------------------------------------------------------------------------------
+-- Single Spawn + Validate
+---------------------------------------------------------------------------------------------------
+
+function Debug_SpawnAndValidate(bp_name, player_idx, count, validate_fn)
+	local plan = {
+		name = "SpawnAndValidate",
+		steps = {{bp = bp_name, player_idx = player_idx, count = count, delay = 0, validate_fn = validate_fn}},
+	}
+	Debug_RunSpawnPlan(plan)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Pre-built Plans
+---------------------------------------------------------------------------------------------------
+
+function Debug_SpawnPlan_SiegeStress()
+	-- Spawns siege units at threshold boundaries to test lock/unlock cascading.
+	-- Uses English player (P1 assumed) with generic siege BPs.
+	local plan = {
+		name = "SiegeStress",
+		steps = {
+			{bp = "unit_spearman_1_eng", player_idx = 1, count = 3, delay = 1,
+				validate_fn = function(p, c, bp) return c == 3, string.format("Baseline infantry: %d/3", c) end},
+			{bp = "unit_springald_3_eng", player_idx = 1, count = 2, delay = 2,
+				validate_fn = function(p, c, bp) return c == 2, string.format("Springalds: %d/2 (2pts total)", c) end},
+			{bp = "unit_mangonel_3_eng", player_idx = 1, count = 2, delay = 2,
+				validate_fn = function(p, c, bp) return c == 2, string.format("Mangonels: %d/2 (6pts + 2pts = 8pts)", c) end},
+			{bp = "unit_bombard_4_eng", player_idx = 1, count = 1, delay = 2,
+				validate_fn = function(p, c, bp) return c == 1, string.format("Bombard: %d/1 (3pts + 8pts = 11pts)", c) end},
+			{bp = "unit_trebuchet_4_cw_eng", player_idx = 1, count = 1, delay = 2,
+				validate_fn = function(p, c, bp) return c == 1, string.format("Trebuchet CW: %d/1 (3pts + 11pts = 14pts)", c) end},
+		}
+	}
+	Debug_RunSpawnPlan(plan)
+end
+
+function Debug_SpawnPlan_MixedArmy(player_idx)
+	player_idx = player_idx or 1
+	local player = PLAYERS[player_idx]
+	if player == nil then
+		print("[CBA_DEBUG] Invalid player_idx")
+		return
+	end
+
+	local civ = _Debug_GetPlayerCiv(player)
+
+	-- Build a generic mixed army based on civ entity table lookups
+	local infantry_bp = "unit_spearman_1_eng"
+	local ranged_bp = "unit_archer_2_eng"
+	local cav_bp = "unit_horseman_2_eng"
+
+	-- Try to resolve civ-specific BPs from AGS_ENTITY_TABLE
+	if AGS_ENTITY_TABLE and AGS_ENTITY_TABLE[civ] then
+		local data = AGS_ENTITY_TABLE[civ]
+		if data.barracks then
+			-- Use generic resolution; specific bp names are civ-dependent
+		end
+	end
+
+	local plan = {
+		name = "MixedArmy_P" .. player_idx .. "_" .. civ,
+		steps = {
+			{bp = infantry_bp, player_idx = player_idx, count = 10, delay = 1},
+			{bp = ranged_bp, player_idx = player_idx, count = 8, delay = 1},
+			{bp = cav_bp, player_idx = player_idx, count = 5, delay = 1},
+		}
+	}
+	Debug_RunSpawnPlan(plan)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Namespace Registration
+---------------------------------------------------------------------------------------------------
+if debug then
+	debug.helpers.plan      = Debug_RunSpawnPlan
+	debug.helpers.spawnVal  = Debug_SpawnAndValidate
+	debug.helpers.siegePlan = Debug_SpawnPlan_SiegeStress
+	debug.helpers.armyPlan  = Debug_SpawnPlan_MixedArmy
+end

@@ -1,0 +1,145 @@
+---------------------------------------------------------------------------------------------------
+-- CBA AI Player — Outside (Secondary Zone) Priority Chain
+-- Builds in strict priority: 2 outpost → 2 barracks → 1 stable → 1 archery.
+-- Outposts are instant-built; military buildings use villager construction.
+-- Origin: cba_ai_player.scar lines 2735–2936
+---------------------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------
+-- RULE: Outside Chain
+-----------------------------------------------------------------------
+
+function _AI_Rule_OutsideChain()
+	if _AI_IsExternallyLocked() then return end
+	for _, player in ipairs(_ai_players) do
+		if not _AI_IsEliminated(player) then
+			_AI_ManageOutsideChain(player)
+		end
+	end
+end
+
+function _AI_ManageOutsideChain(player)
+	local ai = player.ai
+	if (ai.villager_stage or _AI_VILLAGER_STAGE_PRODUCTION) < _AI_VILLAGER_STAGE_SECONDARY then return end
+	local spawn_ready = _AI_IsSpawnProductionSetupComplete(player)
+	local has_any_primary = _AI_CountCompletedPrimaryProductionBuildings(player) >= 1
+	local zone_center = _AI_GetSecondaryZoneCenter(player)
+	if zone_center == nil then return end
+
+	local current_age = Player_GetCurrentAge(player.id)
+	local player_civ = Player_GetRaceName(player.id)
+	local chain = ai.outside_chain
+	local zone_hostile = ai.secondary_zone_hostile
+
+	for _, stage in ipairs(_AI_OUTSIDE_PRIORITY) do
+		if zone_hostile then
+			if not stage.instant then
+				return
+			end
+			local outpost_built = (chain.built[stage.type_key] or 0) + (chain.pending[stage.type_key] or 0)
+			if outpost_built >= _AI_HOSTILE_ZONE_OUTPOST_CAP then
+				goto next_stage
+			end
+		end
+
+		if stage.instant and not has_any_primary then
+			return
+		end
+		if not stage.instant and not spawn_ready then
+			return
+		end
+
+		if current_age < (stage.min_age or 1) then
+			return
+		end
+
+		local built = chain.built[stage.type_key] or 0
+		local pending = chain.pending[stage.type_key] or 0
+		if (built + pending) >= stage.max then
+			goto next_stage
+		end
+
+		if stage.instant then
+			local ok = _AI_ChainBuildOutpost(player, zone_center)
+			if ok then
+				chain.built[stage.type_key] = (chain.built[stage.type_key] or 0) + 1
+				print(string.format("[AI_PLAYER] %s CHAIN built instant %s #%d/%d in secondary zone.",
+					ai.label or "P?", stage.type_key, chain.built[stage.type_key], stage.max))
+			end
+			return
+		else
+			if _AI_CountFreeTeams(player) <= 0 then return end
+
+			local pending_limit = _AI_MAX_PENDING_FOUNDATIONS
+			if ai.total_buildings >= 4 then pending_limit = _AI_MAX_PENDING_FOUNDATIONS_HIGH end
+			if _AI_CountPendingFoundations(player) >= pending_limit then return end
+
+			local ebp = AGS_GetCivilizationEntity(player_civ, stage.bp_key)
+			if ebp ~= nil then
+				local ok, result = pcall(_AI_PlaceBuilding, player, ebp, zone_center, stage.bp_key, "secondary")
+				if ok and result then
+					chain.pending[stage.type_key] = (chain.pending[stage.type_key] or 0) + 1
+					print(string.format("[AI_PLAYER] %s CHAIN queued %s #%d/%d in secondary zone.",
+						ai.label or "P?", stage.type_key,
+						(chain.built[stage.type_key] or 0) + (chain.pending[stage.type_key] or 0),
+						stage.max))
+				end
+			end
+			return
+		end
+
+		::next_stage::
+	end
+end
+
+function _AI_ChainBuildOutpost(player, zone_center)
+	local ai = player.ai
+	local obj_limit = player.obj_buildingLimit_outpost_count or 0
+	if obj_limit >= 20 then return false end
+	if ai.outpost_count >= _AI_MAX_OUTPOSTS then return false end
+
+	local player_civ = Player_GetRaceName(player.id)
+	local outpost_ebp = AGS_GetCivilizationEntity(player_civ, "outpost")
+	if outpost_ebp == nil then
+		local ok_bp, bp = pcall(BP_GetEntityBlueprint, "building_outpost")
+		if ok_bp and bp ~= nil then
+			outpost_ebp = bp
+		else
+			return false
+		end
+	end
+
+	local target_pos = _AI_GetDeterministicPlacementRetry(zone_center, ai.outpost_count + 1, 10,
+		_AI_GetPlayerOrdinal(player) * 17)
+
+	local base_pos = _AI_GetBasePosition(player) or zone_center
+	local ok_create, entity = pcall(Entity_CreateFacing, outpost_ebp, player.id, target_pos, base_pos, true)
+	if not ok_create or entity == nil then return false end
+
+	pcall(Entity_ForceConstruct, entity)
+	ai.outpost_count = ai.outpost_count + 1
+	table.insert(ai.outpost_positions, target_pos)
+	return true
+end
+
+function _AI_OnChainBuildingComplete(player, entry)
+	local chain = player.ai.outside_chain
+	if entry.zone ~= "secondary" then return end
+	local tk = entry.type_key
+	if chain.built[tk] ~= nil and chain.pending[tk] ~= nil then
+		chain.built[tk] = (chain.built[tk] or 0) + 1
+		chain.pending[tk] = math.max(0, (chain.pending[tk] or 0) - 1)
+		print(string.format("[AI_PLAYER] %s CHAIN completed %s (built=%d, pending=%d).",
+			player.ai.label or "P?", tk,
+			chain.built[tk], chain.pending[tk]))
+	end
+end
+
+function _AI_OnChainBuildingAbandoned(player, entry)
+	local chain = player.ai.outside_chain
+	if entry.zone ~= "secondary" then return end
+	local tk = entry.type_key
+	if chain.pending[tk] ~= nil then
+		chain.pending[tk] = math.max(0, (chain.pending[tk] or 0) - 1)
+	end
+end

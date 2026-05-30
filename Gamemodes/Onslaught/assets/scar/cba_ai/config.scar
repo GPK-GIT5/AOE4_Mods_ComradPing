@@ -1,0 +1,235 @@
+---------------------------------------------------------------------------------------------------
+-- CBA AI Player — Configuration & Constants
+-- All timing intervals, thresholds, ratios, building priority tables, civ variant maps,
+-- MaA state enum constants, and outside chain priority.
+-- Origin: cba_ai_player.scar lines 1–248
+---------------------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------
+-- Constants
+-----------------------------------------------------------------------
+
+_AI_MODULE = "CBA_AIPlayer"
+
+-- Resource grant (effectively unlimited; no economy needed)
+_AI_RESOURCE_GRANT         = 100000
+
+-- Intervals (seconds)
+_AI_BUILDING_INTERVAL      = 5.0     -- place new military buildings (fast cadence for 10-in-120s target)
+_AI_CONSTRUCT_INTERVAL     = 5.0     -- villager construction management (fast tick)
+_AI_PRODUCE_INTERVAL       = 4.0     -- rapid queue refill cadence (starter priority)
+_AI_ARMY_INTERVAL          = 10.0    -- check staging -> dispatch army
+_AI_ALLY_SUPPORT_INTERVAL  = 8.0     -- check if teammates are in combat
+_AI_SCOUT_INTERVAL         = 45.0    -- scout patrol management
+_AI_OUTPOST_INTERVAL       = 60.0    -- outpost placement
+_AI_RESOURCE_TOPUP_INTERVAL = 120.0  -- periodic resource top-up
+
+-- Squad threshold before dispatching an army
+_AI_SQUAD_THRESHOLD_LOW    = 30      -- aggressive
+_AI_SQUAD_THRESHOLD_MED    = 40      -- default (group 40+ before attacking)
+_AI_SQUAD_THRESHOLD_HIGH   = 70      -- cautious
+
+-- Army retreat: dispatched armies retreat to base when below this count
+_AI_ARMY_RETREAT_THRESHOLD = 20
+-- Staging defense: use staging units to defend base when under attack
+_AI_STAGING_DEFENSE_MIN    = 10      -- minimum staging count to trigger defensive dispatch
+-- Secondary zone hostile detection
+_AI_HOSTILE_ZONE_SCAN_RADIUS = 50    -- scan radius for enemy buildings near secondary zone
+_AI_HOSTILE_ZONE_OUTPOST_CAP = 2     -- max outposts per player in hostile secondary zone
+
+-- Unit composition ratios (must sum to 1.0)
+_AI_RATIO_INFANTRY = 0.40
+_AI_RATIO_RANGED   = 0.30
+_AI_RATIO_CAVALRY  = 0.20
+_AI_RATIO_SIEGE    = 0.10
+
+-- Building construction priority order (per type key, with age requirement)
+-- Each entry: { bp_key, max_count, min_age }
+_AI_BUILDING_PRIORITY = {
+	{ key = AGS_BP_BARRACKS,      max = 4, min_age = 1 },
+	{ key = AGS_BP_ARCHERY_RANGE, max = 4, min_age = 2 },
+	{ key = AGS_BP_STABLE,        max = 4, min_age = 2 },
+	{ key = AGS_BP_WORKSHOP,      max = 2, min_age = 3 },
+}
+
+-- Civ-variant military producers beyond the standard 4.
+-- Each entry: { key = AGS entity table key, max = per-type cap, min_age = age gate, role = unit role }
+_AI_CIV_VARIANT_PRODUCERS = {
+	byzantine = {
+		{ key = "mercenary_house", max = 2, min_age = 3, role = "infantry" },
+	},
+	byzantine_ha_mac = {
+		{ key = "passive_trait_building", max = 4, min_age = 1, role = "infantry" },
+	},
+	ottoman = {
+		{ key = "military_school", max = 2, min_age = 2, role = "infantry" },
+	},
+	japanese_ha_sen = {
+		{ key = "daimyo_estate_hojo",   max = 1, min_age = 2, role = "infantry" },
+		{ key = "daimyo_estate_oda",    max = 1, min_age = 2, role = "infantry" },
+		{ key = "daimyo_estate_takeda", max = 1, min_age = 2, role = "cavalry" },
+	},
+	-- Jin Dynasty: building_grassland_2_jin (Iron Pagoda / Menganmouke producer).
+	-- Source of truth: AGS_ENTITY_TABLE["jin_dynasty"].grassland in ags_blueprints.scar.
+	jin_dynasty = {
+		{ key = "grassland", max = 2, min_age = 2, role = "cavalry" },
+	},
+}
+
+-- Role -> unit type tag for production queue routing
+_AI_ROLE_UNIT_MAP = {
+	infantry = "scar_spearman",
+	ranged   = "scar_archer",
+	cavalry  = "scar_horseman",
+	siege    = "scar_springald",
+}
+
+-- At Age 1 when other types are age-locked, barracks can exceed its normal max
+_AI_BARRACKS_OVERFLOW_MAX  = 10
+
+-- Max total outposts the AI will place globally (vision + secondary; respects per-player 20 limit)
+_AI_MAX_OUTPOSTS = 10
+
+-- Spawn radius: outposts placed within this distance from base don't count toward vision stage
+_AI_SPAWN_RADIUS = 80
+
+-- Villager build stages (sequential):
+--   1 = Build 10 production buildings in primary zone
+--   2 = Build 5 vision outposts outside spawn
+--   3 = 2nd build zone (secondary zone chain)
+_AI_VILLAGER_STAGE_PRODUCTION  = 1
+_AI_VILLAGER_STAGE_OUTPOSTS    = 2
+_AI_VILLAGER_STAGE_SECONDARY   = 3
+_AI_VISION_OUTPOST_TARGET      = 5   -- outposts needed to advance from stage 2 → 3
+
+-- Production queue management
+_AI_PRODUCTION_QUEUE_TARGET = 8      -- keep production queues continuously busy
+_AI_PRODUCTION_QUEUE_CYCLE_CAP = 24  -- hard cap per player per produce cycle
+_AI_PRODUCTION_QUEUE_PER_BUILDING_CAP = 4 -- hard cap queued per building per cycle
+_AI_STAGING_QUEUE_SUPPRESS_THRESHOLD = 60 -- stop queue fill if staging already saturated
+
+-- Building type -> unit SBP type tag for production queue
+_AI_BUILDING_UNIT_MAP = {
+	barracks      = "scar_spearman",
+	archery_range = "scar_archer",
+	stable        = "scar_horseman",
+	siege_workshop = "scar_springald",
+}
+
+-- Combat response: teammates send 40+ staging squads when allies are fighting
+_AI_COMBAT_RESPONSE_THRESHOLD = 40
+_AI_COMBAT_RESPONSE_COOLDOWN  = 12.0
+
+-- Early game protection: no attacking enemy base for this many seconds
+_AI_EARLY_GAME_NO_ATTACK      = 300.0   -- 5 minutes
+-- Wall detection / ram support
+_AI_WALL_DETECT_RADIUS         = 60.0    -- scan radius around base for stone walls
+_AI_WALL_DETECT_MIN_SEGMENTS   = 3       -- minimum wall segments to flag as "walled"
+
+-- Starting units
+-- NOTE: Players already receive starting MaA + villagers from the base game.
+-- The AI does NOT spawn additional copies; it claims and redirects existing ones.
+
+-- Patrol / coordination intervals
+_AI_PATROL_INTERVAL       = 8.0     -- faster patrol/scout reactions in starter phase
+_AI_RALLY_RADIUS          = 140.0   -- broader ally rally acquisition radius
+_AI_RALLY_MIN_STRENGTH    = 15      -- minimum combined squads before engaging
+_AI_RALLY_TIMEOUT         = 12.0    -- short timeout to keep synchronized assaults snappy
+_AI_PATROL_ORDER_HOLD_AFTER_ASSAULT = 12.0 -- suppress patrol waypoint churn after attack orders
+
+-- Manatarms deterministic sequence states (global for cross-file access by stress suite)
+-- Strict ordering: SCOUTING -> ENEMY_FOUND -> RALLYING -> REGROUPED -> ENGAGING
+MAA_STATE_IDLE          = "idle"           -- not yet claimed
+MAA_STATE_SCOUTING      = "scouting"       -- actively patrolling to find enemies
+MAA_STATE_ENEMY_FOUND   = "enemy_found"    -- enemy sighted, holding and waiting for allies
+MAA_STATE_RETREATING    = "retreating"     -- falling back toward nearest allied MaA group
+MAA_STATE_RALLYING      = "rallying"        -- allies called, moving to rally point
+MAA_STATE_REGROUPED     = "regrouped"      -- all participants arrived at rally point
+MAA_STATE_ENGAGING      = "engaging"        -- attack issued, in combat
+
+-- Manatarms sequence tuning
+_AI_MAA_SCOUT_TIMEOUT        = 60.0    -- max time in scouting before forced advance
+_AI_MAA_RALLY_PROXIMITY      = 30.0    -- distance to rally point to count as "arrived"
+_AI_MAA_REGROUP_TIMEOUT      = 15.0    -- max time waiting for regroup before forced engage
+_AI_MAA_ENGAGE_MIN_HOLD      = 20.0    -- min hold during combat before reassessing threats
+_AI_MAA_ENGAGE_MAX_HOLD      = 120.0   -- hard max engagement time to prevent indefinite lock
+_AI_MAA_HOLD_TIMEOUT         = 30.0    -- max time in enemy_found hold before scouting reset
+_AI_MAA_RETREAT_TIMEOUT      = 20.0    -- max time retreating before forced scouting reset
+_AI_MAA_ALLY_PROXIMITY       = 45.0    -- distance to consider allied MaA "nearby" for engage gating
+_AI_MAA_RALLY_REBROADCAST    = 5.0     -- interval between rally re-broadcasts during hold
+_AI_MAA_THREAT_CHECK_INTERVAL = 2.0    -- throttle for AIPlayer_IsPointThreatened in SCOUTING
+_AI_MAA_WAYPOINT_ARRIVAL_DIST  = 35.0   -- distance to current waypoint to consider "arrived" before issuing next order
+_AI_MAA_SOLO_ENGAGE_MIN_COUNT  = 2      -- minimum patrol squads to engage without ally support
+_AI_KEEP_ATTACK_BLOCK_RADIUS  = 120.0  -- do not launch outward attacks while threat remains inside keep radius
+
+-- Starter phase goals
+_AI_STARTER_TEAM_TARGET      = 6     -- 12+ villagers -> 6 teams of 2 (match starter barracks target)
+_AI_STARTER_BARRACKS_TARGET  = 6     -- unlock secondary zone chain after 6 barracks complete
+_AI_STARTER_SPAWN_PROD_TARGET = 10   -- expansion unlock after 10 spawn-zone production buildings complete
+_AI_STARTER_SECOND_PROD_TYPE  = "archery_range"  -- second production line after starter barracks
+
+-- Startup claim retries (no spawning; claim existing squads only)
+_AI_CLAIM_RETRY_MAX_ATTEMPTS = 20
+
+-- Sentinel/off-map coordinate guard
+_AI_POS_INVALID_ABS = 9000
+
+-- Two-zone building layout
+_AI_PRIMARY_ZONE_MAX       = 10     -- max buildings in primary zone (keep → center)
+_AI_SECONDARY_ZONE_MAX     = 5      -- max buildings in secondary zone (near sacred site)
+_AI_PRIMARY_ZONE_OFFSET    = 30     -- distance from keep toward center for primary zone anchor
+_AI_SECONDARY_ZONE_RADIUS  = 25     -- spread radius around sacred site for secondary zone
+
+-- Construction (experimental): missionomatic villager command pattern
+-- Uses Cmd_Construct to let the engine create and build foundations through the synchronized command path.
+_AI_MAX_PENDING_FOUNDATIONS      = 4
+_AI_MAX_PENDING_FOUNDATIONS_HIGH = 6       -- raised after total_buildings >= 4
+_AI_CONSTRUCT_REISSUE_INTERVAL   = 6.0
+_AI_CONSTRUCT_DISCOVERY_RADIUS   = 24.0
+_AI_CONSTRUCT_STALE_TIMEOUT      = 40.0   -- abandon queue entry if entity not found within this time
+_AI_CONSTRUCT_MAX_REISSUES       = 5      -- max reissue attempts before declaring blocked/abandoned
+_AI_CONSTRUCT_BLOCKED_RETRY      = true   -- if true, blocked entries get a new position instead of immediate abandon
+_AI_STALE_POS_BLACKLIST_TTL      = 90.0   -- avoid immediate requeue to stale coordinates
+_AI_STALE_POS_KEY_GRID           = 8      -- quantization grid for stale coordinate keys
+_AI_ALLOW_FORCE_CONSTRUCT_FALLBACK = true  -- if all villagers dead, force-complete discovered foundations
+_AI_DIAG_LOG_INTERVAL            = 8.0    -- throttle interval for recurring construction/patrol diagnostics
+_AI_VILLAGER_PREMOVE_DISTANCE    = 60     -- issue Cmd_Move if villagers are farther than this from build site
+_AI_VILLAGER_ACTIVE_ORDER_INTERVAL = 20.0 -- keep villagers active without economy retasking spam
+_AI_VILLAGER_ACTIVE_RADIUS         = 18    -- radius around primary zone for villager active movement
+_AI_VILLAGER_RELEASE_GRACE         = 8.0   -- grace window before parked free teams can be moved again
+_AI_SANITY_CHECK_INTERVAL        = 60.0   -- periodic state-consistency check
+_AI_BUILD_TIMELINE_MAX           = 50     -- max events in per-player build timeline buffer
+_AI_TYPE_COOLDOWN                = 3.0    -- minimum seconds between placements of the same building type
+_AI_ECONOMY_REAPPLY_COOLDOWN     = 20.0   -- minimum seconds between forced economy suppression re-applies
+_AI_DISABLE_NATIVE_AI_BRAIN      = true   -- disables engine AI brain so SCAR owns villagers/armies deterministically
+_AI_CONSTRUCT_PROGRESS_STALL_TIMEOUT = 15.0 -- avoid over-reissuing when construction is already progressing
+
+-- Debug verbosity: 0=minimal, 1=default diagnostics, 2=verbose per-cycle traces
+_AI_DEBUG_VERBOSITY = 1
+
+-- Patrol command ownership capture (ON by default until explicitly disabled)
+_AI_DEBUG_CAPTURE_PATROL_OWNERSHIP = true
+_AI_PATROL_OVERWRITE_WINDOW = 2.0 -- seconds; command source swap inside window is treated as overwrite-thrash
+
+-- Unit category → building type that produces it
+_AI_UNIT_PRODUCER = {
+	infantry = "barracks",
+	ranged   = "archery_range",
+	cavalry  = "stable",
+	siege    = "siege_workshop",
+}
+
+-- Villager construction teams: split villagers into groups of N for parallel building
+_AI_VILLAGER_TEAM_SIZE = 2
+_AI_VILLAGER_TEAM_MAX  = 8
+
+-- Outside (secondary zone) priority chain: built in strict priority order.
+-- Outposts are instant-built; military buildings use villager construction.
+_AI_OUTSIDE_CHAIN_INTERVAL = 6.0
+_AI_OUTSIDE_PRIORITY = {
+	{ type_key = "outpost",       bp_key = "outpost",           max = 2, min_age = 1, instant = true },
+	{ type_key = "barracks",      bp_key = AGS_BP_BARRACKS,     max = 2, min_age = 1, instant = false },
+	{ type_key = "stable",        bp_key = AGS_BP_STABLE,       max = 1, min_age = 2, instant = false },
+	{ type_key = "archery_range", bp_key = AGS_BP_ARCHERY_RANGE, max = 1, min_age = 2, instant = false },
+}
+_AI_OUTSIDE_CHAIN_OUTPOST_MAX = 2  -- chain outpost quota (subset of global outpost limit)

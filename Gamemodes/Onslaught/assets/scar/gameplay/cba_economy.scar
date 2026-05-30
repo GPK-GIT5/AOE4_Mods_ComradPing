@@ -1,0 +1,110 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Economy Settings
+-- Shared lobby option parsing and economy helpers for CBA / Onslaught entry points.
+-- Eliminates duplicated economy_section parsing from cba.scar and onslaught.scar.
+---------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------
+-- Starting Resource Values (per mode)
+---------------------------------------------------------------------------------------------------
+CBA_ECONOMY_RESOURCES = {
+	-- CBA mode (cba.scar entry point)
+	cba = {
+		standard = { food = 10000, wood = 7500, gold = 1000, stone = 5000 },
+		high     = { food = 30000, wood = 25000, gold = 10000, stone = 10000 },
+		max      = { food = 100000, wood = 100000, gold = 100000, stone = 100000 },
+	},
+	-- Onslaught / Nomad mode (onslaught.scar entry point)
+	onslaught = {
+		standard = { food = 0, wood = 150, gold = 100, stone = 0 },
+		high     = { food = 2200, wood = 1500, gold = 1000, stone = 1000 },
+		max      = { food = 100000, wood = 100000, gold = 100000, stone = 100000 },
+	},
+}
+
+---------------------------------------------------------------------------------------------------
+-- Economy Option Parsing
+---------------------------------------------------------------------------------------------------
+
+-- Parse economy_section lobby options into _mod fields.
+-- Call from Mod_OnGameSetup() after Setup_GetWinConditionOptions().
+function CBA_Economy_ParseOptions()
+	if not _mod.options.economy_section then
+		return
+	end
+	
+	local section = _mod.options.economy_section
+	
+	-- Resources per minute
+	if section.resource_amount then
+		if section.resource_amount.enum_value == section.resource_amount.enum_items.resource_1000 then
+			_mod.resource_amount = 1000
+		elseif section.resource_amount.enum_value == section.resource_amount.enum_items.resource_2500 then
+			_mod.resource_amount = 2500
+		elseif section.resource_amount.enum_value == section.resource_amount.enum_items.resource_5000 then
+			_mod.resource_amount = 5000
+		elseif section.resource_amount.enum_value == section.resource_amount.enum_items.resource_unlimited then
+			_mod.resource_amount = "unlimited"
+		elseif section.resource_amount.enum_value == section.resource_amount.enum_items.resource_disabled then
+			_mod.resource_amount = "disabled"
+		end
+	end
+	
+	-- Starting Resources tier
+	if section.startingResources then
+		if section.startingResources.enum_value == section.startingResources.enum_items.startingResources_standard then
+			_mod.startingResources = "standard"
+		elseif section.startingResources.enum_value == section.startingResources.enum_items.startingResources_high then
+			_mod.startingResources = "high"
+		elseif section.startingResources.enum_value == section.startingResources.enum_items.startingResources_max then
+			_mod.startingResources = "max"
+		end
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Shared Economy Helpers
+---------------------------------------------------------------------------------------------------
+
+-- Apply starting resources using the mode-specific resource table.
+-- mode_key: "cba" or "onslaught" (selects from CBA_ECONOMY_RESOURCES)
+function CBA_Economy_SetStartingResources(mode_key)
+	local tier = _mod.startingResources
+	if not tier then
+		return
+	end
+	local mode_data = CBA_ECONOMY_RESOURCES[mode_key]
+	if not mode_data or not mode_data[tier] then
+		return
+	end
+	local res = mode_data[tier]
+	for i, player in ipairs(PLAYERS) do
+		Player_SetResource(player.id, RT_Food, res.food)
+		Player_SetResource(player.id, RT_Wood, res.wood)
+		Player_SetResource(player.id, RT_Gold, res.gold)
+		Player_SetResource(player.id, RT_Stone, res.stone)
+	end
+end
+
+-- Remove gaia animals if the lobby option is enabled.
+function CBA_Economy_RemoveGaia()
+	if _mod.options.economy_section and
+		_mod.options.economy_section.nogaia then
+		local egroup = EGroup_CreateUnique()
+		World_GetAllNeutralEntities(egroup)
+		EGroup_Filter(egroup, "animal", FILTER_KEEP)
+		EGroup_DestroyAllEntities(egroup)
+		EGroup_Destroy(egroup)
+	end
+end
+
+-- Apply Fog of War lobby option.
+function CBA_Economy_SetFOW()
+	if _mod.options.economy_section and _mod.options.economy_section.option_fow then
+		if _mod.options.economy_section.option_fow.enum_value == _mod.options.economy_section.option_fow.enum_items.option_fow_explore then
+			FOW_ExploreAll()
+		elseif _mod.options.economy_section.option_fow.enum_value == _mod.options.economy_section.option_fow.enum_items.option_fow_reveal then
+			FOW_ForceRevealAllUnblockedAreas()
+		end
+	end
+end

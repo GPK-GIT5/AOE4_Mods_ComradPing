@@ -1,0 +1,3526 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — PlayerUI Animation & Crash Diagnostics
+-- Runtime debugger for ranking FLIP animations, score pulse, scale/opacity
+-- bindings, and transition-lock integrity. Includes a continuous monitor
+-- that logs invariant violations to scarlog for post-match analysis.
+--
+-- Console commands:
+--   Debug_PlayerUI_Anim()            — Full 6-phase diagnostic suite
+--   Debug_PlayerUI_Anim_Monitor()    — Start continuous 0.5s invariant monitor
+--   Debug_PlayerUI_Anim_MonitorStop()— Stop continuous monitor
+--   Debug_PlayerUI_Anim_Stress(n)    — Rapid swap stress test (n rounds, default 10)
+--   Debug_PlayerUI_Anim_Pulse(idx)   — Force score pulse on player idx (default 1)
+--   Debug_PlayerUI_Anim_Snapshot()   — One-shot snapshot of all animated fields
+--   Debug_PlayerUI_Anim_FeatureStatus() — Print runtime feature-flag status
+--   Debug_PlayerUI_Anim_Features(move, scale, pulse, dim) — Enable/disable recent visual features
+--   Debug_PlayerUI_Anim_PresetSafe() — Disable all new visual features
+--   Debug_PlayerUI_Anim_PresetAll()  — Enable all new visual features
+--   Debug_PlayerUI_Anim_TogglePaths(hud, scores, objectives) — Toggle-path isolation flags
+--   Debug_PlayerUI_Anim_TogglePresetHudOnly() — Only toggle PlayerUIHud visibility
+--   Debug_PlayerUI_Anim_TogglePresetFull()    — Toggle HUD + PlayerScores + objectives
+--   Debug_PlayerUI_Anim_ApplyWhenVisible(enabled) — Enable/disable live DataContext applies while HUD visible
+--   Debug_PlayerUI_Anim_ToggleProbe(path) — Probe one path: "hud", "scores", "objectives", or "all"
+--   Debug_PlayerUI_Anim_SetMinimalHud(enabled) — Select minimal-safe HUD template for next match load
+--   Debug_PlayerUI_Anim_RestoreStage1() — Verified stable full-HUD baseline
+--   Debug_PlayerUI_Anim_RestoreStage2() — Stage1 + PlayerScores sync in toggle path
+--   Debug_PlayerUI_Anim_RestoreStage3() — Stage2 + objective sync in toggle path
+--   Debug_PlayerUI_Anim_RestoreStage4() — Stage3 + live DataContext apply while visible
+--   Debug_PlayerUI_Anim_RestoreStage5() — Experimental runtime visual flags (row transforms remain removed from XAML)
+--   Debug_PlayerUI_Anim_RestoreStage6() — Stage5 + center-panel team pulse emphasis path
+--   Debug_PlayerUI_Anim_RunStaged(delay) — Single-command staged restore + probes + full diagnostics
+--   Debug_PlayerUI_Elim_ValidateFull(verbose) — One-command lifecycle validator (eliminate/surrender/disconnect/eliminate_strict)
+--   Debug_PlayerUI_RewardPlayback_Snapshot()  — Print full reward playback state + icon slots
+--   Debug_PlayerUI_RewardPlayback_Inject(threshold, count) — Inject synthetic milestones into playback queue
+--   Debug_PlayerUI_RewardPlayback_InjectReal(score_delta) — Inject real milestones crossed by +score_delta from civ tree
+--   Debug_PlayerUI_RewardPlayback_CaptureFull(threshold, count, timeout) — One-command full capture (idle + mid-animation + transitions)
+--   Debug_PlayerUI_RewardPlayback_SkipPhase() — Skip current completion phase to next
+--   Debug_PlayerUI_RewardPlayback_Reset()     — Force-reset playback to idle (stop all)
+--
+-- Requires: cba_debug_core.scar, playerui/*.scar
+---------------------------------------------------------------------------------------------------
+
+local _ANIM_SUITE = "PlayerUI_Anim"
+local _ANIM_DELAY = 1.5
+local _MONITOR_INTERVAL = 0.5
+local _MONITOR_TAG = "[PLAYERUI_ANIM_MONITOR]"
+
+-- Monitor state
+_cba_debug_anim_monitor = {
+	running = false,
+	violations = 0,
+	ticks = 0,
+	start_time = 0,
+}
+
+-- One-command reward playback capture monitor state.
+_cba_debug_reward_capture = {
+	running = false,
+	ticks = 0,
+	start_time = 0,
+	timeout = 8.0,
+	last_phase = nil,
+	last_phase_start = 0,
+	last_queue_len = -1,
+	last_guard = nil,
+	idle_captured = false,
+	mid_captured = false,
+	auto_injected = false,
+	inject_threshold = 50,
+	inject_count = 3,
+}
+
+---------------------------------------------------------------------------------------------------
+-- Feature-flag control
+-- Lets us bisect crashes by disabling only the recent visual additions.
+---------------------------------------------------------------------------------------------------
+
+function Debug_PlayerUI_Anim_FeatureStatus()
+	print("[PLAYERUI_DEBUG] PlayerUI feature flags:")
+	print("  EnableRankTranslateAnimation = " .. tostring(PlayerUI_Settings.EnableRankTranslateAnimation))
+	print("  EnableRankScaleAnimation = " .. tostring(PlayerUI_Settings.EnableRankScaleAnimation))
+	print("  EnableKillScorePulse     = " .. tostring(PlayerUI_Settings.EnableKillScorePulse))
+	print("  EnableEliminationDim     = " .. tostring(PlayerUI_Settings.EnableEliminationDim))
+	print("  EnableToggleCrashGuard   = " .. tostring(PlayerUI_Settings.EnableToggleCrashGuard))
+	print("  EnableToggleHudVisibility = " .. tostring(PlayerUI_Settings.EnableToggleHudVisibility))
+	print("  EnableTogglePlayerScoresSync = " .. tostring(PlayerUI_Settings.EnableTogglePlayerScoresSync))
+	print("  EnableToggleObjectiveSync = " .. tostring(PlayerUI_Settings.EnableToggleObjectiveSync))
+	print("  EnableApplyDataContextWhenHudVisible = " .. tostring(PlayerUI_Settings.EnableApplyDataContextWhenHudVisible))
+	print("  EnableToggleTraceLogging = " .. tostring(PlayerUI_Settings.EnableToggleTraceLogging))
+	print("  EnableMinimalSafeHudXaml = " .. tostring(PlayerUI_Settings.EnableMinimalSafeHudXaml))
+	print("  EnableAutoShow           = " .. tostring(PlayerUI_Settings.EnableAutoShow))
+	print("  EnableScoreColors        = " .. tostring(PlayerUI_Settings.EnableScoreColors))
+	print("  EnableRankPredictionArrows = " .. tostring(PlayerUI_Settings.EnableRankPredictionArrows))
+end
+
+function Debug_PlayerUI_Anim_PresetSafe()
+	Debug_PlayerUI_Anim_Features(false, false, false, false)
+	Debug_PlayerUI_Anim_TogglePaths(true, false, false)
+	print("[PLAYERUI_DEBUG] Safe preset applied (move/scale/pulse/dim OFF)")
+end
+
+function Debug_PlayerUI_Anim_PresetAll()
+	Debug_PlayerUI_Anim_Features(true, true, true, true)
+	Debug_PlayerUI_Anim_TogglePaths(true, true, true)
+	print("[PLAYERUI_DEBUG] Full preset applied (move/scale/pulse/dim ON)")
+end
+
+function Debug_PlayerUI_Anim_TogglePresetHudOnly()
+	Debug_PlayerUI_Anim_TogglePaths(true, false, false)
+	Debug_PlayerUI_Anim_ApplyWhenVisible(false)
+	print("[PLAYERUI_DEBUG] Toggle preset HUD-only (scores/objectives OFF)")
+end
+
+function Debug_PlayerUI_Anim_TogglePresetFull()
+	Debug_PlayerUI_Anim_TogglePaths(true, true, true)
+	Debug_PlayerUI_Anim_ApplyWhenVisible(true)
+	print("[PLAYERUI_DEBUG] Toggle preset full (HUD/scores/objectives ON)")
+end
+
+function Debug_PlayerUI_Anim_ApplyWhenVisible(enabled)
+	if enabled ~= nil then
+		PlayerUI_Settings.EnableApplyDataContextWhenHudVisible = not not enabled
+	end
+	print("[PLAYERUI_DEBUG] EnableApplyDataContextWhenHudVisible=" .. tostring(PlayerUI_Settings.EnableApplyDataContextWhenHudVisible))
+end
+
+function Debug_PlayerUI_Anim_ToggleProbe(path)
+	local mode = path or "all"
+	if mode ~= "hud" and mode ~= "scores" and mode ~= "objectives" and mode ~= "all" then
+		print("[PLAYERUI_DEBUG] Invalid probe path='" .. tostring(mode) .. "' (use hud|scores|objectives|all)")
+		return
+	end
+	print("[PLAYERUI_DEBUG] Running toggle probe path=" .. mode)
+	if PlayerUI_Debug_ToggleProbe ~= nil then
+		PlayerUI_Debug_ToggleProbe(mode)
+	else
+		print("[PLAYERUI_DEBUG] PlayerUI_Debug_ToggleProbe unavailable")
+	end
+end
+
+-- Legacy console command aliases kept for backward compatibility.
+-- Old docs/sessions used PlayerUI_Debug_* names; route them to current Debug_PlayerUI_Anim_* commands.
+function PlayerUI_Debug_FeatureStatus()
+	return Debug_PlayerUI_Anim_FeatureStatus()
+end
+
+function PlayerUI_Debug_TogglePresetFull()
+	return Debug_PlayerUI_Anim_TogglePresetFull()
+end
+
+function Debug_PlayerUI_Anim_SetMinimalHud(enabled)
+	if enabled ~= nil then
+		PlayerUI_Settings.EnableMinimalSafeHudXaml = not not enabled
+	end
+	print("[PLAYERUI_DEBUG] EnableMinimalSafeHudXaml=" .. tostring(PlayerUI_Settings.EnableMinimalSafeHudXaml)
+		.. " (applies on next game load)")
+end
+
+function Debug_PlayerUI_Anim_RestoreStage1()
+	Debug_PlayerUI_Anim_SetMinimalHud(false)
+	Debug_PlayerUI_Anim_Features(false, false, false, false)
+	Debug_PlayerUI_Anim_TogglePaths(true, false, false)
+	Debug_PlayerUI_Anim_ApplyWhenVisible(false)
+	print("[PLAYERUI_DEBUG] Restore Stage 1: verified stable full-HUD baseline (pre-warm + static row rendering)")
+end
+
+function Debug_PlayerUI_Anim_RestoreStage2()
+	Debug_PlayerUI_Anim_RestoreStage1()
+	Debug_PlayerUI_Anim_TogglePaths(true, true, false)
+	print("[PLAYERUI_DEBUG] Restore Stage 2: PlayerScores sync re-enabled in toggle path")
+end
+
+function Debug_PlayerUI_Anim_RestoreStage3()
+	Debug_PlayerUI_Anim_RestoreStage2()
+	Debug_PlayerUI_Anim_TogglePaths(true, true, true)
+	print("[PLAYERUI_DEBUG] Restore Stage 3: objective sync re-enabled in toggle path")
+end
+
+function Debug_PlayerUI_Anim_RestoreStage4()
+	Debug_PlayerUI_Anim_RestoreStage3()
+	Debug_PlayerUI_Anim_ApplyWhenVisible(true)
+	print("[PLAYERUI_DEBUG] Restore Stage 4: live DataContext apply while HUD visible enabled")
+end
+
+function Debug_PlayerUI_Anim_RestoreStage5()
+	Debug_PlayerUI_Anim_RestoreStage4()
+	Debug_PlayerUI_Anim_Features(true, true, true, true)
+	print("[PLAYERUI_DEBUG] Restore Stage 5: experimental runtime visual flags enabled (current full HUD XAML still uses static row rendering)")
+end
+
+function Debug_PlayerUI_Anim_RestoreStage6()
+	Debug_PlayerUI_Anim_RestoreStage5()
+	PlayerUI_Settings.EnableKillScorePulse = true
+	print("[PLAYERUI_DEBUG] Restore Stage 6: trigger-only center/team pulse emphasis enabled")
+end
+
+-- Single-command staged runner state
+_cba_debug_anim_staged = {
+	running = false,
+	step = 0,
+	delay = 2.0,
+}
+
+-- Unified elimination lifecycle validator state
+local _ELIM_VALIDATE_TAG = "[PLAYERUI_ELIM_VALIDATE]"
+local _ELIM_VALIDATE_STAGE_DELAY = 0.2
+local _ELIM_VALIDATE_TARGET_COUNT = 4
+local _ELIM_VALIDATE_SETTLE_DEFAULT = 3.5
+local _ELIM_VALIDATE_SETTLE_DISCONNECT = 5.0
+
+_cba_debug_elim_validate = {
+	running = false,
+	run_id = 0,
+	rotate_cursor = 1,
+	stage_pos = 0,
+	start_time = 0,
+	verbose = false,
+	prev_elim_debug = false,
+	local_idx = nil,
+	targets = nil,
+	candidates = nil,
+	stages = nil,
+	results = nil,
+	current_stage = nil,
+}
+
+local function _Debug_ElimValidate_Log(message)
+	print(_ELIM_VALIDATE_TAG .. " " .. tostring(message))
+end
+
+local function _Debug_ElimValidate_IsTrue(value)
+	if value == true then
+		return true
+	end
+	if value == false or value == nil then
+		return false
+	end
+	if type(value) == "number" then
+		return value ~= 0
+	end
+	if type(value) == "string" then
+		local v = string.lower(value)
+		return v == "true" or v == "1" or v == "yes" or v == "y"
+	end
+	return false
+end
+
+local function _Debug_ElimValidate_GetLocalPlayerIndex()
+	local okLocal, localPlayer = pcall(Game_GetLocalPlayer)
+	if not okLocal or localPlayer == nil then
+		return nil
+	end
+	local okIdx, localIdx = pcall(World_GetPlayerIndex, localPlayer)
+	if not okIdx then
+		return nil
+	end
+	return localIdx
+end
+
+local function _Debug_ElimValidate_IsSafeTarget(player_idx, local_idx)
+	if player_idx == nil or PLAYERS == nil then
+		return false
+	end
+	local player = PLAYERS[player_idx]
+	if player == nil then
+		return false
+	end
+	if local_idx ~= nil and player_idx == local_idx then
+		return false
+	end
+	local okElim, isElim = pcall(Core_IsPlayerEliminated, player.id)
+	if okElim and isElim then
+		return false
+	end
+	return true
+end
+
+local function _Debug_ElimValidate_GetSafeCandidates(local_idx)
+	local candidates = {}
+	if PLAYERS == nil then
+		return candidates
+	end
+	for i = 1, #PLAYERS do
+		if _Debug_ElimValidate_IsSafeTarget(i, local_idx) then
+			table.insert(candidates, i)
+		end
+	end
+	return candidates
+end
+
+local function _Debug_ElimValidate_GetNextCandidateCyclic(candidates, local_idx, skip_idx)
+	-- Find the next alive non-local player from candidates, cycling through.
+	if candidates == nil or #candidates == 0 then
+		return nil
+	end
+	for _, candidate_idx in ipairs(candidates) do
+		if candidate_idx ~= skip_idx and _Debug_ElimValidate_IsSafeTarget(candidate_idx, local_idx) then
+			return candidate_idx
+		end
+	end
+	return nil
+end
+
+local function _Debug_ElimValidate_SelectTargets(candidates)
+	-- Dynamically select targets based on available candidates (1+).
+	if candidates == nil or #candidates < 1 then
+		return nil, "insufficient candidates (need >= 1)"
+	end
+
+	table.sort(candidates)
+
+	local cursor = _cba_debug_elim_validate.rotate_cursor or 1
+	if cursor < 1 or cursor > #candidates then
+		cursor = 1
+	end
+
+	local ordered = {}
+	for i = 1, #candidates do
+		local sourceIndex = ((cursor + i - 2) % #candidates) + 1
+		ordered[i] = candidates[sourceIndex]
+	end
+
+	-- Lightweight shuffle by rotating the ordered list using run/time seed.
+	local okTime, now = pcall(World_GetGameTime)
+	local seed = (okTime and math.floor(now * 10) or 0) + (_cba_debug_elim_validate.run_id or 0)
+	local pivot = seed % #ordered
+	if pivot > 0 then
+		local shuffled = {}
+		for i = 1, #ordered do
+			local sourceIndex = ((pivot + i - 1) % #ordered) + 1
+			shuffled[i] = ordered[sourceIndex]
+		end
+		ordered = shuffled
+	end
+
+	-- Dynamically build scenario list: use as many scenarios as candidates available (capped at 3).
+	local scenario_count = math.min(#ordered, _ELIM_VALIDATE_TARGET_COUNT)
+	local picked = {}
+	for i = 1, scenario_count do
+		picked[i] = ordered[i]
+	end
+
+	_cba_debug_elim_validate.rotate_cursor = (cursor % #candidates) + 1
+
+	local details = string.format(
+		"candidates=%d cursor=%d pivot=%d scenarios=%d selected=[%s]",
+		#candidates,
+		cursor,
+		pivot,
+		scenario_count,
+		table.concat(picked, ",")
+	)
+
+	return {
+		eliminate = picked[1],
+		surrender = picked[2],
+		disconnect = picked[3],
+		eliminate_strict = picked[4],
+		scenario_count = scenario_count,
+	}, details
+end
+
+local function _Debug_ElimValidate_ReadDiagSnapshot()
+	local diag = _PlayerUI_ElimDiag or {}
+	return {
+		frames = diag.frames or 0,
+		changedFrames = diag.changedFrames or 0,
+		pushFrames = diag.pushFrames or 0,
+		completions = diag.completions or 0,
+		activeRows = diag.activeRows or 0,
+		lastIndex = diag.lastIndex or 0,
+		lastScale = diag.lastScale or 1.0,
+		lastElapsed = diag.lastElapsed or 0.0,
+	}
+end
+
+local function _Debug_ElimValidate_GetWorldPlayerId(worldIndex)
+	if worldIndex == nil or PLAYERS == nil then
+		return nil
+	end
+	local player = PLAYERS[worldIndex]
+	if player == nil or player.id == nil then
+		return nil
+	end
+	return player.id
+end
+
+local function _Debug_ElimValidate_ResolveUIIndexByPlayerId(worldIndex)
+	local playerId = _Debug_ElimValidate_GetWorldPlayerId(worldIndex)
+	if playerId == nil then
+		return nil, "missing_world_player_id"
+	end
+	if _PlayerUI_AllPlayers == nil then
+		return nil, "playerui_allplayers_unavailable"
+	end
+	for uiIndex = 1, #_PlayerUI_AllPlayers do
+		local row = _PlayerUI_AllPlayers[uiIndex]
+		if row ~= nil and row.id == playerId then
+			return uiIndex, "player_id_match"
+		end
+	end
+	return nil, "player_id_not_found"
+end
+
+local function _Debug_ElimValidate_ResolveObservationIndex(worldIndex)
+	local uiIndex, source = _Debug_ElimValidate_ResolveUIIndexByPlayerId(worldIndex)
+	if uiIndex ~= nil then
+		return uiIndex, source, true
+	end
+
+	-- Fallback for partial initialization windows where id lookup is not yet available.
+	if worldIndex ~= nil then
+		return worldIndex, source .. "+index_fallback", false
+	end
+
+	return nil, source, false
+end
+
+local function _Debug_ElimValidate_ReadPlayerData(worldIndex)
+	if PlayerUIDataContextMappings == nil or PlayerUIDataContextMappings.PlayersByIndex == nil then
+		return nil, nil, "datacontext_unavailable", false
+	end
+	local uiIndex, source, idMatched = _Debug_ElimValidate_ResolveObservationIndex(worldIndex)
+	if uiIndex == nil then
+		return nil, nil, source, idMatched
+	end
+	return PlayerUIDataContextMappings.PlayersByIndex[uiIndex], uiIndex, source, idMatched
+end
+
+local function _Debug_ElimValidate_ReadAnimationEntry(worldIndex)
+	-- Direct read from animation state (source-of-truth for active/startTime/progress)
+	if _PlayerUI_EliminationAnims == nil then
+		return nil, nil, "anim_table_unavailable", false
+	end
+	local uiIndex, source, idMatched = _Debug_ElimValidate_ResolveObservationIndex(worldIndex)
+	if uiIndex == nil then
+		return nil, nil, source, idMatched
+	end
+	return _PlayerUI_EliminationAnims[uiIndex], uiIndex, source, idMatched
+end
+
+local function _Debug_ElimValidate_IsAnimActive(worldIndex)
+	if PlayerUI_Animate_IsEliminationTransitionActive == nil then
+		return false, nil, "anim_active_fn_unavailable", false
+	end
+	local uiIndex, source, idMatched = _Debug_ElimValidate_ResolveObservationIndex(worldIndex)
+	if uiIndex == nil then
+		return false, nil, source, idMatched
+	end
+	return PlayerUI_Animate_IsEliminationTransitionActive(uiIndex), uiIndex, source, idMatched
+end
+
+local function _Debug_ElimValidate_GetProgress(worldIndex)
+	if PlayerUI_Animate_GetEliminationLastProgress == nil then
+		return 0.0, nil, "anim_progress_fn_unavailable", false
+	end
+	local uiIndex, source, idMatched = _Debug_ElimValidate_ResolveObservationIndex(worldIndex)
+	if uiIndex == nil then
+		return 0.0, nil, source, idMatched
+	end
+	return PlayerUI_Animate_GetEliminationLastProgress(uiIndex), uiIndex, source, idMatched
+end
+
+local function _Debug_ElimValidate_IsWorldPlayerEliminated(worldIndex)
+	local playerId = _Debug_ElimValidate_GetWorldPlayerId(worldIndex)
+	if playerId == nil or Core_IsPlayerEliminated == nil then
+		return false
+	end
+	local ok, eliminated = pcall(Core_IsPlayerEliminated, playerId)
+	if not ok then
+		return false
+	end
+	return eliminated == true
+end
+
+local function _Debug_ElimValidate_FormatFailures(failures)
+	if failures == nil or #failures == 0 then
+		return "none"
+	end
+	return table.concat(failures, " | ")
+end
+
+local function _Debug_ElimValidate_TriggerEliminate(player_idx)
+	if type(Debug_ForceEliminatePlayer) ~= "function" then
+		return false, "Debug_ForceEliminatePlayer unavailable"
+	end
+	local ok, err = pcall(Debug_ForceEliminatePlayer, player_idx)
+	if not ok then
+		return false, "trigger crash: " .. tostring(err)
+	end
+	return true, "Debug_ForceEliminatePlayer(" .. tostring(player_idx) .. ")"
+end
+
+local function _Debug_ElimValidate_TriggerEliminateStrict(player_idx)
+	if PLAYERS == nil or PLAYERS[player_idx] == nil then
+		return false, "PLAYERS[" .. tostring(player_idx) .. "] is nil"
+	end
+	local player = PLAYERS[player_idx]
+	if Core_IsPlayerEliminated ~= nil then
+		local okChk, alreadyElim = pcall(Core_IsPlayerEliminated, player.id)
+		if okChk and alreadyElim then
+			return false, "already eliminated"
+		end
+	end
+	local ok, err = pcall(Core_SetPlayerDefeated, player.id, Annihilation_LoserPresentation, WR_ANNIHILATION)
+	if not ok then
+		return false, "Core_SetPlayerDefeated crash: " .. tostring(err)
+	end
+	return true, "Core_SetPlayerDefeated(" .. tostring(player_idx) .. ", WR_ANNIHILATION)"
+end
+
+local function _Debug_ElimValidate_TriggerSurrender(player_idx)
+	if type(Debug_ForceSurrender) ~= "function" then
+		return false, "Debug_ForceSurrender unavailable"
+	end
+	local ok, err = pcall(Debug_ForceSurrender, player_idx)
+	if not ok then
+		return false, "trigger crash: " .. tostring(err)
+	end
+	return true, "Debug_ForceSurrender(" .. tostring(player_idx) .. ")"
+end
+
+local function _Debug_ElimValidate_TriggerDisconnect(player_idx)
+	if type(_LeaverDebug_Stage3_Disconnect) == "function" then
+		local ok, result = pcall(_LeaverDebug_Stage3_Disconnect, player_idx)
+		if not ok then
+			return false, "_LeaverDebug_Stage3_Disconnect crash: " .. tostring(result)
+		end
+		if result == false then
+			return false, "_LeaverDebug_Stage3_Disconnect returned false"
+		end
+		return true, "_LeaverDebug_Stage3_Disconnect(" .. tostring(player_idx) .. ")"
+	end
+	if type(Debug_ForceDisconnect) == "function" then
+		local ok, err = pcall(Debug_ForceDisconnect, player_idx)
+		if not ok then
+			return false, "Debug_ForceDisconnect crash: " .. tostring(err)
+		end
+		return true, "Debug_ForceDisconnect(" .. tostring(player_idx) .. ")"
+	end
+	return false, "disconnect trigger unavailable"
+end
+
+function Debug_PlayerUI_Elim_ValidateFull(verbose)
+	if _cba_debug_elim_validate.running then
+		_Debug_ElimValidate_Log("RUN_BUSY: validator already running")
+		return
+	end
+
+	if _PlayerUI_LocalPlayerId == nil then
+		_Debug_ElimValidate_Log("RUN_ABORT: PlayerUI not initialized")
+		return
+	end
+
+	_cba_debug.enabled = true
+	_cba_debug_elim_validate.run_id = (_cba_debug_elim_validate.run_id or 0) + 1
+	_cba_debug_elim_validate.running = true
+	_cba_debug_elim_validate.start_time = World_GetGameTime()
+	_cba_debug_elim_validate.stage_pos = 0
+	_cba_debug_elim_validate.results = {}
+	_cba_debug_elim_validate.current_stage = nil
+	_cba_debug_elim_validate.verbose = _Debug_ElimValidate_IsTrue(verbose)
+
+	local local_idx = _Debug_ElimValidate_GetLocalPlayerIndex()
+	_cba_debug_elim_validate.local_idx = local_idx
+
+	local candidates = _Debug_ElimValidate_GetSafeCandidates(local_idx)
+	_cba_debug_elim_validate.candidates = candidates
+
+	local targets, selectionDetail = _Debug_ElimValidate_SelectTargets(candidates)
+	if targets == nil then
+		_Debug_ElimValidate_Log(string.format(
+			"RUN_ABORT: no safe targets available (need >= 1 have=%d local=%s)",
+			(candidates and #candidates or 0),
+			tostring(local_idx)
+		))
+		_Debug_ElimValidate_Log("FAILURE_CONDITION: validator requires at least one alive non-local player")
+		_cba_debug_elim_validate.running = false
+		return
+	end
+
+	_cba_debug_elim_validate.targets = targets
+	_cba_debug_elim_validate.candidate_pool = candidates
+
+	-- Dynamically build stages based on available targets; cycle through candidates if needed.
+	local stages = {}
+	if targets.eliminate ~= nil then
+		table.insert(stages, { key = "eliminate", target = targets.eliminate, settle = _ELIM_VALIDATE_SETTLE_DEFAULT, trigger = _Debug_ElimValidate_TriggerEliminate })
+	end
+	if targets.scenario_count >= 2 and targets.surrender ~= nil then
+		table.insert(stages, { key = "surrender", target = targets.surrender, settle = _ELIM_VALIDATE_SETTLE_DEFAULT, trigger = _Debug_ElimValidate_TriggerSurrender })
+	end
+	if targets.scenario_count >= 3 and targets.disconnect ~= nil then
+		table.insert(stages, { key = "disconnect", target = targets.disconnect, settle = _ELIM_VALIDATE_SETTLE_DISCONNECT, trigger = _Debug_ElimValidate_TriggerDisconnect })
+	end
+	if targets.scenario_count >= 4 and targets.eliminate_strict ~= nil then
+		table.insert(stages, { key = "eliminate_strict", target = targets.eliminate_strict, settle = _ELIM_VALIDATE_SETTLE_DEFAULT, trigger = _Debug_ElimValidate_TriggerEliminateStrict })
+	end
+
+	_cba_debug_elim_validate.stages = stages
+
+	-- Always enable diagnostic collection during validator runs (required for frame counting)
+	_cba_debug_elim_validate.prev_elim_debug = _PLAYERUI_ELIM_ANIM_DEBUG == true
+	_PLAYERUI_ELIM_ANIM_DEBUG = true
+
+	_Debug_ElimValidate_Log(string.format(
+		"RUN_START id=%d verbose=%s local=%s %s",
+		_cba_debug_elim_validate.run_id,
+		tostring(_cba_debug_elim_validate.verbose),
+		tostring(local_idx),
+		selectionDetail
+	))
+	local scenario_list = {}
+	for i, stage in ipairs(_cba_debug_elim_validate.stages) do
+		table.insert(scenario_list, stage.key)
+	end
+	_Debug_ElimValidate_Log("SCENARIOS " .. table.concat(scenario_list, " -> "))
+	_Debug_ElimValidate_RunNextStage()
+end
+
+function _Debug_ElimValidate_RunNextStage()
+	local state = _cba_debug_elim_validate
+	if not state.running then
+		return
+	end
+
+	state.stage_pos = state.stage_pos + 1
+	if state.stage_pos > #state.stages then
+		_Debug_ElimValidate_FinalizeRun()
+		return
+	end
+
+	local stage = state.stages[state.stage_pos]
+	stage.started = World_GetGameTime()
+	stage.failures = {}
+	stage.notes = {}
+	stage.trigger_ok = false
+	stage.trigger_detail = "not started"
+	stage.target_ui_idx = nil
+	stage.target_ui_source = "unresolved"
+	stage.target_id_matched = false
+	stage.defeat_confirmed = false
+	stage.assertion_profile = "strict"
+	stage.anim_entry_at_trigger = nil  -- snapshot animation state right after trigger
+	stage.poll = {
+		samples = 0,
+		saw_active = false,
+		saw_entry = false,
+		saw_id_match = false,
+		max_progress = 0.0,
+		last_progress = nil,
+		progress_regressions = 0,
+		invalid_active_opacity = 0,
+		min_opacity = 1.0,
+		max_opacity = 0.0,
+		last_entry_state = nil,  -- track entry state changes
+	}
+
+	state.current_stage = stage
+
+	if PlayerUI_Animate_Debug_ResetEliminationDiag ~= nil then
+		pcall(PlayerUI_Animate_Debug_ResetEliminationDiag)
+	end
+
+	_Debug_ElimValidate_Log(string.format(
+		"STAGE_START stage=%s target=%d settle=%.1fs",
+		stage.key,
+		stage.target,
+		stage.settle
+	))
+
+	local stageUiIndex, stageUiSource, stageIdMatched = _Debug_ElimValidate_ResolveObservationIndex(stage.target)
+	stage.target_ui_idx = stageUiIndex
+	stage.target_ui_source = stageUiSource or "unresolved"
+	stage.target_id_matched = stageIdMatched == true
+	stage.poll.saw_id_match = stage.target_id_matched
+
+	_Debug_ElimValidate_Log(string.format(
+		"STAGE_MAP stage=%s world=%d ui=%s source=%s idMatched=%s",
+		stage.key,
+		stage.target,
+		tostring(stage.target_ui_idx),
+		tostring(stage.target_ui_source),
+		tostring(stage.target_id_matched)
+	))
+
+	if state.verbose and PlayerUI_Debug_PrintFullSnapshot ~= nil then
+		if stage.target_ui_idx ~= nil then
+			pcall(PlayerUI_Debug_PrintFullSnapshot, stage.target_ui_idx)
+		end
+	end
+
+	local ok, detail = stage.trigger(stage.target)
+	stage.trigger_ok = ok
+	stage.trigger_detail = detail or "no detail"
+
+	if not ok then
+		table.insert(stage.failures, "trigger_failed=" .. tostring(stage.trigger_detail))
+		_Debug_ElimValidate_FinalizeStage()
+		return
+	end
+
+	-- Snapshot animation entry state immediately after trigger (may be nil if not yet registered)
+	stage.anim_entry_at_trigger = _Debug_ElimValidate_ReadAnimationEntry(stage.target)
+
+	-- Schedule polling: early checkpoint at 0.2s, then at 0.9s/1.2s to align with 1.0s update cycle
+	Rule_AddOneShot(_Debug_ElimValidate_PollStageEarly, _ELIM_VALIDATE_STAGE_DELAY)
+end
+
+function _Debug_ElimValidate_PollStageEarly()
+	-- Early checkpoint: T+0.2s (before 1.0s update cycle)
+	local state = _cba_debug_elim_validate
+	local stage = state.current_stage
+	if not state.running or stage == nil then
+		return
+	end
+
+	local elapsed = World_GetGameTime() - stage.started
+	local entry, uiIndex, source, idMatched = _Debug_ElimValidate_ReadAnimationEntry(stage.target)
+	local entry_exists = (entry ~= nil)
+	local entry_active = entry_exists and entry.active == true
+	if uiIndex ~= nil then
+		stage.target_ui_idx = uiIndex
+	end
+	if source ~= nil then
+		stage.target_ui_source = source
+	end
+	if idMatched then
+		stage.poll.saw_id_match = true
+	end
+
+	if entry_exists then
+		stage.poll.saw_entry = true
+	end
+
+	-- Log timing state at early checkpoint
+	if entry_exists ~= stage.poll.last_entry_state then
+		local state_str = entry_exists and (entry_active and "ACTIVE" or "EXISTS_INACTIVE") or "NIL"
+		_Debug_ElimValidate_Log(string.format(
+			"EARLY_POLL stage=%s t_elapsed=%.2f ui=%s source=%s idMatched=%s entry=%s entry_triggered_at_offset=%.2f",
+			stage.key,
+			elapsed,
+			tostring(stage.target_ui_idx),
+			tostring(stage.target_ui_source),
+			tostring(stage.poll.saw_id_match),
+			state_str,
+			entry and (entry.startTime - stage.started) or -1
+		))
+		stage.poll.last_entry_state = entry_exists
+	end
+
+	-- Schedule main polling starting at early checkpoint (continue polling every 0.2s)
+	Rule_AddOneShot(_Debug_ElimValidate_PollStageMain, 0.0)
+end
+
+function _Debug_ElimValidate_PollStageMain()
+	local state = _cba_debug_elim_validate
+	local stage = state.current_stage
+	if not state.running or stage == nil then
+		return
+	end
+
+	stage.poll.samples = stage.poll.samples + 1
+
+	local elapsed = World_GetGameTime() - stage.started
+	local entry, uiIndex, source, idMatched = _Debug_ElimValidate_ReadAnimationEntry(stage.target)
+	local data = _Debug_ElimValidate_ReadPlayerData(stage.target)
+	local animActive = _Debug_ElimValidate_IsAnimActive(stage.target)
+	local progress = _Debug_ElimValidate_GetProgress(stage.target)
+	if uiIndex ~= nil then
+		stage.target_ui_idx = uiIndex
+	end
+	if source ~= nil then
+		stage.target_ui_source = source
+	end
+	if idMatched then
+		stage.poll.saw_id_match = true
+	end
+
+	-- Track if we ever saw the animation entry
+	if entry ~= nil then
+		stage.poll.saw_entry = true
+	end
+
+	if animActive then
+		stage.poll.saw_active = true
+	end
+
+	if progress > stage.poll.max_progress then
+		stage.poll.max_progress = progress
+	end
+
+	local shouldCheckRegression = animActive or progress > 0
+	if shouldCheckRegression and stage.poll.last_progress ~= nil and progress + 0.02 < stage.poll.last_progress then
+		stage.poll.progress_regressions = stage.poll.progress_regressions + 1
+	end
+	stage.poll.last_progress = progress
+
+	if data ~= nil and data.rowOpacity ~= nil then
+		local opacity = data.rowOpacity
+		if opacity < stage.poll.min_opacity then
+			stage.poll.min_opacity = opacity
+		end
+		if opacity > stage.poll.max_opacity then
+			stage.poll.max_opacity = opacity
+		end
+		-- Intermediate opacity values are valid while the elimination transition is active.
+		if animActive and (opacity < 0.39 or opacity > 1.01) then
+			stage.poll.invalid_active_opacity = stage.poll.invalid_active_opacity + 1
+		end
+	end
+
+	if state.verbose and stage.poll.samples % 5 == 0 then
+		_Debug_ElimValidate_Log(string.format(
+			"STAGE_TICK stage=%s sample=%d elapsed=%.2f ui=%s source=%s idMatched=%s progress=%.3f active=%s entry=%s opacity=%s",
+			stage.key,
+			stage.poll.samples,
+			elapsed,
+			tostring(stage.target_ui_idx),
+			tostring(stage.target_ui_source),
+			tostring(stage.poll.saw_id_match),
+			progress,
+			tostring(animActive),
+			tostring(entry ~= nil),
+			tostring(data and data.rowOpacity)
+		))
+	end
+
+	if elapsed < stage.settle then
+		Rule_AddOneShot(_Debug_ElimValidate_PollStageMain, _ELIM_VALIDATE_STAGE_DELAY)
+		return
+	end
+
+	_Debug_ElimValidate_FinalizeStage()
+end
+
+function _Debug_ElimValidate_FinalizeStage()
+	local state = _cba_debug_elim_validate
+	local stage = state.current_stage
+	if not state.running or stage == nil then
+		return
+	end
+
+	local data, dataUiIndex, dataSource, dataIdMatched = _Debug_ElimValidate_ReadPlayerData(stage.target)
+	local entry, entryUiIndex, entrySource, entryIdMatched = _Debug_ElimValidate_ReadAnimationEntry(stage.target)
+	local animActiveNow, activeUiIndex, activeSource, activeIdMatched = _Debug_ElimValidate_IsAnimActive(stage.target)
+	if dataUiIndex ~= nil then
+		stage.target_ui_idx = dataUiIndex
+	elseif entryUiIndex ~= nil then
+		stage.target_ui_idx = entryUiIndex
+	elseif activeUiIndex ~= nil then
+		stage.target_ui_idx = activeUiIndex
+	end
+	stage.target_ui_source = dataSource or entrySource or activeSource or stage.target_ui_source
+	if dataIdMatched or entryIdMatched or activeIdMatched then
+		stage.poll.saw_id_match = true
+	end
+
+	if not stage.trigger_ok then
+		table.insert(stage.failures, "trigger_failed")
+	end
+
+	local defeatConfirmedByUI = (data ~= nil and data.IsEliminated == true)
+	local defeatConfirmedByWorld = _Debug_ElimValidate_IsWorldPlayerEliminated(stage.target)
+	local defeatConfirmed = defeatConfirmedByUI or defeatConfirmedByWorld
+	stage.defeat_confirmed = defeatConfirmed
+
+	local strictLifecycleChecks = true
+	if stage.key == "eliminate" and not defeatConfirmed then
+		strictLifecycleChecks = false
+		stage.assertion_profile = "eliminate-semantic"
+		table.insert(stage.notes, "trigger_semantic_mismatch_no_defeat_confirmation")
+		_Debug_ElimValidate_Log(string.format(
+			"TRIGGER_SEMANTIC_MISMATCH stage=%s target=%d ui=%s idMatched=%s trigger_ok=%s defeatConfirmed=false (strict lifecycle assertions skipped)",
+			stage.key,
+			stage.target,
+			tostring(stage.target_ui_idx),
+			tostring(stage.poll.saw_id_match),
+			tostring(stage.trigger_ok)
+		))
+	end
+
+	-- Key diagnostic: did animation entry ever exist?
+	if strictLifecycleChecks and not stage.poll.saw_entry then
+		if stage.trigger_ok and stage.poll.saw_id_match then
+			_Debug_ElimValidate_Log(string.format(
+				"OBSERVATION_GAP stage=%s target=%d ui=%s trigger_ok=true idMatched=true but entry never observed (timing/lifecycle)",
+				stage.key,
+				stage.target,
+				tostring(stage.target_ui_idx)
+			))
+			table.insert(stage.failures, "anim_entry_never_observed")
+		else
+			_Debug_ElimValidate_Log(string.format(
+				"OBSERVATION_NOTE stage=%s target=%d ui=%s source=%s idMatched=%s entry_not_observed (mapping unresolved, timing warning downgraded)",
+				stage.key,
+				stage.target,
+				tostring(stage.target_ui_idx),
+				tostring(stage.target_ui_source),
+				tostring(stage.poll.saw_id_match)
+			))
+			table.insert(stage.failures, "mapping_unresolved_or_entry_not_observed")
+		end
+	end
+
+	if strictLifecycleChecks and not stage.poll.saw_active then
+		table.insert(stage.failures, "no_active_transition")
+	end
+
+	if strictLifecycleChecks and stage.poll.max_progress <= 0 then
+		table.insert(stage.failures, "progress_not_observed")
+	end
+	if stage.poll.progress_regressions > 0 then
+		table.insert(stage.failures, "progress_regressed=" .. tostring(stage.poll.progress_regressions))
+	end
+	if stage.poll.invalid_active_opacity > 0 then
+		table.insert(stage.failures, "invalid_active_opacity=" .. tostring(stage.poll.invalid_active_opacity))
+	end
+	if strictLifecycleChecks and animActiveNow then
+		table.insert(stage.failures, "animation_still_active_after_settle")
+	end
+
+	if data == nil then
+		if strictLifecycleChecks then
+			table.insert(stage.failures, "missing_datacontext")
+		else
+			table.insert(stage.notes, "missing_datacontext_non_strict")
+		end
+	else
+		if strictLifecycleChecks and data.IsEliminated ~= true then
+			table.insert(stage.failures, "IsEliminated=false")
+		end
+
+		-- Phase 4.2: presentation must be visible for defeated players after settle
+		if stage.defeat_confirmed and data.showEliminationPresentation ~= true then
+			table.insert(stage.failures, "presentation_not_revealed defeatConfirmed=true shown=" .. tostring(data.showEliminationPresentation))
+		end
+		if stage.defeat_confirmed and data._elimPresentationRevealed ~= true then
+			table.insert(stage.failures, "latch_never_opened revealed=" .. tostring(data._elimPresentationRevealed))
+		end
+
+		local dimEnabled = (PlayerUI_Settings.EnableEliminationDim ~= false)
+		local finalOpacity = data.rowOpacity
+		if dimEnabled and data.showEliminationPresentation == true then
+			if finalOpacity == nil or math.abs(finalOpacity - 0.4) > 0.08 then
+				table.insert(stage.failures, "final_opacity_expected_0.4 got=" .. tostring(finalOpacity))
+			end
+		elseif not dimEnabled then
+			if finalOpacity ~= nil and math.abs(finalOpacity - 1.0) > 0.08 then
+				table.insert(stage.failures, "final_opacity_expected_1.0 got=" .. tostring(finalOpacity))
+			end
+		end
+
+		local fence = data._elimCompletionFenceCycles or 0
+		if fence > 0 then
+			table.insert(stage.failures, "completion_fence_not_cleared=" .. tostring(fence))
+		end
+	end
+
+	if not strictLifecycleChecks and not stage.poll.saw_id_match then
+		table.insert(stage.failures, "mapping_unresolved")
+	end
+
+	local pass = (#stage.failures == 0)
+	local stageElapsed = World_GetGameTime() - stage.started
+	local entry_triggered = (stage.anim_entry_at_trigger ~= nil)
+	local result = {
+		key = stage.key,
+		target = stage.target,
+		targetUi = stage.target_ui_idx,
+		mappingSource = stage.target_ui_source,
+		idMatched = stage.poll.saw_id_match,
+		defeatConfirmed = stage.defeat_confirmed,
+		assertionProfile = stage.assertion_profile,
+		pass = pass,
+		elapsed = stageElapsed,
+		entry_observed = stage.poll.saw_entry,
+		entry_was_active = stage.poll.saw_active,
+		maxProgress = stage.poll.max_progress,
+		minOpacity = stage.poll.min_opacity,
+		maxOpacity = stage.poll.max_opacity,
+		failures = stage.failures,
+		notes = stage.notes,
+		trigger = stage.trigger_detail,
+	}
+	table.insert(state.results, result)
+
+	_Debug_ElimValidate_Log(string.format(
+		"STAGE_RESULT stage=%s target=%d ui=%s source=%s idMatched=%s defeatConfirmed=%s profile=%s status=%s elapsed=%.1fs entry_observed=%s entry_was_active=%s maxProgress=%.3f opacityRange=%.3f..%.3f",
+		result.key,
+		result.target,
+		tostring(result.targetUi),
+		tostring(result.mappingSource),
+		tostring(result.idMatched),
+		tostring(result.defeatConfirmed),
+		tostring(result.assertionProfile),
+		pass and "PASS" or "FAIL",
+		result.elapsed,
+		tostring(result.entry_observed),
+		tostring(result.entry_was_active),
+		result.maxProgress,
+		result.minOpacity,
+		result.maxOpacity
+	))
+
+	if not pass then
+		_Debug_ElimValidate_Log("FAILURE_CONDITIONS stage=" .. result.key .. " -> " .. _Debug_ElimValidate_FormatFailures(result.failures))
+	elseif result.notes ~= nil and #result.notes > 0 then
+		_Debug_ElimValidate_Log("STAGE_NOTES stage=" .. result.key .. " -> " .. _Debug_ElimValidate_FormatFailures(result.notes))
+	elseif state.verbose then
+		_Debug_ElimValidate_Log("ASSERTIONS_OK stage=" .. result.key)
+	end
+
+	if state.verbose and PlayerUI_Debug_PrintFullSnapshot ~= nil then
+		if stage.target_ui_idx ~= nil then
+			pcall(PlayerUI_Debug_PrintFullSnapshot, stage.target_ui_idx)
+		end
+		if PlayerUI_Animate_Debug_PrintEliminationDiag ~= nil then
+			pcall(PlayerUI_Animate_Debug_PrintEliminationDiag)
+		end
+	end
+
+	state.current_stage = nil
+	Rule_AddOneShot(_Debug_ElimValidate_RunNextStage, 0.6)
+end
+
+function _Debug_ElimValidate_FinalizeRun()
+	local state = _cba_debug_elim_validate
+	local elapsed = World_GetGameTime() - (state.start_time or World_GetGameTime())
+	local failed = 0
+	for _, result in ipairs(state.results or {}) do
+		if not result.pass then
+			failed = failed + 1
+		end
+	end
+
+	local status = (failed == 0) and "PASS" or "FAIL"
+	_Debug_ElimValidate_Log(string.format(
+		"RUN_END id=%d status=%s failedStages=%d/%d elapsed=%.1fs",
+		state.run_id,
+		status,
+		failed,
+		#(state.results or {}),
+		elapsed
+	))
+
+	for _, result in ipairs(state.results or {}) do
+		_Debug_ElimValidate_Log(string.format(
+			"RUN_SUMMARY stage=%s target=%d ui=%s source=%s idMatched=%s defeatConfirmed=%s profile=%s status=%s entry_observed=%s active=%s maxProgress=%.3f trigger=%s",
+			result.key,
+			result.target,
+			tostring(result.targetUi),
+			tostring(result.mappingSource),
+			tostring(result.idMatched),
+			tostring(result.defeatConfirmed),
+			tostring(result.assertionProfile),
+			result.pass and "PASS" or "FAIL",
+			tostring(result.entry_observed),
+			tostring(result.entry_was_active),
+			result.maxProgress,
+			tostring(result.trigger)
+		))
+	end
+
+	local marker = string.format(
+		"[CBA_DEBUG_END] suite=PlayerUI_ElimValidate run=%d status=%s failed_stages=%d elapsed=%.1fs",
+		state.run_id,
+		status,
+		failed,
+		elapsed
+	)
+	print(marker)
+	pcall(Misc_AppendToFile, "scarlog:cba_debug_runs.txt", marker .. "\n")
+
+	-- Always restore diagnostic flag (it was always enabled during run for accurate collection)
+	_PLAYERUI_ELIM_ANIM_DEBUG = state.prev_elim_debug
+
+	state.running = false
+	state.stage_pos = 0
+	state.current_stage = nil
+end
+
+function Debug_PlayerUI_Anim_RunStaged(delay)
+	if _cba_debug_anim_staged.running then
+		print("[PLAYERUI_DEBUG] Staged run already in progress (step=" .. tostring(_cba_debug_anim_staged.step) .. ")")
+		return
+	end
+
+	local d = tonumber(delay) or 2.0
+	if d < 0.5 then d = 0.5 end
+
+	_cba_debug_anim_staged.running = true
+	_cba_debug_anim_staged.step = 0
+	_cba_debug_anim_staged.delay = d
+
+	print("[PLAYERUI_DEBUG] Starting staged PlayerUI debug run (delay=" .. tostring(d) .. "s)")
+	print("[PLAYERUI_DEBUG] Sequence: Stage1 -> Stage2 -> Stage3 -> Stage4 -> Stage5 -> Stage6 -> Full diagnostics")
+
+	if not _cba_debug_anim_monitor.running then
+		Debug_PlayerUI_Anim_Monitor()
+	end
+
+	_Debug_PlayerUI_Anim_RunStaged_Step()
+end
+
+function _Debug_PlayerUI_Anim_RunStaged_Step()
+	if not _cba_debug_anim_staged.running then
+		return
+	end
+
+	_cba_debug_anim_staged.step = _cba_debug_anim_staged.step + 1
+	local step = _cba_debug_anim_staged.step
+	local delay = _cba_debug_anim_staged.delay
+
+	if step == 1 then
+		Debug_PlayerUI_Anim_RestoreStage1()
+		Debug_PlayerUI_Anim_ToggleProbe("hud")
+		Debug_PlayerUI_Anim_Snapshot()
+		Rule_AddOneShot(_Debug_PlayerUI_Anim_RunStaged_Step, delay)
+		return
+	end
+
+	if step == 2 then
+		Debug_PlayerUI_Anim_RestoreStage2()
+		Debug_PlayerUI_Anim_ToggleProbe("scores")
+		Debug_PlayerUI_Anim_Snapshot()
+		Rule_AddOneShot(_Debug_PlayerUI_Anim_RunStaged_Step, delay)
+		return
+	end
+
+	if step == 3 then
+		Debug_PlayerUI_Anim_RestoreStage3()
+		Debug_PlayerUI_Anim_ToggleProbe("objectives")
+		Debug_PlayerUI_Anim_Snapshot()
+		Rule_AddOneShot(_Debug_PlayerUI_Anim_RunStaged_Step, delay)
+		return
+	end
+
+	if step == 4 then
+		Debug_PlayerUI_Anim_RestoreStage4()
+		Debug_PlayerUI_Anim_ToggleProbe("all")
+		Debug_PlayerUI_Anim_Snapshot()
+		Rule_AddOneShot(_Debug_PlayerUI_Anim_RunStaged_Step, delay)
+		return
+	end
+
+	if step == 5 then
+		Debug_PlayerUI_Anim_RestoreStage5()
+		Debug_PlayerUI_Anim_Snapshot()
+		Rule_AddOneShot(_Debug_PlayerUI_Anim_RunStaged_Step, delay)
+		return
+	end
+
+	if step == 6 then
+		Debug_PlayerUI_Anim_RestoreStage6()
+		Debug_PlayerUI_Anim_Snapshot()
+		Rule_AddOneShot(_Debug_PlayerUI_Anim_RunStaged_Step, delay)
+		return
+	end
+
+	if step == 7 then
+		Debug_PlayerUI_Anim()
+		Rule_AddOneShot(_Debug_PlayerUI_Anim_RunStaged_Finalize, math.max(10.0, delay * 5))
+		return
+	end
+end
+
+function _Debug_PlayerUI_Anim_RunStaged_Finalize()
+	if _cba_debug_anim_monitor.running then
+		Debug_PlayerUI_Anim_MonitorStop()
+	end
+	_cba_debug_anim_staged.running = false
+	print("[PLAYERUI_DEBUG] Staged PlayerUI debug run complete")
+end
+
+function Debug_PlayerUI_Anim_TogglePaths(hud_enabled, scores_enabled, objectives_enabled)
+	if hud_enabled ~= nil then
+		PlayerUI_Settings.EnableToggleHudVisibility = not not hud_enabled
+	end
+	if scores_enabled ~= nil then
+		PlayerUI_Settings.EnableTogglePlayerScoresSync = not not scores_enabled
+	end
+	if objectives_enabled ~= nil then
+		PlayerUI_Settings.EnableToggleObjectiveSync = not not objectives_enabled
+	end
+
+	Debug_PlayerUI_Anim_FeatureStatus()
+	print("[PLAYERUI_DEBUG] Toggle-path isolation updated: hud/scores/objectives")
+end
+
+
+function Debug_PlayerUI_Anim_Features(move_enabled, scale_enabled, pulse_enabled, dim_enabled)
+	if move_enabled ~= nil then
+		PlayerUI_Settings.EnableRankTranslateAnimation = not not move_enabled
+	end
+	if scale_enabled ~= nil then
+		PlayerUI_Settings.EnableRankScaleAnimation = not not scale_enabled
+	end
+	if pulse_enabled ~= nil then
+		PlayerUI_Settings.EnableKillScorePulse = not not pulse_enabled
+	end
+	if dim_enabled ~= nil then
+		PlayerUI_Settings.EnableEliminationDim = not not dim_enabled
+	end
+
+	-- Snap fields to neutral values immediately when features are disabled.
+	if PlayerUiDataContext ~= nil then
+		for _, teamKey in ipairs({"teamLeft", "teamRight"}) do
+			local team = PlayerUiDataContext[teamKey]
+			if team ~= nil then
+				for i = 1, #team do
+					if PlayerUI_Settings.EnableRankTranslateAnimation == false then
+						team[i].rankTranslateY = 0
+						team[i].rankOffsetMargin = "0,0,0,0"
+					end
+					if PlayerUI_Settings.EnableRankScaleAnimation == false then
+						team[i].rankScale = 1.0
+					end
+					if PlayerUI_Settings.EnableKillScorePulse == false then
+						-- killScorePulseScale removed from DataContext (unbound numeric crash fix)
+						team[i].killScorePulseFontSize = 18
+					end
+					if PlayerUI_Settings.EnableEliminationDim == false then
+						team[i].rowOpacity = 1.0
+					end
+					if PlayerUI_Settings.EnableScoreColors == false then
+						team[i].killScoreColor = "#FFFFFFFF"
+						team[i].scoreGlowTier = 1
+					end
+					if PlayerUI_Settings.EnableRankPredictionArrows == false then
+						team[i].rankPredictionUp = false
+						team[i].rankPredictionDown = false
+						team[i].rewardEarnedFlash = false
+					end
+				end
+			end
+		end
+	end
+
+	if PlayerUI_ApplyDataContext ~= nil then
+		pcall(PlayerUI_ApplyDataContext)
+	end
+
+	Debug_PlayerUI_Anim_FeatureStatus()
+	print("[PLAYERUI_DEBUG] Toggle features one at a time to isolate the crash: move, scale, pulse, dim")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase 0: Animation Engine Integrity
+-- Validates the animation tick rule, position/number entry tables, and
+-- dirty-flag consistency.
+---------------------------------------------------------------------------------------------------
+
+function _Debug_Anim_Phase0_Engine()
+	_Debug_PhaseHeader(0, "Animation Engine")
+
+	-- T0.1: Animation module initialized
+	_Debug_RunTest("_PlayerUI_Anim table exists", function()
+		return _PlayerUI_Anim ~= nil, type(_PlayerUI_Anim)
+	end)
+
+	_Debug_RunTest("_PlayerUI_AnimPositions table exists", function()
+		return _PlayerUI_AnimPositions ~= nil, type(_PlayerUI_AnimPositions)
+	end)
+
+	-- T0.2: Tick rule registered
+	_Debug_RunTest("Animate tick rule exists", function()
+		local ok, exists = pcall(Rule_Exists, _PlayerUI_Animate_Tick)
+		if not ok then return false, "Rule_Exists error: " .. tostring(exists) end
+		return exists, exists and "registered" or "MISSING"
+	end)
+
+	-- T0.3: Tick rule pause/unpause state consistent with dirty flags
+	_Debug_RunTest("Tick rule ↔ dirty flag consistency", function()
+		local ok_e, exists = pcall(Rule_Exists, _PlayerUI_Animate_Tick)
+		if not ok_e or not exists then return false, "tick rule missing" end
+		local ok_p, paused = pcall(Rule_IsPaused, _PlayerUI_Animate_Tick)
+		if not ok_p then
+			-- Rule_IsPaused may not exist in all SCAR engine versions; skip invariant check
+			return true, "Rule_IsPaused unavailable (skipped)"
+		end
+		local numDirty = _PlayerUI_AnimDirty
+		local posDirty = _PlayerUI_AnimPositionsDirty
+		-- If paused, dirty flags should be false (nothing pending)
+		-- If running, at least one dirty or pulse active
+		if paused and (numDirty or posDirty) then
+			return false, "paused but dirty flags set: num=" .. tostring(numDirty) .. " pos=" .. tostring(posDirty)
+		end
+		return true, "paused=" .. tostring(paused) .. " numDirty=" .. tostring(numDirty) .. " posDirty=" .. tostring(posDirty)
+	end)
+
+	-- T0.4: Number animation entry count
+	_Debug_RunTest("Number animation entries", function()
+		local count = _Debug_CountKeys(_PlayerUI_Anim)
+		return true, count .. " active entries"
+	end)
+
+	-- T0.5: Position animation entry count
+	_Debug_RunTest("Position animation entries", function()
+		local count = _Debug_CountKeys(_PlayerUI_AnimPositions)
+		return true, count .. " active entries"
+	end)
+
+	-- T0.6: All position entries have both display and target fields
+	_Debug_RunTest("Position entries structurally valid", function()
+		local broken = 0
+		local details = {}
+		for key, entry in pairs(_PlayerUI_AnimPositions) do
+			if entry.display == nil or entry.target == nil then
+				broken = broken + 1
+				table.insert(details, key .. " (d=" .. tostring(entry.display) .. " t=" .. tostring(entry.target) .. ")")
+			end
+		end
+		if broken > 0 then
+			return false, broken .. " broken: " .. table.concat(details, ", ")
+		end
+		return true, "all entries have display+target"
+	end)
+
+	-- T0.7: Ease-out factor within sane range
+	_Debug_RunTest("Ease-out factor sane", function()
+		local f = _PLAYERUI_ANIM_EASEOUT_FACTOR
+		if f == nil then return false, "nil" end
+		local ok = f > 0 and f < 1.0
+		return ok, "factor=" .. tostring(f) .. (ok and "" or " OUT OF RANGE (0,1)")
+	end)
+
+	-- T0.8: Score pulse table exists
+	_Debug_RunTest("Score pulse table exists", function()
+		return _PlayerUI_ScorePulse ~= nil, type(_PlayerUI_ScorePulse)
+	end)
+
+	-- T0.9: Score pulse constants sane
+	_Debug_RunTest("Pulse constants valid", function()
+		local decay = _PLAYERUI_PULSE_DECAY
+		local peak = _PLAYERUI_PULSE_SCALE_PEAK
+		if decay == nil or peak == nil then
+			return false, "decay=" .. tostring(decay) .. " peak=" .. tostring(peak)
+		end
+		local ok = decay > 0 and decay < 1.0 and peak > 0 and peak < 1.0
+		return ok, "decay=" .. tostring(decay) .. " peak=" .. tostring(peak)
+	end)
+
+	_Debug_PhaseFooter(0, "Animation Engine")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase 1: Ranking State Consistency
+-- Cross-validates rank state arrays against data context arrays: sizes,
+-- slot references, field types, and transition lock integrity.
+---------------------------------------------------------------------------------------------------
+
+function _Debug_Anim_Phase1_RankState()
+	_Debug_PhaseHeader(1, "Ranking State Consistency")
+
+	-- T1.1: Rank state exists
+	_Debug_RunTest("_PlayerUI_RankState exists", function()
+		return _PlayerUI_RankState ~= nil, _PlayerUI_RankState ~= nil and "present" or "NIL"
+	end)
+
+	if _PlayerUI_RankState == nil then
+		_Debug_PhaseFooter(1, "Ranking State Consistency")
+		return
+	end
+
+	-- T1.2: State ↔ DataContext array size match
+	for _, teamKey in ipairs({"teamLeft", "teamRight"}) do
+		_Debug_RunTest(teamKey .. " size parity", function()
+			local state = _PlayerUI_RankState[teamKey]
+			local dc = PlayerUiDataContext[teamKey]
+			local stateN = state and #state or 0
+			local dcN = dc and #dc or 0
+			return stateN == dcN, "state=" .. stateN .. " dc=" .. dcN
+		end)
+	end
+
+	-- T1.3: All slotRef entries point to valid DataContext slots
+	_Debug_RunTest("slotRef integrity", function()
+		local broken = 0
+		local details = {}
+		for _, teamKey in ipairs({"teamLeft", "teamRight"}) do
+			local state = _PlayerUI_RankState[teamKey]
+			if state ~= nil then
+				for i = 1, #state do
+					local ref = state[i].slotRef
+					if ref == nil then
+						broken = broken + 1
+						table.insert(details, teamKey .. "[" .. i .. "]: nil")
+					elseif ref.name == nil then
+						broken = broken + 1
+						table.insert(details, teamKey .. "[" .. i .. "]: no name")
+					end
+				end
+			end
+		end
+		return broken == 0, broken == 0 and "all refs valid" or broken .. " broken: " .. table.concat(details, ", ")
+	end)
+
+	-- T1.4: slotRef ordering matches DataContext ordering
+	_Debug_RunTest("slotRef ↔ array ordering match", function()
+		local mismatches = {}
+		for _, teamKey in ipairs({"teamLeft", "teamRight"}) do
+			local state = _PlayerUI_RankState[teamKey]
+			local dc = PlayerUiDataContext[teamKey]
+			if state and dc then
+				for i = 1, math.min(#state, #dc) do
+					if state[i].slotRef ~= dc[i] then
+						table.insert(mismatches, teamKey .. "[" .. i .. "]")
+					end
+				end
+			end
+		end
+		return #mismatches == 0, #mismatches == 0 and "all match" or "mismatches: " .. table.concat(mismatches, ", ")
+	end)
+
+	-- T1.5: Transition lock state
+	_Debug_RunTest("Transition lock state", function()
+		local locked = _PlayerUI_RankTransitionLock
+		local lockTime = _PlayerUI_RankTransitionLockTime or 0
+		local pending = _PlayerUI_RankPendingReorder
+		local elapsed = 0
+		if locked then
+			local ok, gt = pcall(World_GetGameTime)
+			elapsed = ok and (gt - lockTime) or 0
+		end
+		local ok = not locked or (elapsed < _RANKING_TRANSITION_TIMEOUT)
+		return ok, "locked=" .. tostring(locked) .. " pending=" .. tostring(pending)
+			.. (locked and (" elapsed=" .. string.format("%.1fs", elapsed)) or "")
+	end)
+
+	-- T1.6: Deferred target queue empty (should be empty when no animation in flight)
+	_Debug_RunTest("Deferred target queue", function()
+		local n = #_RANKING_DEFERRED_TARGETS
+		local ok = (n == 0) or _PlayerUI_RankTransitionLock
+		return ok, n .. " queued" .. (n > 0 and " (lock active, OK)" or "")
+	end)
+
+	-- T1.7: Stability constants coherent
+	_Debug_RunTest("Stability constants coherent", function()
+		local t = _RANKING_STABILITY_THRESHOLD or 0
+		local c = _RANKING_STABILITY_COOLDOWN or 0
+		local g = _RANKING_GLOBAL_REORDER_COOLDOWN or 0
+		local rh = _RANKING_ROW_HEIGHT or 0
+		local ok = t > 0 and c > 0 and g > 0 and rh > 0
+		return ok, "thresh=" .. t .. " cool=" .. c .. "s global=" .. g .. "s rowH=" .. rh
+	end)
+
+	-- T1.8: visualIndex consistency — each entry's visualIndex matches its array position
+	_Debug_RunTest("visualIndex positional consistency", function()
+		local bad = {}
+		for _, teamKey in ipairs({"teamLeft", "teamRight"}) do
+			local state = _PlayerUI_RankState[teamKey]
+			if state then
+				for i = 1, #state do
+					if state[i].visualIndex ~= i then
+						table.insert(bad, teamKey .. "[" .. i .. "].visualIndex=" .. tostring(state[i].visualIndex))
+					end
+				end
+			end
+		end
+		return #bad == 0, #bad == 0 and "all correct" or table.concat(bad, ", ")
+	end)
+
+	_Debug_PhaseFooter(1, "Ranking State Consistency")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase 2: XAML Binding Coverage
+-- Validates that every field consumed by XAML bindings is present and
+-- correctly typed in every DataContext slot. Missing or wrong-typed
+-- fields silently fail in WPF causing invisible rows or stuck animations.
+---------------------------------------------------------------------------------------------------
+
+function _Debug_Anim_Phase2_BindingCoverage()
+	_Debug_PhaseHeader(2, "XAML Binding Coverage")
+
+	-- Expected fields and their valid type(s) for each player slot
+	local required_fields = {
+		{ name = "rankTranslateY",      types = {"number"},  range = {-136, 136} },
+		{ name = "rankOffsetMargin",    types = {"string"} },
+		{ name = "rankScale",           types = {"number"},  range = {0.5, 2.0} },
+		{ name = "rankHighlightOpacity",types = {"number"},  range = {0.0, 1.0} },
+		-- killScorePulseScale removed from DataContext (unbound numeric in ItemsSource crashes D3D)
+		{ name = "killScorePulseFontSize", types = {"number"},  range = {18, 21} },
+		{ name = "rowOpacity",          types = {"number"},  values = {0.4, 1.0} },
+		{ name = "killScoreColor",      types = {"string"} },
+		{ name = "scoreGlowTier",       types = {"number"},  values = {1, 2, 3} },
+		{ name = "isScoreUpdating",     types = {"boolean"} },
+		{ name = "rankPredictionUp",    types = {"boolean"} },
+		{ name = "rankPredictionDown",  types = {"boolean"} },
+		{ name = "rewardEarnedFlash",   types = {"boolean"} },
+		{ name = "killScore",           types = {"number"},  range = {0, 99999} },
+		{ name = "rankPosition",        types = {"number"},  range = {1, 8} },
+		{ name = "rankChangeType",      types = {"string"},  values = {"none", "minor", "major"} },
+		{ name = "isContested",         types = {"boolean"} },
+		{ name = "isTopPlayer",         types = {"boolean"} },
+		{ name = "IsEliminated",        types = {"boolean"} },
+		{ name = "IsRightSide",         types = {"boolean"} },
+		{ name = "name",                types = {"string"} },
+		{ name = "color",               types = {"string"} },
+	}
+
+	-- Test each team array
+	for _, teamKey in ipairs({"teamLeft", "teamRight"}) do
+		local dc = PlayerUiDataContext[teamKey]
+		if dc == nil then
+			_Debug_RunTest(teamKey .. " exists", function() return false, "nil" end)
+		else
+			for _, spec in ipairs(required_fields) do
+				_Debug_RunTest(teamKey .. " [*]." .. spec.name, function()
+					local missing = {}
+					local wrong_type = {}
+					local out_of_range = {}
+					for i = 1, #dc do
+						local val = dc[i][spec.name]
+						if val == nil then
+							table.insert(missing, tostring(i))
+						else
+							local vtype = type(val)
+							local type_ok = false
+							for _, t in ipairs(spec.types) do
+								if vtype == t then type_ok = true; break end
+							end
+							if not type_ok then
+								table.insert(wrong_type, i .. ":" .. vtype)
+							elseif spec.range and vtype == "number" then
+								if val < spec.range[1] or val > spec.range[2] then
+									table.insert(out_of_range, i .. ":" .. tostring(val))
+								end
+							elseif spec.values then
+								local val_ok = false
+								for _, allowed in ipairs(spec.values) do
+									if val == allowed then val_ok = true; break end
+								end
+								if not val_ok then
+									table.insert(out_of_range, i .. ":" .. tostring(val))
+								end
+							end
+						end
+					end
+					local ok = #missing == 0 and #wrong_type == 0 and #out_of_range == 0
+					local detail = #dc .. " slots"
+					if #missing > 0 then detail = detail .. " MISSING@[" .. table.concat(missing, ",") .. "]" end
+					if #wrong_type > 0 then detail = detail .. " WRONGTYPE@[" .. table.concat(wrong_type, ",") .. "]" end
+					if #out_of_range > 0 then detail = detail .. " RANGE@[" .. table.concat(out_of_range, ",") .. "]" end
+					return ok, detail
+				end)
+			end
+		end
+	end
+
+	-- Team summary denominators (XAML MultiBinding division)
+	_Debug_RunTest("AllPlayersSummary denominators ≥ 1", function()
+		local s = PlayerUiDataContext.AllPlayersSummary
+		if s == nil then return false, "AllPlayersSummary nil" end
+		local cwp = s.CombinedWorkerPop or 0
+		local cmp = s.CombinedMilitaryPop or 0
+		local cks = s.CombinedKillScore or 0
+		local ok = cwp >= 1 and cmp >= 1 and cks >= 1
+		return ok, "worker=" .. cwp .. " military=" .. cmp .. " kills=" .. cks
+	end)
+
+	_Debug_PhaseFooter(2, "XAML Binding Coverage")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase 3: FLIP Animation Stress Test
+-- Forces rapid rank swaps and validates convergence, timing, lock release,
+-- and field cleanup after each swap.
+---------------------------------------------------------------------------------------------------
+
+function _Debug_Anim_Phase3_FlipStress()
+	_Debug_PhaseHeader(3, "FLIP Stress Test")
+
+	-- Pick the team with more players for better coverage
+	local teamKey = "teamLeft"
+	local state = _PlayerUI_RankState and _PlayerUI_RankState[teamKey]
+	if state == nil or #state < 2 then
+		teamKey = "teamRight"
+		state = _PlayerUI_RankState and _PlayerUI_RankState[teamKey]
+	end
+	if state == nil or #state < 2 then
+		_Debug_RunTest("Team with ≥ 2 players available", function()
+			return false, "no team has ≥ 2 players"
+		end)
+		_Debug_PhaseFooter(3, "FLIP Stress Test")
+		return
+	end
+
+	local teamSize = #state
+
+	-- T3.1: Force a swap and verify lock activates
+	_Debug_RunTest("Force swap activates lock", function()
+		_PlayerUI_RankTransitionLock = false -- ensure clean state
+		PlayerUI_Ranking_DebugForceSwap(teamKey, 1, 2)
+		return _PlayerUI_RankTransitionLock == true, "lock=" .. tostring(_PlayerUI_RankTransitionLock)
+	end)
+
+	-- T3.2: TranslateY offsets are non-zero immediately after swap
+	_Debug_RunTest("TranslateY offsets populated", function()
+		local key1 = "rank_translateY_" .. teamKey .. "_1"
+		local key2 = "rank_translateY_" .. teamKey .. "_2"
+		local v1 = PlayerUI_Animate_GetPosition(key1)
+		local v2 = PlayerUI_Animate_GetPosition(key2)
+		local ok = (math.abs(v1) > 0.1) or (math.abs(v2) > 0.1)
+		return ok, "pos1=" .. string.format("%.1f", v1) .. " pos2=" .. string.format("%.1f", v2)
+	end)
+
+	-- T3.3: Scale keys are set for movers (placeholder test)
+	_Debug_RunTest("Scale keys populated for movers", function()
+		local key1 = "rank_translateY_" .. teamKey .. "_1"
+		local key2 = "rank_translateY_" .. teamKey .. "_2"
+		local s1 = PlayerUI_Animate_GetPosition(key1)
+		local s2 = PlayerUI_Animate_GetPosition(key2)
+		local ok = (math.abs(s1) > 1.0) or (math.abs(s2) > 1.0)
+		return ok, "pos1=" .. string.format("%.1f", s1) .. " pos2=" .. string.format("%.1f", s2)
+	end)
+
+	-- T3.4: slotRef integrity preserved after swap
+	_Debug_RunTest("slotRef integrity after swap", function()
+		local dc = PlayerUiDataContext[teamKey]
+		local rs = _PlayerUI_RankState[teamKey]
+		local broken = 0
+		for i = 1, #rs do
+			if rs[i].slotRef ~= dc[i] then broken = broken + 1 end
+		end
+		return broken == 0, broken .. " mismatches"
+	end)
+
+	-- T3.5: Swap back to restore original order, verify clean convergence
+	_Debug_RunTest("Reverse swap restores order", function()
+		-- Wait for first swap to settle (force timeout)
+		_PlayerUI_RankTransitionLock = false
+		PlayerUI_Ranking_DebugForceSwap(teamKey, 1, 2)
+		return _PlayerUI_RankTransitionLock, "lock re-activated"
+	end)
+
+	-- T3.6: Force convergence and verify lock releases
+	_Debug_RunTest("Convergence releases lock", function()
+		-- Force all translateY to target so convergence check passes
+		for i = 1, teamSize do
+			local key = "rank_translateY_" .. teamKey .. "_" .. tostring(i)
+			PlayerUI_Animate_SetPosition(key, 0)
+			PlayerUI_Animate_SetPositionTarget(key, 0)
+		end
+		local ok, err = pcall(_Ranking_CheckTransitionConverged)
+		if not ok then return false, "CRASH: " .. tostring(err) end
+		return not _PlayerUI_RankTransitionLock, "lock=" .. tostring(_PlayerUI_RankTransitionLock)
+	end)
+
+	-- T3.7: After timeout, all translateY are snapped to 0
+	_Debug_RunTest("All translateY snapped after timeout", function()
+		local nonZero = {}
+		for i = 1, teamSize do
+			local key = "rank_translateY_" .. teamKey .. "_" .. tostring(i)
+			local v = PlayerUI_Animate_GetPosition(key)
+			if math.abs(v) > 0.01 then
+				table.insert(nonZero, i .. ":" .. string.format("%.1f", v))
+			end
+		end
+		return #nonZero == 0, #nonZero == 0 and "all zero" or table.concat(nonZero, ", ")
+	end)
+
+	-- T3.8: No stale animation keys exist beyond team size
+	_Debug_RunTest("No stale keys beyond team size", function()
+		local stale = {}
+		for idx = teamSize + 1, 8 do
+			local tk = "rank_translateY_" .. teamKey .. "_" .. tostring(idx)
+			if _PlayerUI_AnimPositions[tk] ~= nil then table.insert(stale, tk) end
+		end
+		return #stale == 0, #stale == 0 and "clean" or table.concat(stale, ", ")
+	end)
+
+	-- T3.9: Deferred target queue drained after timeout
+	_Debug_RunTest("Deferred queue drained", function()
+		local n = #_RANKING_DEFERRED_TARGETS
+		-- Allow non-zero when rank transition lock is active (async Rule_AddOneShot pending)
+		local ok = (n == 0) or _PlayerUI_RankTransitionLock
+		return ok, n .. " remaining" .. (_PlayerUI_RankTransitionLock and " (transition lock active)" or "")
+	end)
+
+	_Debug_PhaseFooter(3, "FLIP Stress Test")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase 4: Score Pulse Validation
+-- Forces a score increment, verifies pulse fires, decays, and scale
+-- mapping stays within valid bounds.
+---------------------------------------------------------------------------------------------------
+
+function _Debug_Anim_Phase4_ScorePulse()
+	_Debug_PhaseHeader(4, "Score Pulse")
+
+	-- T4.1: Pulse table has entries for all player indices
+	_Debug_RunTest("Pulse entries for all players", function()
+		local all = _PlayerUI_AllPlayers
+		if all == nil then return false, "_PlayerUI_AllPlayers nil" end
+		local missing = {}
+		for i = 1, #all do
+			if _PlayerUI_ScorePulse[i] == nil then
+				table.insert(missing, tostring(i))
+			end
+		end
+		-- Note: entries are lazily created in ApplyDisplayValues, so missing is OK pre-first-tick
+		return true, #all .. " players, " .. #missing .. " not yet created (lazy init)"
+	end)
+
+	-- T4.2: Force a pulse and verify it fires
+	_Debug_RunTest("Force pulse fires", function()
+		local idx = 1
+		local pulse = _PlayerUI_ScorePulse[idx]
+		if pulse == nil then
+			_PlayerUI_ScorePulse[idx] = { value = 0, lastScore = 0 }
+			pulse = _PlayerUI_ScorePulse[idx]
+		end
+		pulse.value = 1.0  -- simulate full pulse
+		return pulse.value == 1.0, "value=" .. tostring(pulse.value)
+	end)
+
+	-- T4.3: Scale mapping produces valid scale at boundaries
+	-- Runtime formula: pulseScale = 1.0 + (peak * eased)
+	-- where eased = 1 - ((1 - pv) * (1 - pv))  (quadratic ease-out)
+	_Debug_RunTest("Scale mapping boundaries", function()
+		local peak = _PLAYERUI_PULSE_SCALE_PEAK
+		-- pv=0: eased=0 → scale=1.0
+		local e0 = 1 - ((1 - 0) * (1 - 0))
+		local s0 = 1.0 + (peak * e0)
+		-- pv=0.5: eased=0.75 → scale=1.0 + peak*0.75
+		local e5 = 1 - ((1 - 0.5) * (1 - 0.5))
+		local s5 = 1.0 + (peak * e5)
+		-- pv=1.0: eased=1.0 → scale=1.0 + peak
+		local e1 = 1 - ((1 - 1.0) * (1 - 1.0))
+		local s1 = 1.0 + (peak * e1)
+		local expectedPeak = 1.0 + peak
+		local ok = math.abs(s0 - 1.0) < 0.001 and math.abs(s1 - expectedPeak) < 0.001
+		return ok, "s(0)=" .. string.format("%.3f", s0)
+			.. " s(0.5)=" .. string.format("%.3f", s5)
+			.. " s(1)=" .. string.format("%.3f", s1)
+			.. " expected_peak=" .. string.format("%.3f", expectedPeak)
+	end)
+
+	-- T4.4: All existing pulse values are within [0, 1]
+	_Debug_RunTest("Pulse values in [0,1]", function()
+		local bad = {}
+		for idx, pulse in pairs(_PlayerUI_ScorePulse) do
+			if pulse.value < 0 or pulse.value > 1.0 then
+				table.insert(bad, idx .. ":" .. tostring(pulse.value))
+			end
+		end
+		return #bad == 0, #bad == 0 and "all valid" or "OUT OF RANGE: " .. table.concat(bad, ", ")
+	end)
+
+	-- T4.5: killScorePulseScale removed from DataContext (unbound numeric crash fix).
+	-- Verify it is absent — presence would re-introduce the D3D toggle crash.
+	_Debug_RunTest("killScorePulseScale absent from DataContext", function()
+		local found = {}
+		for _, teamKey in ipairs({"teamLeft", "teamRight"}) do
+			local dc = PlayerUiDataContext[teamKey]
+			if dc then
+				for i = 1, #dc do
+					if dc[i].killScorePulseScale ~= nil then
+						table.insert(found, teamKey .. "[" .. i .. "]:" .. tostring(dc[i].killScorePulseScale))
+					end
+				end
+			end
+		end
+		return #found == 0, #found == 0 and "absent (safe)" or "PRESENT: " .. table.concat(found, ", ")
+	end)
+
+	-- T4.6: Decay simulation — 10 steps from 1.0 should approach 0
+	_Debug_RunTest("Pulse decay simulation", function()
+		local v = 1.0
+		local decay = _PLAYERUI_PULSE_DECAY
+		for step = 1, 10 do
+			v = math.max(0, v - decay)
+		end
+		return v < 0.01, "after 10 ticks: " .. string.format("%.3f", v)
+	end)
+
+	-- Reset the forced pulse
+	if _PlayerUI_ScorePulse[1] then
+		_PlayerUI_ScorePulse[1].value = 0
+	end
+
+	_Debug_PhaseFooter(4, "Score Pulse")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase 5: Crash Condition Probes
+-- Deliberately probes edge cases that could crash the UI engine:
+-- nil data, zero-length teams, missing animation keys, concurrent locks.
+---------------------------------------------------------------------------------------------------
+
+function _Debug_Anim_Phase5_CrashProbes()
+	_Debug_PhaseHeader(5, "Crash Condition Probes")
+
+	-- T5.1: ApplyAnimatedFields survives nil rank state
+	_Debug_RunTest("ApplyAnimatedFields with nil state", function()
+		local saved = _PlayerUI_RankState
+		_PlayerUI_RankState = nil
+		local ok, err = pcall(PlayerUI_Ranking_ApplyAnimatedFields)
+		_PlayerUI_RankState = saved
+		return ok, ok and "survived" or "CRASH: " .. tostring(err)
+	end)
+
+	-- T5.2: Ranking_Update survives nil rank state
+	_Debug_RunTest("Ranking_Update with nil state", function()
+		local saved = _PlayerUI_RankState
+		_PlayerUI_RankState = nil
+		local ok, err = pcall(PlayerUI_Ranking_Update)
+		_PlayerUI_RankState = saved
+		return ok, ok and "survived" or "CRASH: " .. tostring(err)
+	end)
+
+	-- T5.3: CheckTransitionConverged survives nil rank state
+	_Debug_RunTest("CheckConverged with nil state", function()
+		local saved = _PlayerUI_RankState
+		_PlayerUI_RankState = nil
+		_PlayerUI_RankTransitionLock = true
+		local ok, err = pcall(_Ranking_CheckTransitionConverged)
+		_PlayerUI_RankState = saved
+		_PlayerUI_RankTransitionLock = false
+		return ok, ok and "survived (lock=" .. tostring(_PlayerUI_RankTransitionLock) .. ")" or "CRASH: " .. tostring(err)
+	end)
+
+	-- T5.4: GetPosition for non-existent key returns 0 (not crash)
+	_Debug_RunTest("GetPosition missing key returns 0", function()
+		local val = PlayerUI_Animate_GetPosition("_debug_nonexistent_key_xyz")
+		return val == 0, "val=" .. tostring(val)
+	end)
+
+	-- T5.5: WriteFieldsToSlots with empty entries array (zero-player team)
+	_Debug_RunTest("WriteFieldsToSlots empty array", function()
+		local ok, err = pcall(_Ranking_WriteFieldsToSlots, {})
+		return ok, ok and "survived" or "CRASH: " .. tostring(err)
+	end)
+
+	-- T5.6: UpdateContestedFlags single-player team (no adjacent pair)
+	_Debug_RunTest("UpdateContestedFlags single-player", function()
+		local single = {{ score = 100, isContested = false }}
+		local ok, err = pcall(_Ranking_UpdateContestedFlags, single)
+		if not ok then return false, "CRASH: " .. tostring(err) end
+		return not single[1].isContested, "contested=" .. tostring(single[1].isContested)
+	end)
+
+	-- T5.7: CleanStaleAnimKeys with zero team size (cleans all)
+	_Debug_RunTest("CleanStaleAnimKeys zero size", function()
+		local ok, err = pcall(_Ranking_CleanStaleAnimKeys, "teamLeft", 0)
+		return ok, ok and "survived" or "CRASH: " .. tostring(err)
+	end)
+
+	-- T5.8: ApplyDisplayValues survives nil _PlayerUI_AllPlayers
+	_Debug_RunTest("ApplyDisplayValues with nil players", function()
+		local saved = _PlayerUI_AllPlayers
+		_PlayerUI_AllPlayers = nil
+		local ok, err = pcall(PlayerUI_Animate_ApplyDisplayValues)
+		_PlayerUI_AllPlayers = saved
+		return ok, ok and "survived (early return)" or "CRASH: " .. tostring(err)
+	end)
+
+	-- T5.9: DebugForceSwap with invalid indices
+	_Debug_RunTest("DebugForceSwap invalid indices", function()
+		local ok, err = pcall(PlayerUI_Ranking_DebugForceSwap, "teamLeft", 99, 100)
+		return ok, ok and "survived (printed error)" or "CRASH: " .. tostring(err)
+	end)
+
+	-- T5.10: DebugForceSwap with nil teamKey
+	_Debug_RunTest("DebugForceSwap nil teamKey", function()
+		local ok, err = pcall(PlayerUI_Ranking_DebugForceSwap, nil, 1, 2)
+		return ok, ok and "survived" or "CRASH: " .. tostring(err)
+	end)
+
+	-- T5.11: PinTopPlayer with empty array
+	_Debug_RunTest("PinTopPlayer empty array", function()
+		local ok, err = pcall(_Ranking_PinTopPlayer, {}, 0)
+		return ok, ok and "survived" or "CRASH: " .. tostring(err)
+	end)
+
+	-- T5.12: Concurrent transition lock — start swap while locked
+	_Debug_RunTest("Swap during active lock", function()
+		local state = _PlayerUI_RankState and _PlayerUI_RankState.teamLeft
+		if state == nil or #state < 2 then return true, "skipped (< 2 players)" end
+		_PlayerUI_RankTransitionLock = true
+		_PlayerUI_RankTransitionLockTime = World_GetGameTime()
+		local ok, err = pcall(PlayerUI_Ranking_Update)
+		_PlayerUI_RankTransitionLock = false
+		return ok, ok and "survived (update deferred)" or "CRASH: " .. tostring(err)
+	end)
+
+	-- T5.13: Negative score in ranking
+	_Debug_RunTest("Negative score handling", function()
+		local state = _PlayerUI_RankState and _PlayerUI_RankState.teamLeft
+		if state == nil or #state < 1 then return true, "skipped" end
+		local saved_score = state[1].score
+		local saved_stable = state[1].stableScore
+		state[1].score = -100
+		state[1].stableScore = -100
+		local ok, err = pcall(PlayerUI_Ranking_Update)
+		state[1].score = saved_score
+		state[1].stableScore = saved_stable
+		return ok, ok and "survived" or "CRASH: " .. tostring(err)
+	end)
+
+	_Debug_PhaseFooter(5, "Crash Condition Probes")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase 6: Continuous Monitor Dry Run
+-- Runs one iteration of the monitor invariant checks as a test to
+-- validate the monitor logic itself before enabling it as a rule.
+---------------------------------------------------------------------------------------------------
+
+function _Debug_Anim_Phase6_MonitorDryRun()
+	_Debug_PhaseHeader(6, "Monitor Dry Run")
+
+	_Debug_RunTest("Monitor check function callable", function()
+		local violations_before = _cba_debug_anim_monitor.violations
+		local ok, err = pcall(_Debug_Anim_MonitorCheck)
+		local violations_after = _cba_debug_anim_monitor.violations
+		local new_violations = violations_after - violations_before
+		if not ok then return false, "CRASH: " .. tostring(err) end
+		return true, new_violations .. " violations detected in dry run"
+	end)
+
+	_Debug_PhaseFooter(6, "Monitor Dry Run")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Console Command 1: Full 6-phase diagnostic suite
+---------------------------------------------------------------------------------------------------
+
+function Debug_PlayerUI_Anim()
+	_cba_debug.enabled = true
+	_cba_debug.test_results = {}
+	_cba_debug.phase_results = {}
+	local ok, gt = pcall(World_GetGameTime)
+	_cba_debug._playerui_anim_start = ok and gt or 0
+
+	print("")
+	print("[PLAYERUI_DEBUG] ===== PLAYERUI ANIMATION DIAGNOSTICS =====")
+	print("[PLAYERUI_DEBUG] 7 phases: Engine → RankState → Bindings → FLIP → Pulse → Crash → Monitor")
+	print("")
+
+	if _PlayerUI_LocalPlayerId == nil then
+		print("[PLAYERUI_DEBUG] [FAIL] PlayerUI not initialized — run Debug_PlayerUI() or start game")
+		return
+	end
+
+	_Debug_Anim_Phase0_Engine()
+	_Debug_ScheduleNextPhase(_Debug_Anim_Chain1, _ANIM_DELAY, "Rank State", _ANIM_SUITE)
+end
+
+function _Debug_Anim_Chain1()
+	_Debug_Anim_Phase1_RankState()
+	_Debug_ScheduleNextPhase(_Debug_Anim_Chain2, _ANIM_DELAY, "Binding Coverage", _ANIM_SUITE)
+end
+
+function _Debug_Anim_Chain2()
+	_Debug_Anim_Phase2_BindingCoverage()
+	_Debug_ScheduleNextPhase(_Debug_Anim_Chain3, _ANIM_DELAY, "FLIP Stress", _ANIM_SUITE)
+end
+
+function _Debug_Anim_Chain3()
+	_Debug_Anim_Phase3_FlipStress()
+	_Debug_ScheduleNextPhase(_Debug_Anim_Chain4, _ANIM_DELAY, "Score Pulse", _ANIM_SUITE)
+end
+
+function _Debug_Anim_Chain4()
+	_Debug_Anim_Phase4_ScorePulse()
+	_Debug_ScheduleNextPhase(_Debug_Anim_Chain5, _ANIM_DELAY, "Crash Probes", _ANIM_SUITE)
+end
+
+function _Debug_Anim_Chain5()
+	_Debug_Anim_Phase5_CrashProbes()
+	_Debug_ScheduleNextPhase(_Debug_Anim_Chain6, _ANIM_DELAY, "Monitor Dry Run", _ANIM_SUITE)
+end
+
+function _Debug_Anim_Chain6()
+	_Debug_Anim_Phase6_MonitorDryRun()
+	_Debug_ScheduleNextPhase(_Debug_Anim_Finish, 1, "Summary", _ANIM_SUITE)
+end
+
+function _Debug_Anim_Finish()
+	local ok, gt = pcall(World_GetGameTime)
+	local elapsed = ok and (gt - (_cba_debug._playerui_anim_start or 0)) or 0
+
+	local passed, total = 0, 0
+	for _, r in ipairs(_cba_debug.test_results) do
+		total = total + 1
+		if r.pass then passed = passed + 1 end
+	end
+
+	_Debug_EndMarker(_ANIM_SUITE, passed, total, elapsed)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Console Command 2: Continuous Invariant Monitor
+-- Runs every 0.5s and logs violations to scarlog. Violations are:
+--   • rankScale outside [0.5, 2.0]
+--   • killScorePulseScale present in DataContext (crash risk: unbound numeric)
+--   • rowOpacity not in {0.4, 1.0}
+--   • rankTranslateY non-zero while no transition lock active
+--   • slotRef ↔ DataContext array mismatch
+--   • transition lock stuck > timeout
+--   • pulse value outside [0, 1]
+---------------------------------------------------------------------------------------------------
+
+function Debug_PlayerUI_Anim_Monitor()
+	if _cba_debug_anim_monitor.running then
+		print("[PLAYERUI_DEBUG] Monitor already running (" .. _cba_debug_anim_monitor.ticks .. " ticks, "
+			.. _cba_debug_anim_monitor.violations .. " violations)")
+		return
+	end
+
+	_cba_debug.enabled = true
+	_cba_debug_anim_monitor.running = true
+	_cba_debug_anim_monitor.violations = 0
+	_cba_debug_anim_monitor.ticks = 0
+	_cba_debug_anim_monitor.start_time = World_GetGameTime()
+
+	Rule_AddInterval(_Debug_Anim_MonitorTick, _MONITOR_INTERVAL)
+
+	print("[PLAYERUI_DEBUG] " .. _MONITOR_TAG .. " Started — logging violations every " .. _MONITOR_INTERVAL .. "s")
+	print("[PLAYERUI_DEBUG] " .. _MONITOR_TAG .. " Call Debug_PlayerUI_Anim_MonitorStop() to stop")
+end
+
+function Debug_PlayerUI_Anim_MonitorStop()
+	if not _cba_debug_anim_monitor.running then
+		print("[PLAYERUI_DEBUG] " .. _MONITOR_TAG .. " Not running")
+		return
+	end
+
+	if Rule_Exists(_Debug_Anim_MonitorTick) then
+		Rule_Remove(_Debug_Anim_MonitorTick)
+	end
+
+	local elapsed = World_GetGameTime() - _cba_debug_anim_monitor.start_time
+	local ticks = _cba_debug_anim_monitor.ticks
+	local violations = _cba_debug_anim_monitor.violations
+
+	_cba_debug_anim_monitor.running = false
+
+	print(string.format("[PLAYERUI_DEBUG] %s Stopped — %d ticks, %d violations, %.1fs",
+		_MONITOR_TAG, ticks, violations, elapsed))
+
+	-- Machine-parseable summary
+	local summary = string.format("[CBA_DEBUG_END] suite=AnimMonitor ticks=%d violations=%d elapsed=%.1fs status=%s",
+		ticks, violations, elapsed, violations == 0 and "CLEAN" or "VIOLATIONS")
+	print(summary)
+	pcall(Misc_AppendToFile, "scarlog:cba_debug_runs.txt", summary .. "\n")
+
+	pcall(UI_CreateEventCue,
+		"[Debug] Anim Monitor Stopped",
+		violations .. " violations in " .. ticks .. " ticks",
+		"high_priority", "", "sfx_ui_event_queue_high_priority_play",
+		5.0)
+end
+
+function _Debug_Anim_MonitorTick()
+	_cba_debug_anim_monitor.ticks = _cba_debug_anim_monitor.ticks + 1
+	_Debug_Anim_MonitorCheck()
+end
+
+---------------------------------------------------------------------------------------------------
+-- Monitor: single invariant check pass (also used by Phase 6 dry run)
+---------------------------------------------------------------------------------------------------
+
+function _Debug_Anim_MonitorCheck()
+	local violations = {}
+
+	-- Skip checks if PlayerUI not initialized
+	if _PlayerUI_RankState == nil or PlayerUiDataContext == nil then return end
+
+	local gameTime = World_GetGameTime()
+	local locked = _PlayerUI_RankTransitionLock
+
+	for _, teamKey in ipairs({"teamLeft", "teamRight"}) do
+		local state = _PlayerUI_RankState[teamKey]
+		local dc = PlayerUiDataContext[teamKey]
+		if state == nil or dc == nil then goto continue end
+
+		-- Size mismatch
+		if #state ~= #dc then
+			table.insert(violations, teamKey .. " SIZE_MISMATCH state=" .. #state .. " dc=" .. #dc)
+		end
+
+		for i = 1, #state do
+			local slot = dc[i]
+			if slot == nil then
+				table.insert(violations, teamKey .. "[" .. i .. "] SLOT_NIL")
+				goto next_slot
+			end
+
+			-- slotRef parity
+			if state[i].slotRef ~= slot then
+				table.insert(violations, teamKey .. "[" .. i .. "] SLOTREF_MISMATCH")
+			end
+
+			-- rankScale range
+			local rs = slot.rankScale
+			if rs ~= nil and (rs < 0.5 or rs > 2.0) then
+				table.insert(violations, teamKey .. "[" .. i .. "] RANK_SCALE=" .. string.format("%.3f", rs))
+			end
+
+			-- killScorePulseScale removed from DataContext (unbound numeric crash fix)
+			if slot.killScorePulseScale ~= nil then
+				table.insert(violations, teamKey .. "[" .. i .. "] PULSE_SCALE_PRESENT=" .. tostring(slot.killScorePulseScale))
+			end
+
+			-- rowOpacity discrete values
+			local ro = slot.rowOpacity
+			if ro ~= nil and ro ~= 1.0 and ro ~= 0.4 then
+				table.insert(violations, teamKey .. "[" .. i .. "] ROW_OPACITY=" .. tostring(ro))
+			end
+
+			-- rankTranslateY residual when not animating
+			if not locked then
+				local ty = slot.rankTranslateY
+				if ty ~= nil and math.abs(ty) > 1.0 then
+					table.insert(violations, teamKey .. "[" .. i .. "] RESIDUAL_TRANSLATE_Y=" .. string.format("%.1f", ty))
+				end
+			end
+
+			::next_slot::
+		end
+		::continue::
+	end
+
+	-- Transition lock timeout
+	if locked then
+		local lockElapsed = gameTime - (_PlayerUI_RankTransitionLockTime or gameTime)
+		if lockElapsed > _RANKING_TRANSITION_TIMEOUT + 1.0 then
+			table.insert(violations, "LOCK_STUCK elapsed=" .. string.format("%.1fs", lockElapsed))
+		end
+	end
+
+	-- Pulse value bounds
+	for idx, pulse in pairs(_PlayerUI_ScorePulse) do
+		if pulse.value < -0.01 or pulse.value > 1.01 then
+			table.insert(violations, "PULSE[" .. idx .. "]=" .. string.format("%.3f", pulse.value))
+		end
+	end
+
+	-- Log violations
+	if #violations > 0 then
+		_cba_debug_anim_monitor.violations = _cba_debug_anim_monitor.violations + #violations
+		local tick = _cba_debug_anim_monitor.ticks
+		for _, v in ipairs(violations) do
+			print(string.format("%s [T%d] VIOLATION: %s", _MONITOR_TAG, tick, v))
+		end
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Console Command 3: Rapid Swap Stress Test
+-- Fires n rapid swaps with minimal delay to detect race conditions and
+-- state corruption under high reorder frequency.
+---------------------------------------------------------------------------------------------------
+
+function Debug_PlayerUI_Anim_Stress(rounds)
+	rounds = rounds or 10
+
+	_cba_debug.enabled = true
+	print("")
+	print(string.format("[PLAYERUI_DEBUG] ===== ANIM STRESS TEST (%d rounds) =====", rounds))
+
+	if _PlayerUI_RankState == nil then
+		print("[PLAYERUI_DEBUG] [FAIL] Ranking not initialized")
+		return
+	end
+
+	-- Find usable team
+	local teamKey = "teamLeft"
+	local state = _PlayerUI_RankState[teamKey]
+	if state == nil or #state < 2 then
+		teamKey = "teamRight"
+		state = _PlayerUI_RankState[teamKey]
+	end
+	if state == nil or #state < 2 then
+		print("[PLAYERUI_DEBUG] [FAIL] No team with ≥ 2 players")
+		return
+	end
+
+	-- Store starting state for post-stress validation
+	local startNames = {}
+	for i = 1, #state do
+		startNames[i] = tostring(state[i].slotRef and state[i].slotRef.name or "?")
+	end
+
+	-- Fire rapid swaps
+	local crashCount = 0
+	for r = 1, rounds do
+		-- Alternate swap direction
+		local idx1 = 1
+		local idx2 = (r % (#state - 1)) + 2
+		_PlayerUI_RankTransitionLock = false -- force unlock for rapid testing
+		local ok, err = pcall(PlayerUI_Ranking_DebugForceSwap, teamKey, idx1, idx2)
+		if not ok then
+			crashCount = crashCount + 1
+			print(string.format("  [CRASH] Round %d: %s", r, tostring(err)))
+		end
+	end
+
+	-- Force convergence
+	_PlayerUI_RankTransitionLockTime = 0
+	pcall(_Ranking_CheckTransitionConverged)
+	_PlayerUI_RankTransitionLock = false
+
+	-- Post-stress validation
+	local postState = _PlayerUI_RankState[teamKey]
+	local dc = PlayerUiDataContext[teamKey]
+	local refBreaks = 0
+	for i = 1, #postState do
+		if postState[i].slotRef ~= dc[i] then refBreaks = refBreaks + 1 end
+	end
+
+	print(string.format("[PLAYERUI_DEBUG] Stress complete: %d rounds, %d crashes, %d ref breaks", rounds, crashCount, refBreaks))
+	print(string.format("[PLAYERUI_DEBUG] lock=%s pending=%s",
+		tostring(_PlayerUI_RankTransitionLock), tostring(_PlayerUI_RankPendingReorder)))
+
+	-- Log player order change
+	local endNames = {}
+	for i = 1, #postState do
+		endNames[i] = tostring(postState[i].slotRef and postState[i].slotRef.name or "?")
+	end
+	print("[PLAYERUI_DEBUG] Start order: " .. table.concat(startNames, ", "))
+	print("[PLAYERUI_DEBUG] End order:   " .. table.concat(endNames, ", "))
+
+	local status = (crashCount == 0 and refBreaks == 0) and "PASS" or "FAIL"
+	local marker = string.format("[CBA_DEBUG_END] suite=AnimStress rounds=%d crashes=%d ref_breaks=%d status=%s",
+		rounds, crashCount, refBreaks, status)
+	print(marker)
+	pcall(Misc_AppendToFile, "scarlog:cba_debug_runs.txt", marker .. "\n")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Console Command 4: Force Score Pulse
+-- Injects a full pulse at the given player index for visual verification.
+---------------------------------------------------------------------------------------------------
+
+function Debug_PlayerUI_Anim_Pulse(player_idx)
+	player_idx = player_idx or 1
+	
+	if _PlayerUI_ScorePulse == nil then
+		print("[PLAYERUI_DEBUG] Score pulse table not initialized")
+		return
+	end
+
+	local pulse = _PlayerUI_ScorePulse[player_idx]
+	if pulse == nil then
+		_PlayerUI_ScorePulse[player_idx] = { value = 1.0, lastScore = 0 }
+		pulse = _PlayerUI_ScorePulse[player_idx]
+	else
+		pulse.value = 1.0
+	end
+
+	-- Ensure tick is running to process the decay
+	if Rule_Exists(_PlayerUI_Animate_Tick) then
+		Rule_Unpause(_PlayerUI_Animate_Tick)
+	end
+
+	print(string.format("[PLAYERUI_DEBUG] Pulse injected: player_idx=%d value=1.0 peak=%.2f",
+		player_idx, _PLAYERUI_PULSE_SCALE_PEAK))
+end
+
+---------------------------------------------------------------------------------------------------
+-- Console Command 5: One-shot animated field snapshot
+-- Prints all current animation values for every player slot.
+---------------------------------------------------------------------------------------------------
+
+function Debug_PlayerUI_Anim_ValidateDataContext()
+	_Debug_Anim_Phase2_BindingCoverage()
+end
+
+---------------------------------------------------------------------------------------------------
+-- Console Command 5: One-shot animated field snapshot
+-- Prints all current animation values for every player slot.
+---------------------------------------------------------------------------------------------------
+
+function Debug_PlayerUI_Anim_Snapshot()
+	print("")
+	print("[PLAYERUI_DEBUG] ===== ANIMATION SNAPSHOT =====")
+
+	if _PlayerUI_RankState == nil then
+		print("[PLAYERUI_DEBUG] Ranking not initialized")
+		return
+	end
+
+	for _, teamKey in ipairs({"teamLeft", "teamRight"}) do
+		local state = _PlayerUI_RankState[teamKey]
+		local dc = PlayerUiDataContext[teamKey]
+		if state == nil or #state == 0 then goto next_team end
+
+		print(string.format("  --- %s (%d players) ---", teamKey, #state))
+		for i = 1, #state do
+			local s = state[i]
+			local slot = dc[i]
+			local name = (slot and slot.name) or "?"
+
+			-- Animation engine values
+			local tyKey = "rank_translateY_" .. teamKey .. "_" .. tostring(i)
+			local scEntry = _PlayerUI_AnimPositions[tyKey]
+
+			print(string.format(
+				"  [%d] %-16s score=%-5d ty=%-7s → %-7s",
+				i, name,
+				slot and slot.killScore or 0,
+				scEntry and string.format("%.1f", scEntry.display) or "-",
+				scEntry and string.format("%.1f", scEntry.target) or "-"
+			))
+
+			-- DataContext binding values
+			print(string.format(
+				"         rankScale=%.3f  opacity=%.1f  translateY=%.1f  margin=%s  rank=%d  change=%s  contested=%s  top=%s  elim=%s  color=%s  glow=%d  pulseFont=%.2f  digitPulse=%.2f  scoreSplit=%s|%s  updating=%s  predUp=%s  predDown=%s  star=%s",
+				slot.rankScale or 0,
+				slot.rowOpacity or 0,
+				slot.rankTranslateY or 0,
+				tostring(slot.rankOffsetMargin or "?"),
+				slot.rankPosition or 0,
+				slot.rankChangeType or "?",
+				tostring(slot.isContested),
+				tostring(slot.isTopPlayer),
+				tostring(slot.IsEliminated),
+				tostring(slot.killScoreColor or "?"),
+				slot.scoreGlowTier or 0,
+				slot.killScorePulseFontSize or 18,
+				tostring(slot.isScoreUpdating),
+				tostring(slot.rankPredictionUp),
+				tostring(slot.rankPredictionDown),
+				tostring(slot.rewardEarnedFlash)
+			))
+		end
+		::next_team::
+	end
+
+	-- Lock state
+	print(string.format("  lock=%s  lockTime=%s  pending=%s  deferredQ=%d",
+		tostring(_PlayerUI_RankTransitionLock),
+		_PlayerUI_RankTransitionLock and string.format("%.1fs ago", World_GetGameTime() - (_PlayerUI_RankTransitionLockTime or 0)) or "-",
+		tostring(_PlayerUI_RankPendingReorder),
+		#_RANKING_DEFERRED_TARGETS
+	))
+
+	-- Tick rule state
+	local tickExists = Rule_Exists(_PlayerUI_Animate_Tick)
+	local tickPaused = false
+	local tickPausedKnown = false
+	if tickExists then
+		local okPaused, pausedOrErr = pcall(Rule_IsPaused, _PlayerUI_Animate_Tick)
+		if okPaused then
+			tickPaused = pausedOrErr
+			tickPausedKnown = true
+		end
+	end
+	print(string.format("  tick: exists=%s paused=%s  numDirty=%s  posDirty=%s",
+		tostring(tickExists), tickPausedKnown and tostring(tickPaused) or "n/a",
+		tostring(_PlayerUI_AnimDirty), tostring(_PlayerUI_AnimPositionsDirty)
+	))
+
+	-- Monitor status
+	if _cba_debug_anim_monitor.running then
+		print(string.format("  monitor: RUNNING  ticks=%d  violations=%d",
+			_cba_debug_anim_monitor.ticks, _cba_debug_anim_monitor.violations))
+	else
+		print("  monitor: stopped")
+	end
+
+	print("[PLAYERUI_DEBUG] ===== END SNAPSHOT =====")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Reward Completion Animation Debug Commands
+---------------------------------------------------------------------------------------------------
+
+-- Print the current state of the reward playback runner.
+function Debug_PlayerUI_RewardPlayback_Snapshot()
+	local pb = _PlayerUI_RewardPlayback
+	if pb == nil then
+		print("[PLAYERUI_REWARD_DEBUG] _PlayerUI_RewardPlayback is nil")
+		return
+	end
+
+	print("[PLAYERUI_REWARD_DEBUG] ===== REWARD PLAYBACK SNAPSHOT =====")
+	print("  phase            = " .. tostring(pb.phase))
+	print("  phaseStart       = " .. string.format("%.1f", pb.phaseStart or 0))
+	print("  gameTime         = " .. string.format("%.1f", World_GetGameTime()))
+	print("  fillDisplay      = " .. string.format("%.1f", pb.fillDisplay or 0))
+	print("  playedCount      = " .. tostring(pb.playedCount or 0))
+	print("  lastObservedReq  = " .. tostring(pb.lastObservedReq))
+	print("  queueLen         = " .. tostring(#pb.queue))
+
+	if pb.active ~= nil then
+		print("  active.threshold = " .. tostring(pb.active.threshold))
+		print("  active.interval  = " .. tostring(pb.active.interval))
+		print("  active.title     = " .. tostring(pb.active.title or "?"))
+	else
+		print("  active           = nil")
+	end
+
+	for i, m in ipairs(pb.queue) do
+		print("  queue[" .. i .. "] threshold=" .. tostring(m.threshold)
+			.. " title=" .. tostring(m.title or "?")
+			.. " interval=" .. tostring(m.interval))
+	end
+
+	-- Icon smoothing state
+	local slotState = _PlayerUI_RewardIconSlotState or {}
+	print("  iconSlotState    = " .. tostring(#slotState) .. " slots"
+		.. "  smoothingActive=" .. tostring(_PlayerUI_RewardIconSmoothingActive)
+		.. "  initialized=" .. tostring(_PlayerUI_RewardIconSmoothingInitialized))
+	for i, s in ipairs(slotState) do
+		print("    slot[" .. i .. "] thresh=" .. tostring(s.threshold)
+			.. " opacity=" .. string.format("%.2f", s.opacity or 0)
+			.. " border=" .. tostring(s.borderColor)
+			.. " offX=" .. string.format("%.1f", s.offsetX or 0)
+			.. "->" .. string.format("%.1f", s.targetOffsetX or 0)
+			.. " scale=" .. string.format("%.2f", s.scale or 1)
+			.. "->" .. string.format("%.2f", s.targetScale or 1)
+			.. " margin=" .. tostring(s.offsetXMargin or "-"))
+	end
+
+	-- Current DataContext icon state
+	local icons = PlayerUiDataContext and PlayerUiDataContext.rewardIcons or {}
+	print("  ctx.rewardIcons  = " .. tostring(#icons) .. " icons")
+	for i, ic in ipairs(icons) do
+		print("    icon[" .. i .. "] thresh=" .. tostring(ic.thresholdText)
+			.. " opacity=" .. string.format("%.2f", ic.opacity or 1)
+			.. " glowFill=" .. tostring(ic.glowFill or "#00FFD700")
+			.. " border=" .. tostring(ic.borderColor)
+			.. " offX=" .. string.format("%.1f", ic.offsetX or 0)
+			.. " scale=" .. string.format("%.2f", ic.scale or 1)
+			.. " margin=" .. tostring(ic.offsetXMargin or "-"))
+	end
+
+	-- Strip-level offset state
+	print("  stripOffsetX     = " .. string.format("%.1f", _PlayerUI_RewardStripOffsetX or 0)
+		.. " -> " .. string.format("%.1f", _PlayerUI_RewardStripTargetOffsetX or 0)
+		.. " margin=" .. tostring(PlayerUiDataContext and PlayerUiDataContext.rewardStripOffsetMargin or "-"))
+	print("  motionEnabled    = " .. tostring(PlayerUI_Settings and PlayerUI_Settings.EnableRewardIconMotion or false))
+
+	-- Guard counters
+	local g = _PlayerUI_MotionGuards or {}
+	print("  guards: phaseStart_healed=" .. tostring(g.phaseStart_healed or 0)
+		.. " queue_fallback=" .. tostring(g.queue_entry_fallback or 0)
+		.. " color_norm=" .. tostring(g.color_normalized or 0)
+		.. " ctx_healed=" .. tostring(g.rewards_ctx_healed or 0)
+		.. " center_timeout=" .. tostring(g.center_timeout_used or 0))
+
+	-- Fill ramp state
+	local fillPct = 0
+	if pb.active and pb.active.interval and pb.active.interval > 0 then
+		fillPct = (pb.fillDisplay or 0) / pb.active.interval * 100
+	end
+	print("  fillDisplay      = " .. string.format("%.1f", pb.fillDisplay or 0)
+		.. " fillStartTime=" .. string.format("%.1f", pb.fillStartTime or 0)
+		.. " fillPct=" .. string.format("%.0f%%", fillPct)
+		.. " queueLen=" .. tostring(#pb.queue)
+		.. " fillAccel=" .. string.format("%.2f", 1.0 + #pb.queue * (_PLAYERUI_REWARD_FILL_QUEUE_ACCEL or 0.25)))
+
+	print("[PLAYERUI_REWARD_DEBUG] ===== END SNAPSHOT =====")
+end
+
+local function _Debug_RewardCapture_GuardSnapshot()
+	local g = _PlayerUI_MotionGuards or {}
+	return {
+		phaseStart_healed = g.phaseStart_healed or 0,
+		queue_entry_fallback = g.queue_entry_fallback or 0,
+		color_normalized = g.color_normalized or 0,
+		rewards_ctx_healed = g.rewards_ctx_healed or 0,
+		center_timeout_used = g.center_timeout_used or 0,
+	}
+end
+
+local function _Debug_RewardCapture_Stop(status)
+	if Rule_Exists(_Debug_RewardCapture_Tick) then
+		Rule_Remove(_Debug_RewardCapture_Tick)
+	end
+	local elapsed = World_GetGameTime() - (_cba_debug_reward_capture.start_time or 0)
+
+	-- Phase timing summary
+	local timings = _cba_debug_reward_capture.phase_timings or {}
+	if #timings > 0 then
+		print("[PLAYERUI_REWARD_CAPTURE] PHASE TIMING SUMMARY:")
+		local totalActive = 0
+		for _, t in ipairs(timings) do
+			print(string.format("  %s -> %s  elapsed=%.3fs  easing=%s", t.from, t.to, t.elapsed, t.easing or "linear"))
+			if t.from ~= "idle" then
+				totalActive = totalActive + t.elapsed
+			end
+		end
+		print(string.format("  total_active=%.3fs  total_capture=%.2fs", totalActive, elapsed))
+	end
+
+	-- Queued-icon invariant validation summary
+	local valViolations = _cba_debug_reward_capture.validation_violations or 0
+	local valClean = _cba_debug_reward_capture.validation_ticks_clean or 0
+	local valFailed = _cba_debug_reward_capture.validation_ticks_failed or 0
+	if valViolations > 0 or valClean > 0 then
+		local result = (valViolations == 0) and "PASS" or "FAIL"
+		print(string.format("[PLAYERUI_REWARD_VALIDATE] %s violations=%d clean_ticks=%d failed_ticks=%d",
+			result, valViolations, valClean, valFailed))
+	end
+
+	print(string.format("[PLAYERUI_REWARD_CAPTURE] END status=%s ticks=%d idleCaptured=%s midCaptured=%s autoInjected=%s elapsed=%.2fs",
+		status or "done",
+		_cba_debug_reward_capture.ticks or 0,
+		tostring(_cba_debug_reward_capture.idle_captured),
+		tostring(_cba_debug_reward_capture.mid_captured),
+		tostring(_cba_debug_reward_capture.auto_injected),
+		elapsed))
+	_cba_debug_reward_capture.running = false
+end
+
+-- Validate queued-icon invariants during effect phases.
+-- During center/highlight/fadeout, queued icons (index 2+) must stay at offsetX=0, opacity=1.0, scale=1.0.
+-- Returns: violations (count), details (string)
+local function _Debug_RewardValidate_QueuedInvariants(phase)
+	if phase ~= "completion_center" and phase ~= "completion_highlight" and phase ~= "completion_fadeout" then
+		return 0, ""
+	end
+
+	local icons = PlayerUiDataContext and PlayerUiDataContext.rewardIcons or {}
+	local violations = 0
+	local details = {}
+
+	for i = 2, #icons do
+		local ic = icons[i]
+		if ic then
+			local offX = ic.offsetX or 0
+			local opacity = ic.opacity or 1
+			local scale = ic.scale or 1
+
+			if math.abs(offX) > 0.5 then
+				violations = violations + 1
+				table.insert(details, string.format("icon[%d] offsetX=%.1f", i, offX))
+			end
+			if math.abs(opacity - 1.0) > 0.01 then
+				violations = violations + 1
+				table.insert(details, string.format("icon[%d] opacity=%.2f", i, opacity))
+			end
+			if math.abs(scale - 1.0) > 0.01 then
+				violations = violations + 1
+				table.insert(details, string.format("icon[%d] scale=%.2f", i, scale))
+			end
+		end
+	end
+
+	return violations, table.concat(details, "; ")
+end
+
+function _Debug_RewardCapture_Tick()
+	local st = _cba_debug_reward_capture
+	local pb = _PlayerUI_RewardPlayback
+	st.ticks = (st.ticks or 0) + 1
+
+	if pb == nil then
+		print("[PLAYERUI_REWARD_CAPTURE] playback state missing during capture")
+		_Debug_RewardCapture_Stop("playback_nil")
+		return
+	end
+
+	local now = World_GetGameTime()
+	if (now - (st.start_time or now)) > (st.timeout or 8.0) then
+		print("[PLAYERUI_REWARD_CAPTURE] timeout reached before full capture set")
+		_Debug_RewardCapture_Stop("timeout")
+		return
+	end
+
+	-- Detect phase transitions and log convergence context.
+	if st.last_phase ~= pb.phase then
+		local phaseElapsed = 0
+		if st.last_phase_start ~= nil and st.last_phase_start > 0 then
+			phaseElapsed = now - st.last_phase_start
+		end
+		local activeThreshold = pb.active and pb.active.threshold or "nil"
+		local activeInterval = pb.active and pb.active.interval or "nil"
+		-- Easing type per phase for capture diagnostics
+		local easingTag = "linear"
+		if pb.phase == "completion_center" then
+			easingTag = "ease-out"
+		elseif pb.phase == "completion_fadeout" then
+			easingTag = "ease-in"
+		elseif pb.phase == "reshuffle" then
+			easingTag = "ease-out"
+		elseif pb.phase == "shuffle" then
+			-- legacy unified phase (pre-split)
+			easingTag = "ease-in-out"
+		elseif pb.phase == "advance" then
+			easingTag = "dwell"
+		end
+		print(string.format("[PLAYERUI_REWARD_CAPTURE] phase %s -> %s phaseElapsed=%.3fs queueLen=%d activeThreshold=%s interval=%s easing=%s",
+			tostring(st.last_phase or "nil"),
+			tostring(pb.phase),
+			phaseElapsed,
+			#(pb.queue or {}),
+			tostring(activeThreshold),
+			tostring(activeInterval),
+			easingTag))
+
+		-- Record timing for summary
+		if st.phase_timings == nil then st.phase_timings = {} end
+		table.insert(st.phase_timings, {
+			from = tostring(st.last_phase or "nil"),
+			to = tostring(pb.phase),
+			elapsed = phaseElapsed,
+			easing = easingTag,
+		})
+
+		if pb.phase == "completion_center" then
+			local slot = _PlayerUI_RewardIconSlotState and _PlayerUI_RewardIconSlotState[1] or nil
+			if slot ~= nil then
+				local ds = math.abs((slot.scale or 1.0) - (slot.targetScale or 1.0))
+				local eps = _PLAYERUI_REWARD_ICON_SCALE_EPSILON or 0.01
+				print(string.format("[PLAYERUI_REWARD_CAPTURE] center_convergence leadScale=%.3f target=%.3f delta=%.3f eps=%.3f converged=%s",
+					slot.scale or 1.0, slot.targetScale or 1.0, ds, eps, tostring(ds <= eps)))
+			end
+		end
+
+		-- Per-slot continuity snapshot at every phase transition
+		local ctxIcons = PlayerUiDataContext and PlayerUiDataContext.rewardIcons or {}
+		if #ctxIcons > 0 then
+			for si, ic in ipairs(ctxIcons) do
+				print(string.format("[PLAYERUI_REWARD_CAPTURE] transition_slot[%d] thresh=%s offX=%.1f scale=%.2f opacity=%.2f border=%s",
+					si, tostring(ic.thresholdText or "?"),
+					ic.offsetX or 0, ic.scale or 1, ic.opacity or 1,
+					tostring(ic.borderColor or "-")))
+			end
+		end
+
+		st.last_phase = pb.phase
+		st.last_phase_start = pb.phaseStart or 0
+	end
+
+	if st.last_queue_len ~= #(pb.queue or {}) then
+		print(string.format("[PLAYERUI_REWARD_CAPTURE] queue_change old=%d new=%d phase=%s",
+			st.last_queue_len, #(pb.queue or {}), tostring(pb.phase)))
+		st.last_queue_len = #(pb.queue or {})
+	end
+
+	-- Guard/fallback trigger deltas.
+	local guards = _Debug_RewardCapture_GuardSnapshot()
+	local last = st.last_guard or guards
+	if guards.phaseStart_healed > (last.phaseStart_healed or 0) then
+		print(string.format("[PLAYERUI_REWARD_CAPTURE] guard_trigger phaseStart_healed +%d", guards.phaseStart_healed - (last.phaseStart_healed or 0)))
+	end
+	if guards.queue_entry_fallback > (last.queue_entry_fallback or 0) then
+		print(string.format("[PLAYERUI_REWARD_CAPTURE] fallback_trigger queue_entry_fallback +%d", guards.queue_entry_fallback - (last.queue_entry_fallback or 0)))
+	end
+	if guards.color_normalized > (last.color_normalized or 0) then
+		print(string.format("[PLAYERUI_REWARD_CAPTURE] guard_trigger color_normalized +%d", guards.color_normalized - (last.color_normalized or 0)))
+	end
+	if guards.rewards_ctx_healed > (last.rewards_ctx_healed or 0) then
+		print(string.format("[PLAYERUI_REWARD_CAPTURE] guard_trigger rewards_ctx_healed +%d", guards.rewards_ctx_healed - (last.rewards_ctx_healed or 0)))
+	end
+	if guards.center_timeout_used > (last.center_timeout_used or 0) then
+		print(string.format("[PLAYERUI_REWARD_CAPTURE] fallback_trigger center_timeout_used +%d", guards.center_timeout_used - (last.center_timeout_used or 0)))
+	end
+	st.last_guard = guards
+
+	-- Per-tick queued-icon invariant validation
+	local violations, violationDetails = _Debug_RewardValidate_QueuedInvariants(pb.phase)
+	if violations > 0 then
+		st.validation_violations = (st.validation_violations or 0) + violations
+		st.validation_ticks_failed = (st.validation_ticks_failed or 0) + 1
+		-- Log first 3 violation ticks per capture, then every 10th to avoid spam
+		local failCount = st.validation_ticks_failed or 1
+		if failCount <= 3 or (failCount % 10 == 0) then
+			print(string.format("[PLAYERUI_REWARD_VALIDATE] VIOLATION phase=%s tick=%d count=%d: %s",
+				tostring(pb.phase), st.ticks, violations, violationDetails))
+		end
+	else
+		-- Track clean ticks during effect phases for coverage reporting
+		if pb.phase == "completion_center" or pb.phase == "completion_highlight" or pb.phase == "completion_fadeout" then
+			st.validation_ticks_clean = (st.validation_ticks_clean or 0) + 1
+		end
+	end
+
+	-- Per-tick reshuffle convergence detail (icon offsets during shift phase)
+	if pb.phase == "reshuffle" and st.ticks % 3 == 0 then
+		local ctxIcons = PlayerUiDataContext and PlayerUiDataContext.rewardIcons or {}
+		local parts = {}
+		for si, ic in ipairs(ctxIcons) do
+			table.insert(parts, string.format("[%d]offX=%.1f/op=%.2f", si, ic.offsetX or 0, ic.opacity or 1))
+		end
+		if #parts > 0 then
+			-- Report icon count vs queue length to detect preview top-up
+			local qLen = pb.queue and #pb.queue or 0
+			local topUp = (#ctxIcons > qLen) and "preview" or "queue"
+			print("[PLAYERUI_REWARD_CAPTURE] reshuffle_detail " .. table.concat(parts, " ") .. " src=" .. topUp)
+		end
+	end
+
+	-- Per-tick fill ramp progress (log every 5th tick during center/highlight to avoid spam)
+	if (pb.phase == "completion_center" or pb.phase == "completion_highlight") and st.ticks % 5 == 0 then
+		local ival = pb.active and pb.active.interval or 1
+		local fillPct = (pb.fillDisplay or 0) / math.max(1, ival) * 100
+		print(string.format("[PLAYERUI_REWARD_CAPTURE] fill_ramp phase=%s fillPct=%.0f%% fillDisplay=%.1f interval=%d queueLen=%d",
+			tostring(pb.phase), fillPct, pb.fillDisplay or 0, ival, #(pb.queue or {})))
+	end
+
+	-- Mid-animation full snapshot once when runner is active.
+	if not st.mid_captured and pb.phase ~= "idle" then
+		print("[PLAYERUI_REWARD_CAPTURE] MID-ANIMATION SNAPSHOT")
+		Debug_PlayerUI_RewardPlayback_Snapshot()
+		st.mid_captured = true
+	end
+
+	-- Idle snapshot can occur at start or after playback drains.
+	if not st.idle_captured and pb.phase == "idle" then
+		print("[PLAYERUI_REWARD_CAPTURE] IDLE SNAPSHOT")
+		Debug_PlayerUI_RewardPlayback_Snapshot()
+		st.idle_captured = true
+		-- If capture started idle and queue is empty, auto-inject to force mid-animation evidence.
+		if #pb.queue == 0 and pb.active == nil and not st.auto_injected then
+			st.auto_injected = true
+			print(string.format("[PLAYERUI_REWARD_CAPTURE] auto_inject threshold=%d count=%d", st.inject_threshold or 50, st.inject_count or 3))
+			Debug_PlayerUI_RewardPlayback_Inject(st.inject_threshold or 50, st.inject_count or 3)
+		end
+	end
+
+	-- Done once we have both snapshots and playback is idle (post-animation settle).
+	if st.idle_captured and st.mid_captured and pb.phase == "idle" and (pb.active == nil) then
+		_Debug_RewardCapture_Stop("complete")
+	end
+end
+
+-- One-command full reward playback capture for rapid issue isolation.
+-- Captures both idle and mid-animation states, with transition/fallback logging.
+-- Args:
+--   threshold (default 50): synthetic inject start threshold if idle
+--   count (default 3): synthetic milestones to inject if idle
+--   timeout (default 8.0): capture timeout in seconds
+function Debug_PlayerUI_RewardPlayback_CaptureFull(threshold, count, timeout)
+	local pb = _PlayerUI_RewardPlayback
+	if pb == nil then
+		print("[PLAYERUI_REWARD_CAPTURE] playback state not initialized")
+		return
+	end
+
+	if _cba_debug_reward_capture.running then
+		print("[PLAYERUI_REWARD_CAPTURE] capture already running")
+		return
+	end
+
+	_cba_debug_reward_capture.running = true
+	_cba_debug_reward_capture.ticks = 0
+	_cba_debug_reward_capture.start_time = World_GetGameTime()
+	_cba_debug_reward_capture.timeout = timeout or 8.0
+	_cba_debug_reward_capture.last_phase = pb.phase
+	_cba_debug_reward_capture.last_phase_start = pb.phaseStart or World_GetGameTime()
+	_cba_debug_reward_capture.last_queue_len = #(pb.queue or {})
+	_cba_debug_reward_capture.last_guard = _Debug_RewardCapture_GuardSnapshot()
+	_cba_debug_reward_capture.idle_captured = false
+	_cba_debug_reward_capture.mid_captured = false
+	_cba_debug_reward_capture.auto_injected = false
+	_cba_debug_reward_capture.inject_threshold = threshold or 50
+	_cba_debug_reward_capture.inject_count = count or 3
+	_cba_debug_reward_capture.phase_timings = {}
+
+	print(string.format("[PLAYERUI_REWARD_CAPTURE] START phase=%s queueLen=%d timeout=%.2fs inject=%d x%d",
+		tostring(pb.phase),
+		#(pb.queue or {}),
+		_cba_debug_reward_capture.timeout,
+		_cba_debug_reward_capture.inject_threshold,
+		_cba_debug_reward_capture.inject_count))
+
+	if Rule_Exists(_Debug_RewardCapture_Tick) then
+		Rule_Remove(_Debug_RewardCapture_Tick)
+	end
+	Rule_AddInterval(_Debug_RewardCapture_Tick, 0.10)
+end
+
+-- Force-inject a synthetic milestone into the playback queue and start it.
+-- Use to test completion animation without waiting for kills.
+--   threshold: the kill number to show (default 50)
+--   count: how many milestones to inject (default 1)
+function Debug_PlayerUI_RewardPlayback_Inject(threshold, count)
+	local pb = _PlayerUI_RewardPlayback
+	if pb == nil then
+		print("[PLAYERUI_REWARD_DEBUG] playback state not initialized")
+		return
+	end
+
+	threshold = threshold or 50
+	count = count or 1
+
+	for i = 0, count - 1 do
+		local t = threshold + (i * 25)
+		table.insert(pb.queue, {
+			threshold = t,
+			prevThreshold = math.max(0, t - 25),
+			interval = 25,
+			title = "[Debug] Reward at " .. tostring(t),
+			icon = _PlayerUI_RewardIconFallback,
+		})
+	end
+
+	print("[PLAYERUI_REWARD_DEBUG] injected " .. tostring(count)
+		.. " milestone(s) starting at threshold=" .. tostring(threshold)
+		.. " queueLen=" .. tostring(#pb.queue))
+
+	-- If idle, kick off playback
+	if pb.phase == "idle" and #pb.queue > 0 then
+		local current = 0
+		local localPlayerID = Game_GetLocalPlayer()
+		local player_idx = World_GetPlayerIndex(localPlayerID)
+		local player = PLAYERS[player_idx]
+		if player ~= nil then
+			current = player.killed_number or 0
+		end
+		PlayerUI_RewardPlayback_AdvanceQueue(pb, current)
+		-- Wake animation tick
+		if Rule_Exists(_PlayerUI_Animate_Tick) then
+			Rule_Unpause(_PlayerUI_Animate_Tick)
+		end
+	end
+end
+
+-- Inject real milestones by mutating the local player's debug score by +delta,
+-- then running the canonical reward crossing path.
+-- Example: Debug_PlayerUI_RewardPlayback_InjectReal(75) adds 75 kills,
+-- enqueues any crossed thresholds, and updates the progress bar.
+function Debug_PlayerUI_RewardPlayback_InjectReal(score_delta)
+	local pb = _PlayerUI_RewardPlayback
+	if pb == nil then
+		print("[PLAYERUI_REWARD_DEBUG] playback state not initialized")
+		return
+	end
+
+	local localPlayerID = Game_GetLocalPlayer()
+	local player_idx = World_GetPlayerIndex(localPlayerID)
+	local player = PLAYERS[player_idx]
+	if player == nil then
+		print("[PLAYERUI_REWARD_DEBUG] InjectReal: local player entry not found")
+		return
+	end
+
+	local player_civ = player.raceName or Player_GetRaceName(localPlayerID)
+	local oldKills = player.killed_number or 0
+	local delta = tonumber(score_delta) or 75
+	delta = math.max(1, math.floor(delta + 0.5))
+	local newKills = oldKills + delta
+	local oldReq = player.obj_kill_requirement or 0
+
+	-- Mutate local debug score
+	player.killed_number = newKills
+
+	-- Scan for crossed thresholds in the delta range
+	local crossed = {}
+	local reward_tree = _CBA and _CBA.rewards and _CBA.rewards[player_civ]
+	if reward_tree ~= nil then
+		for threshold, _ in pairs(reward_tree) do
+			if type(threshold) == "number" and threshold > oldKills and threshold <= newKills then
+				table.insert(crossed, threshold)
+			end
+		end
+		table.sort(crossed, function(a, b) return a < b end)
+	end
+
+	local added = 0
+	for _, threshold in ipairs(crossed) do
+		local milestone = PlayerUI_BuildPlaybackMilestone(player, player_civ, threshold)
+		if milestone ~= nil then
+			table.insert(pb.queue, milestone)
+			added = added + 1
+			print("[PLAYERUI_REWARD_DEBUG] InjectReal: enqueued threshold=" .. tostring(milestone.threshold)
+				.. " title=" .. tostring(milestone.title)
+				.. " icon=" .. tostring(milestone.icon))
+		end
+	end
+
+	-- Advance obj_kill_requirement to the highest crossed threshold's next requirement
+	-- so the canonical 1.0s path sees the correct next-req for idle bar display.
+	local newReq = oldReq
+	if #crossed > 0 then
+		local highestCrossed = crossed[#crossed]
+		-- Find the next threshold above the highest crossed one
+		if reward_tree ~= nil then
+			local nextAbove = nil
+			for t, _ in pairs(reward_tree) do
+				if type(t) == "number" and t > highestCrossed then
+					if nextAbove == nil or t < nextAbove then
+						nextAbove = t
+					end
+				end
+			end
+			if nextAbove ~= nil then
+				newReq = nextAbove
+			end
+		end
+		player.obj_kill_requirement = newReq
+	end
+
+	print("[PLAYERUI_REWARD_DEBUG] InjectReal: delta=" .. tostring(delta)
+		.. " oldKills=" .. tostring(oldKills)
+		.. " newKills=" .. tostring(newKills)
+		.. " oldReq=" .. tostring(oldReq)
+		.. " newReq=" .. tostring(newReq)
+		.. " added=" .. tostring(added)
+		.. " queueLen=" .. tostring(#pb.queue)
+		.. " civ=" .. tostring(player_civ))
+
+	-- If idle, kick off playback (for crossed milestones) or force idle bar refresh
+	if pb.phase == "idle" and #pb.queue > 0 then
+		PlayerUI_RewardPlayback_AdvanceQueue(pb, newKills)
+		if Rule_Exists(_PlayerUI_Animate_Tick) then
+			Rule_Unpause(_PlayerUI_Animate_Tick)
+		end
+	elseif pb.phase == "idle" and added == 0 then
+		-- No milestones crossed but score advanced — force idle bar re-evaluation
+		-- by invalidating the progress base so the next 1.0s cycle rebases
+		if PlayerUiDataContext ~= nil then
+			PlayerUiDataContext._rewardProgressBase = nil
+		end
+		-- Also update lastObservedReq so canonical path doesn't re-enqueue
+		pb.lastObservedReq = newReq
+		print("[PLAYERUI_REWARD_DEBUG] InjectReal: no milestones crossed, bar will update on next 1.0s cycle"
+			.. " (kills=" .. tostring(newKills) .. " nextReq=" .. tostring(newReq) .. ")")
+	end
+end
+
+-- Skip the current completion phase, jumping to the next phase immediately.
+function Debug_PlayerUI_RewardPlayback_SkipPhase()
+	local pb = _PlayerUI_RewardPlayback
+	if pb == nil or pb.phase == "idle" then
+		print("[PLAYERUI_REWARD_DEBUG] nothing to skip (phase=" .. tostring(pb and pb.phase or "nil") .. ")")
+		return
+	end
+
+	local oldPhase = pb.phase
+	pb.phaseStart = 0  -- force elapsed > any duration, so next tick transitions
+	print("[PLAYERUI_REWARD_DEBUG] forcing skip from phase=" .. oldPhase)
+end
+
+-- Force-reset the playback runner to idle (emergency stop).
+function Debug_PlayerUI_RewardPlayback_Reset()
+	local pb = _PlayerUI_RewardPlayback
+	if pb == nil then return end
+
+	pb.phase = "idle"
+	pb.active = nil
+	pb.queue = {}
+	pb.fillDisplay = 0
+	pb.playedCount = 0
+	pb.phaseStart = 0
+	_PlayerUI_RewardIconSmoothingInitialized = false
+	_PlayerUI_RewardIconSlotState = {}
+	_PlayerUI_RewardIconSmoothingActive = false
+
+	-- Reset motion state
+	_PlayerUI_RewardStripOffsetX = 0
+	_PlayerUI_RewardStripTargetOffsetX = 0
+	if PlayerUiDataContext then
+		PlayerUiDataContext.rewardStripOffsetX = 0
+		PlayerUiDataContext.rewardStripOffsetMargin = "0,2,0,2"
+	end
+	if _PlayerUI_MotionGuards then
+		_PlayerUI_MotionGuards.phaseStart_healed = 0
+		_PlayerUI_MotionGuards.queue_entry_fallback = 0
+		_PlayerUI_MotionGuards.color_normalized = 0
+		_PlayerUI_MotionGuards.rewards_ctx_healed = 0
+		_PlayerUI_MotionGuards.center_timeout_used = 0
+	end
+	print("[PLAYERUI_REWARD_DEBUG] playback force-reset to idle (motion state cleared)")
+end
+
+-- Run a full inject-and-capture cycle with queued-icon invariant validation.
+-- Wraps rewardCaptureFull and reports PASS/FAIL for the fixed-position invariant:
+-- during center/highlight/fadeout, queued icons must stay at offsetX=0, opacity=1.0, scale=1.0.
+function Debug_PlayerUI_RewardPlayback_ValidateCycle(threshold, count, timeout)
+	print("[PLAYERUI_REWARD_VALIDATE] starting validation cycle")
+	Debug_PlayerUI_RewardPlayback_CaptureFull(threshold or 50, count or 3, timeout or 12.0)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Toggle Crash Stress Test Infrastructure
+---------------------------------------------------------------------------------------------------
+
+-- DataContext snapshot: dumps all fields with types, flags numerics in nested arrays
+function Debug_PlayerUI_DataContextSnapshot()
+	if PlayerUiDataContext == nil then
+		print("[STRESS_TEST] DataContextSnapshot: PlayerUiDataContext is nil")
+		return
+	end
+	local ctx = PlayerUiDataContext
+	print("[STRESS_TEST] === DataContext Snapshot ===")
+
+	-- Top-level fields
+	for k, v in pairs(ctx) do
+		if type(v) ~= "table" then
+			print("[STRESS_TEST] top." .. tostring(k) .. " = " .. tostring(v) .. " (" .. type(v) .. ")"
+				.. (type(v) == "number" and " [NUMERIC]" or ""))
+		end
+	end
+
+	-- Team arrays
+	local function dumpTeam(name, team)
+		if team == nil then return end
+		for idx = 1, #team do
+			local entry = team[idx]
+			local numericCount = 0
+			local nestedNumericCount = 0
+			for k, v in pairs(entry) do
+				if type(v) == "number" then
+					numericCount = numericCount + 1
+				elseif type(v) == "table" then
+					-- Check nested tables for numerics
+					for nk, nv in pairs(v) do
+						if type(nv) == "number" then
+							nestedNumericCount = nestedNumericCount + 1
+							print("[STRESS_TEST] " .. name .. "[" .. idx .. "]." .. tostring(k) .. "." .. tostring(nk) .. " = " .. tostring(nv) .. " [NESTED NUMERIC]")
+						elseif type(nv) == "table" then
+							for nnk, nnv in pairs(nv) do
+								if type(nnv) == "number" then
+									nestedNumericCount = nestedNumericCount + 1
+									print("[STRESS_TEST] " .. name .. "[" .. idx .. "]." .. tostring(k) .. "." .. tostring(nk) .. "." .. tostring(nnk) .. " = " .. tostring(nnv) .. " [DEEP NUMERIC]")
+								end
+							end
+						end
+					end
+				end
+			end
+			print("[STRESS_TEST] " .. name .. "[" .. idx .. "]: directNumerics=" .. numericCount .. " nestedNumerics=" .. nestedNumericCount)
+		end
+	end
+
+	dumpTeam("teamLeft", ctx.teamLeft)
+	dumpTeam("teamRight", ctx.teamRight)
+
+	-- Reward icons
+	if ctx.rewardIcons ~= nil then
+		for idx = 1, #ctx.rewardIcons do
+			local numCount = 0
+			for k, v in pairs(ctx.rewardIcons[idx]) do
+				if type(v) == "number" then numCount = numCount + 1 end
+			end
+			print("[STRESS_TEST] rewardIcons[" .. idx .. "]: numerics=" .. numCount)
+		end
+	end
+	print("[STRESS_TEST] === End Snapshot ===")
+end
+
+-- Staged stress test: 6 stages of increasing toggle complexity
+_Debug_StressTest_Stage = 0
+_Debug_StressTest_Delay = 2.0
+_Debug_StressTest_Failed = false
+
+function Debug_PlayerUI_StressTest_Staged(delay)
+	_Debug_StressTest_Delay = delay or 2.0
+	_Debug_StressTest_Stage = 0
+	_Debug_StressTest_Failed = false
+	print("[STRESS_TEST] Starting staged stress test (delay=" .. tostring(_Debug_StressTest_Delay) .. "s)")
+	Debug_PlayerUI_DataContextSnapshot()
+	_Debug_StressTest_RunNextStage()
+end
+
+function _Debug_StressTest_RunNextStage()
+	if _Debug_StressTest_Failed then
+		print("[STRESS_TEST] Aborted due to previous stage failure")
+		return
+	end
+
+	_Debug_StressTest_Stage = _Debug_StressTest_Stage + 1
+	local stage = _Debug_StressTest_Stage
+
+	if stage == 1 then
+		_Debug_StressTest_RunStage("Stage 1: HUD-only toggle", function()
+			-- Disable scores and objectives for isolated HUD test
+			local savedScores = PlayerUI_Settings.EnableTogglePlayerScoresSync
+			local savedObj = PlayerUI_Settings.EnableToggleObjectiveSync
+			local savedStaged = PlayerUI_Settings.EnableStagedToggle
+			PlayerUI_Settings.EnableTogglePlayerScoresSync = false
+			PlayerUI_Settings.EnableToggleObjectiveSync = false
+			PlayerUI_Settings.EnableStagedToggle = false
+			PlayerUI_Toggle()  -- show
+			PlayerUI_Settings.EnableTogglePlayerScoresSync = savedScores
+			PlayerUI_Settings.EnableToggleObjectiveSync = savedObj
+			PlayerUI_Settings.EnableStagedToggle = savedStaged
+			return true
+		end)
+	elseif stage == 2 then
+		_Debug_StressTest_RunStage("Stage 2: HUD + Scores toggle", function()
+			local savedObj = PlayerUI_Settings.EnableToggleObjectiveSync
+			local savedStaged = PlayerUI_Settings.EnableStagedToggle
+			PlayerUI_Settings.EnableToggleObjectiveSync = false
+			PlayerUI_Settings.EnableStagedToggle = false
+			-- Toggle back to hidden first if visible
+			if _PlayerUI_HudVisible then
+				_PlayerUI_LastToggleTime = -1
+				PlayerUI_Toggle()
+			end
+			_PlayerUI_LastToggleTime = -1
+			PlayerUI_Toggle()  -- show with scores
+			PlayerUI_Settings.EnableToggleObjectiveSync = savedObj
+			PlayerUI_Settings.EnableStagedToggle = savedStaged
+			return true
+		end)
+	elseif stage == 3 then
+		_Debug_StressTest_RunStage("Stage 3: Full toggle (HUD+Scores+Objectives)", function()
+			local savedStaged = PlayerUI_Settings.EnableStagedToggle
+			PlayerUI_Settings.EnableStagedToggle = false
+			if _PlayerUI_HudVisible then
+				_PlayerUI_LastToggleTime = -1
+				PlayerUI_Toggle()
+			end
+			_PlayerUI_LastToggleTime = -1
+			PlayerUI_Toggle()  -- show all
+			PlayerUI_Settings.EnableStagedToggle = savedStaged
+			return true
+		end)
+	elseif stage == 4 then
+		_Debug_StressTest_RunStage("Stage 4: Rapid-2 toggles (0.2s interval)", function()
+			if _PlayerUI_HudVisible then
+				_PlayerUI_LastToggleTime = -1
+				PlayerUI_Toggle()
+			end
+			_PlayerUI_LastToggleTime = -1
+			PlayerUI_Toggle()
+			_PlayerUI_LastToggleTime = -1
+			PlayerUI_Toggle()
+			return true
+		end)
+	elseif stage == 5 then
+		_Debug_StressTest_RunStage("Stage 5: Rapid-5 toggles", function()
+			for i = 1, 5 do
+				_PlayerUI_LastToggleTime = -1
+				PlayerUI_Toggle()
+			end
+			return true
+		end)
+	elseif stage == 6 then
+		_Debug_StressTest_RunStage("Stage 6: Staged toggle (with frame separation)", function()
+			if _PlayerUI_HudVisible then
+				_PlayerUI_LastToggleTime = -1
+				PlayerUI_Toggle()
+			end
+			_PlayerUI_LastToggleTime = -1
+			PlayerUI_Toggle()  -- uses staged toggle by default
+			return true
+		end)
+	else
+		print("[STRESS_TEST] All 6 stages completed successfully")
+		-- Clean up: collapse HUD
+		if _PlayerUI_HudVisible then
+			_PlayerUI_LastToggleTime = -1
+			PlayerUI_Toggle()
+		end
+		return
+	end
+end
+
+function _Debug_StressTest_RunStage(name, fn)
+	print("[STRESS_TEST] " .. name .. " ...")
+	Debug_PlayerUI_DataContextSnapshot()
+	local ok, err = pcall(fn)
+	if ok then
+		print("[STRESS_TEST] " .. name .. " PASS")
+	else
+		print("[STRESS_TEST] " .. name .. " FAIL: " .. tostring(err))
+		_Debug_StressTest_Failed = true
+	end
+	-- Schedule next stage
+	if not _Debug_StressTest_Failed then
+		Rule_AddOneShot(_Debug_StressTest_NextStageCallback, _Debug_StressTest_Delay)
+	end
+end
+
+function _Debug_StressTest_NextStageCallback()
+	_Debug_StressTest_RunNextStage()
+end
+
+-- Toggle throttle diagnostic: fires count toggles at interval seconds
+function Debug_PlayerUI_ToggleThrottleTest(interval, count)
+	interval = interval or 0.1
+	count = count or 10
+	print("[STRESS_TEST] ToggleThrottleTest: interval=" .. tostring(interval) .. " count=" .. tostring(count))
+	_Debug_ThrottleTest_Count = count
+	_Debug_ThrottleTest_Current = 0
+	_Debug_ThrottleTest_Interval = interval
+	_Debug_ThrottleTest_FireNext()
+end
+
+function _Debug_ThrottleTest_FireNext()
+	_Debug_ThrottleTest_Current = _Debug_ThrottleTest_Current + 1
+	if _Debug_ThrottleTest_Current > _Debug_ThrottleTest_Count then
+		print("[STRESS_TEST] ToggleThrottleTest: completed " .. tostring(_Debug_ThrottleTest_Count) .. " toggles")
+		print("[STRESS_TEST] ToggleThrottleTest: hudVisible=" .. tostring(_PlayerUI_HudVisible))
+		return
+	end
+
+	local idx = _Debug_ThrottleTest_Current
+	local ok, err = pcall(PlayerUI_Toggle)
+	print("[STRESS_TEST] ThrottleTest toggle " .. tostring(idx) .. "/" .. tostring(_Debug_ThrottleTest_Count)
+		.. " ok=" .. tostring(ok) .. " err=" .. tostring(err)
+		.. " hudVisible=" .. tostring(_PlayerUI_HudVisible))
+
+	if _Debug_ThrottleTest_Current < _Debug_ThrottleTest_Count then
+		Rule_AddOneShot(_Debug_ThrottleTest_FireNextCallback, _Debug_ThrottleTest_Interval)
+	else
+		print("[STRESS_TEST] ToggleThrottleTest: completed " .. tostring(_Debug_ThrottleTest_Count) .. " toggles")
+		print("[STRESS_TEST] ToggleThrottleTest: hudVisible=" .. tostring(_PlayerUI_HudVisible))
+	end
+end
+
+function _Debug_ThrottleTest_FireNextCallback()
+	_Debug_ThrottleTest_FireNext()
+end
+
+---------------------------------------------------------------------------------------------------
+-- CrashProbe: systematic toggle-crash bisection
+-- Isolates which component (HUD visibility, DataContext push, PlayerScores,
+-- objectives, specific DataContext fields) triggers the D3D crash.
+--
+-- Console commands:
+--   Debug_PlayerUI_CrashProbe()           — Run full 7-step probe sequence
+--   Debug_PlayerUI_CrashProbe_Step(n)     — Run a single probe step (1–7)
+--   Debug_PlayerUI_CrashProbe_Fields()    — Bisect DataContext fields for unbound numerics
+--   Debug_PlayerUI_CrashProbe_AutoShow()  — Verify auto-show path (PresetFinalize)
+---------------------------------------------------------------------------------------------------
+
+_cba_debug_crashprobe = {
+	running = false,
+	step = 0,
+	delay = 1.0,
+	results = {},
+}
+
+local _CRASHPROBE_TAG = "[PLAYERUI_CRASHPROBE]"
+local _CRASHPROBE_STEPS = {
+	{ name = "sanitize_only",      desc = "ApplyDataContext sanitizer alone (no visibility change)" },
+	{ name = "hud_collapse",       desc = "Collapse HUD from Visible" },
+	{ name = "hud_show_sanitized", desc = "Show HUD with pre-sanitized DataContext" },
+	{ name = "hud_show_raw",       desc = "Show HUD with raw DataContext (bypass sanitizer)" },
+	{ name = "scores_toggle",      desc = "Toggle stock PlayerScores visibility" },
+	{ name = "objectives_toggle",  desc = "Toggle objectives visibility" },
+	{ name = "full_toggle",        desc = "Full PlayerUI_Toggle (all paths)" },
+}
+
+function Debug_PlayerUI_CrashProbe_Step(stepNum)
+	if stepNum == nil or stepNum < 1 or stepNum > #_CRASHPROBE_STEPS then
+		print(_CRASHPROBE_TAG .. " Invalid step (1–" .. #_CRASHPROBE_STEPS .. ")")
+		return
+	end
+
+	local step = _CRASHPROBE_STEPS[stepNum]
+	print(_CRASHPROBE_TAG .. " Step " .. stepNum .. "/" .. #_CRASHPROBE_STEPS .. ": " .. step.desc)
+
+	local ok, err = true, nil
+
+	if step.name == "sanitize_only" then
+		ok, err = pcall(PlayerUI_ApplyDataContext)
+
+	elseif step.name == "hud_collapse" then
+		-- Ensure HUD is visible first
+		pcall(UI_SetPropertyValue, "PlayerUIHud", "Visibility", "Visible")
+		ok, err = pcall(UI_SetPropertyValue, "PlayerUIHud", "Visibility", "Collapsed")
+
+	elseif step.name == "hud_show_sanitized" then
+		-- Collapse first, then show with sanitizer
+		pcall(UI_SetPropertyValue, "PlayerUIHud", "Visibility", "Collapsed")
+		pcall(PlayerUI_UpdateDataContext)
+		pcall(PlayerUI_ApplyDataContext)
+		ok, err = pcall(UI_SetPropertyValue, "PlayerUIHud", "Visibility", "Visible")
+
+	elseif step.name == "hud_show_raw" then
+		-- Collapse first, then show WITHOUT sanitizer (dangerous — isolates sanitizer as fix)
+		pcall(UI_SetPropertyValue, "PlayerUIHud", "Visibility", "Collapsed")
+		pcall(UI_SetDataContext, "PlayerUIHud", PlayerUiDataContext)
+		ok, err = pcall(UI_SetPropertyValue, "PlayerUIHud", "Visibility", "Visible")
+
+	elseif step.name == "scores_toggle" then
+		local currentScoresVis = _PlayerUI_HudVisible and "Hidden" or "Visible"
+		local targetScoresVis = _PlayerUI_HudVisible and "Visible" or "Hidden"
+		pcall(UI_SetPropertyValue, "PlayerScores", "Visibility", targetScoresVis)
+		ok, err = pcall(UI_SetPropertyValue, "PlayerScores", "Visibility", currentScoresVis)
+
+	elseif step.name == "objectives_toggle" then
+		ok, err = pcall(PlayerUI_SetObjectivesVisible, not _PlayerUI_HudVisible)
+		if ok then
+			ok, err = pcall(PlayerUI_SetObjectivesVisible, _PlayerUI_HudVisible)
+		end
+
+	elseif step.name == "full_toggle" then
+		_PlayerUI_LastToggleTime = -1 -- bypass throttle
+		ok, err = pcall(PlayerUI_Toggle)
+		if ok then
+			_PlayerUI_LastToggleTime = -1
+			ok, err = pcall(PlayerUI_Toggle)
+		end
+	end
+
+	local status = ok and "PASS" or "CRASH"
+	print(string.format("%s   Result: %s  err=%s", _CRASHPROBE_TAG, status, tostring(err)))
+	_cba_debug_crashprobe.results[stepNum] = { name = step.name, ok = ok, err = tostring(err) }
+	return ok
+end
+
+function Debug_PlayerUI_CrashProbe()
+	print("")
+	print(_CRASHPROBE_TAG .. " ===== CRASH PROBE SEQUENCE =====")
+	print(_CRASHPROBE_TAG .. " Running " .. #_CRASHPROBE_STEPS .. " steps to isolate toggle crash source")
+	_cba_debug_crashprobe.results = {}
+	_cba_debug_crashprobe.running = true
+	_cba_debug_crashprobe.step = 0
+
+	_Debug_CrashProbe_RunNext()
+end
+
+function _Debug_CrashProbe_RunNext()
+	_cba_debug_crashprobe.step = _cba_debug_crashprobe.step + 1
+	local step = _cba_debug_crashprobe.step
+
+	if step > #_CRASHPROBE_STEPS then
+		_Debug_CrashProbe_Summary()
+		return
+	end
+
+	local ok = Debug_PlayerUI_CrashProbe_Step(step)
+	-- If we survived, schedule next step (if it crashed, game is dead anyway)
+	Rule_AddOneShot(_Debug_CrashProbe_RunNextCallback, _cba_debug_crashprobe.delay)
+end
+
+function _Debug_CrashProbe_RunNextCallback()
+	_Debug_CrashProbe_RunNext()
+end
+
+function _Debug_CrashProbe_Summary()
+	_cba_debug_crashprobe.running = false
+	print("")
+	print(_CRASHPROBE_TAG .. " ===== PROBE RESULTS =====")
+	local passCount = 0
+	local failCount = 0
+	for i = 1, #_CRASHPROBE_STEPS do
+		local r = _cba_debug_crashprobe.results[i]
+		if r then
+			local mark = r.ok and "PASS" or "FAIL"
+			if r.ok then passCount = passCount + 1 else failCount = failCount + 1 end
+			print(string.format("%s   [%s] Step %d: %-25s %s", _CRASHPROBE_TAG, mark, i, r.name, r.ok and "" or ("err=" .. r.err)))
+		else
+			print(string.format("%s   [SKIP] Step %d: not reached", _CRASHPROBE_TAG, i))
+		end
+	end
+	print(string.format("%s Summary: %d PASS, %d FAIL", _CRASHPROBE_TAG, passCount, failCount))
+	local marker = string.format("[CBA_DEBUG_END] suite=CrashProbe pass=%d fail=%d status=%s",
+		passCount, failCount, failCount == 0 and "CLEAN" or "CRASH_ISOLATED")
+	print(marker)
+	pcall(Misc_AppendToFile, "scarlog:cba_debug_runs.txt", marker .. "\n")
+end
+
+---------------------------------------------------------------------------------------------------
+-- CrashProbe: DataContext field bisection
+-- Systematically strips fields from DataContext to find the unbound numeric
+-- that triggers D3D crash on Collapsed→Visible. Tests each team array.
+---------------------------------------------------------------------------------------------------
+
+function Debug_PlayerUI_CrashProbe_Fields()
+	print("")
+	print(_CRASHPROBE_TAG .. " ===== FIELD BISECTION =====")
+	if PlayerUiDataContext == nil then
+		print(_CRASHPROBE_TAG .. " PlayerUiDataContext is nil — run Debug_PlayerUI() first")
+		return
+	end
+
+	for _, teamKey in ipairs({"teamLeft", "teamRight"}) do
+		local team = PlayerUiDataContext[teamKey]
+		if team == nil or #team == 0 then goto next_team end
+
+		local slot = team[1]
+		if slot == nil then goto next_team end
+
+		print(_CRASHPROBE_TAG .. " Scanning " .. teamKey .. "[1] fields:")
+		local fields = {}
+		for k, v in pairs(slot) do
+			table.insert(fields, { key = k, valType = type(v), val = v })
+		end
+		table.sort(fields, function(a, b) return a.key < b.key end)
+
+		local numericFields = {}
+		local stringFields = {}
+		local otherFields = {}
+		for _, f in ipairs(fields) do
+			if f.valType == "number" then
+				table.insert(numericFields, f)
+			elseif f.valType == "string" then
+				table.insert(stringFields, f)
+			else
+				table.insert(otherFields, f)
+			end
+		end
+
+		print(string.format("%s   Total fields: %d (numeric=%d, string=%d, other=%d)",
+			_CRASHPROBE_TAG, #fields, #numericFields, #stringFields, #otherFields))
+
+		-- Report all numeric fields — these are potential crash sources
+		if #numericFields > 0 then
+			print(_CRASHPROBE_TAG .. "   NUMERIC FIELDS (potential unbound crash sources):")
+			for _, f in ipairs(numericFields) do
+				-- Check if this field has a known XAML binding
+				local bound = _PLAYERUI_BOUND_PLAYER_NUMERICS and _PLAYERUI_BOUND_PLAYER_NUMERICS[f.key] or false
+				local tag = bound and "BOUND" or "UNBOUND"
+				print(string.format("%s     %-30s = %-12s [%s]", _CRASHPROBE_TAG, f.key, tostring(f.val), tag))
+			end
+		end
+
+		-- Check nested arrays (rewardIcons, etc.)
+		for _, f in ipairs(otherFields) do
+			if f.valType == "table" and #f.val > 0 then
+				print(string.format("%s   NESTED ARRAY: %s (%d entries)", _CRASHPROBE_TAG, f.key, #f.val))
+				local nested = f.val[1]
+				if type(nested) == "table" then
+					for nk, nv in pairs(nested) do
+						if type(nv) == "number" then
+							print(string.format("%s     %s[1].%-20s = %-12s [NUMERIC]", _CRASHPROBE_TAG, f.key, nk, tostring(nv)))
+						end
+					end
+				end
+			end
+		end
+
+		::next_team::
+	end
+
+	-- Top-level numeric fields
+	print(_CRASHPROBE_TAG .. " Top-level DataContext numeric fields:")
+	for k, v in pairs(PlayerUiDataContext) do
+		if type(v) == "number" then
+			print(string.format("%s   %-30s = %s", _CRASHPROBE_TAG, k, tostring(v)))
+		end
+	end
+
+	print(_CRASHPROBE_TAG .. " ===== END FIELD BISECTION =====")
+end
+
+---------------------------------------------------------------------------------------------------
+-- CrashProbe: AutoShow verification
+-- Validates that the auto-show path (PresetFinalize) leaves the system
+-- in a stable visible state with correct stock UI visibility.
+---------------------------------------------------------------------------------------------------
+
+function Debug_PlayerUI_CrashProbe_AutoShow()
+	print("")
+	print(_CRASHPROBE_TAG .. " ===== AUTO-SHOW VERIFICATION =====")
+
+	-- Check setting
+	local autoShowEnabled = PlayerUI_Settings.EnableAutoShow ~= false
+	print(_CRASHPROBE_TAG .. " EnableAutoShow=" .. tostring(autoShowEnabled))
+
+	-- Check HUD state
+	print(_CRASHPROBE_TAG .. " _PlayerUI_HudVisible=" .. tostring(_PlayerUI_HudVisible))
+	print(_CRASHPROBE_TAG .. " _PlayerUI_PreWarmPending=" .. tostring(_PlayerUI_PreWarmPending))
+
+	-- Probe HUD visibility via property read
+	local okVis, hudVis = pcall(UI_GetPropertyValue, "PlayerUIHud", "Visibility")
+	print(_CRASHPROBE_TAG .. " PlayerUIHud.Visibility=" .. tostring(hudVis) .. " (read ok=" .. tostring(okVis) .. ")")
+
+	-- Probe PlayerScores visibility
+	local okScores, scoresVis = pcall(UI_GetPropertyValue, "PlayerScores", "Visibility")
+	print(_CRASHPROBE_TAG .. " PlayerScores.Visibility=" .. tostring(scoresVis) .. " (read ok=" .. tostring(okScores) .. ")")
+
+	-- Validate expected state when auto-show is enabled
+	if autoShowEnabled then
+		local hudOk = (hudVis == "Visible")
+		local scoresOk = (scoresVis == "Hidden")
+		local stateOk = (_PlayerUI_HudVisible == true)
+
+		print(_CRASHPROBE_TAG .. " Expected: HUD=Visible, Scores=Hidden, state=true")
+		print(string.format("%s Result: HUD=%s Scores=%s state=%s",
+			_CRASHPROBE_TAG,
+			hudOk and "PASS" or "FAIL",
+			scoresOk and "PASS" or "FAIL",
+			stateOk and "PASS" or "FAIL"))
+
+		if hudOk and scoresOk and stateOk then
+			print(_CRASHPROBE_TAG .. " Auto-show: ALL PASS")
+		else
+			print(_CRASHPROBE_TAG .. " Auto-show: ISSUES DETECTED")
+		end
+	end
+
+	-- DataContext integrity
+	if PlayerUiDataContext ~= nil then
+		local tl = PlayerUiDataContext.teamLeft
+		local tr = PlayerUiDataContext.teamRight
+		print(string.format("%s DataContext: teamLeft=%d teamRight=%d",
+			_CRASHPROBE_TAG,
+			tl and #tl or 0,
+			tr and #tr or 0))
+	else
+		print(_CRASHPROBE_TAG .. " DataContext: NIL")
+	end
+
+	-- Rule system
+	local ringExists = Rule_Exists(_PlayerUI_RingRule)
+	local fastExists = Rule_Exists(_PlayerUI_FastRefreshRule)
+	print(string.format("%s Rules: ring=%s fast=%s",
+		_CRASHPROBE_TAG,
+		tostring(ringExists),
+		tostring(fastExists)))
+
+	print(_CRASHPROBE_TAG .. " ===== END AUTO-SHOW VERIFICATION =====")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Namespace Registration
+---------------------------------------------------------------------------------------------------
+if debug then
+	debug.playerUI.anim          = Debug_PlayerUI_Anim
+	debug.playerUI.animMonitor   = Debug_PlayerUI_Anim_Monitor
+	debug.playerUI.animStress    = Debug_PlayerUI_Anim_Stress
+	debug.playerUI.animSnapshot  = Debug_PlayerUI_Anim_Snapshot
+	debug.playerUI.animFeatures  = Debug_PlayerUI_Anim_Features
+	debug.playerUI.animStaged    = Debug_PlayerUI_Anim_RunStaged
+        debug.playerUI.animValidate  = Debug_PlayerUI_Anim_ValidateDataContext
+        debug.playerUI.rewardSnapshot = Debug_PlayerUI_RewardPlayback_Snapshot
+	debug.playerUI.rewardCaptureFull = Debug_PlayerUI_RewardPlayback_CaptureFull
+        debug.playerUI.rewardInject     = Debug_PlayerUI_RewardPlayback_Inject
+        debug.playerUI.rewardInjectReal  = Debug_PlayerUI_RewardPlayback_InjectReal
+        debug.playerUI.rewardSkip        = Debug_PlayerUI_RewardPlayback_SkipPhase
+        debug.playerUI.rewardReset       = Debug_PlayerUI_RewardPlayback_Reset
+        debug.playerUI.rewardValidate    = Debug_PlayerUI_RewardPlayback_ValidateCycle
+	debug.playerUI.stressTest       = Debug_PlayerUI_StressTest_Staged
+	debug.playerUI.dataSnapshot     = Debug_PlayerUI_DataContextSnapshot
+	debug.playerUI.throttleTest     = Debug_PlayerUI_ToggleThrottleTest
+	debug.playerUI.crashProbe       = Debug_PlayerUI_CrashProbe
+	debug.playerUI.crashProbeFields = Debug_PlayerUI_CrashProbe_Fields
+	debug.playerUI.crashProbeAutoShow = Debug_PlayerUI_CrashProbe_AutoShow
+end

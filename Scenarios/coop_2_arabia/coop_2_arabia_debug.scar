@@ -1,0 +1,546 @@
+--[[
+    Filename: coop_2_arabia_debug.scar
+    Description: Chronological event logging and debug harness for coop_2_arabia mission.
+                 Optimized for scarlog output and test harness operations.
+    Last Modified: 2026-02-28
+]]
+
+-- ============================================================
+-- CHRONOLOGICAL EVENT LOG
+-- ============================================================
+-- Tracks events from mission start through objective completion.
+-- Each entry: { timestamp_sec, event_type, player_id, detail }
+-- Flushed to scarlog in human-readable format.
+-- ============================================================
+
+DEBUG_ENABLED = false  -- Set true to enable full logging
+
+-- Event log buffer
+DEBUG_EVENT_LOG = {}
+DEBUG_START_TIME = 0
+
+-- Event type constants (for filtering/analysis)
+DEBUG_EVT_MISSION_START = "MISSION_START"
+DEBUG_EVT_MISSION_END = "MISSION_END"
+DEBUG_EVT_PLAYER_READY = "PLAYER_READY"
+DEBUG_EVT_PLAYER_DISCONNECT = "PLAYER_DISCONNECT"
+DEBUG_EVT_PLAYER_TAKEOVER = "PLAYER_TAKEOVER"
+DEBUG_EVT_RESTRICTION_APPLIED = "RESTRICTION_APPLIED"
+DEBUG_EVT_OBJECTIVE_STARTED = "OBJECTIVE_STARTED"
+DEBUG_EVT_OBJECTIVE_COMPLETED = "OBJECTIVE_COMPLETED"
+DEBUG_EVT_PHASE_ENTERED = "PHASE_ENTERED"
+DEBUG_EVT_SPAWN_WAVE = "SPAWN_WAVE"
+DEBUG_EVT_SIEGE_UNLOCK = "SIEGE_UNLOCK"
+DEBUG_EVT_WORKSHOP_UNLOCK = "WORKSHOP_UNLOCK"
+DEBUG_EVT_PLAYER_DEFEAT = "PLAYER_DEFEAT"
+DEBUG_EVT_PLAYER_VICTORY = "PLAYER_VICTORY"
+DEBUG_EVT_LANDMARK_DESTROYED = "LANDMARK_DESTROYED"
+DEBUG_EVT_LANDMARK_AVAILABLE = "LANDMARK_AVAILABLE"
+DEBUG_EVT_DEFEAT_CHECK = "DEFEAT_CHECK"
+DEBUG_EVT_DEFEAT_TRIGGERED = "DEFEAT_TRIGGERED"
+
+---Debug_Log: Record a timestamped event to the log buffer.
+function Debug_Log(event_type, player_id, detail)
+    if not DEBUG_ENABLED then return end
+    
+    local elapsed = World_GetGameTime() - DEBUG_START_TIME
+    local entry = {
+        elapsed_sec = elapsed,
+        event_type = event_type,
+        player_id = player_id or "GLOBAL",
+        detail = detail or "",
+        world_time = World_GetGameTime(),
+    }
+    table.insert(DEBUG_EVENT_LOG, entry)
+end
+
+---Debug_Flush: Output all buffered events to scarlog in chronological order.
+function Debug_Flush()
+    if not DEBUG_ENABLED or #DEBUG_EVENT_LOG == 0 then return end
+    
+    print("[DEBUG] ===== CHRONOLOGICAL EVENT LOG (Mission Duration) =====")
+    print("[DEBUG] Total Events: " .. tostring(#DEBUG_EVENT_LOG))
+    print("")
+    
+    for idx, evt in ipairs(DEBUG_EVENT_LOG) do
+        local formatted = string.format(
+            "[%05.2fs] [%02d] %-20s %s",
+            evt.elapsed_sec,
+            evt.player_id == "GLOBAL" and 0 or tonumber(evt.player_id) or 0,
+            evt.event_type,
+            evt.detail
+        )
+        print("[DEBUG] " .. formatted)
+    end
+    
+    print("")
+    print("[DEBUG] ===== END EVENT LOG =====")
+end
+
+-- ============================================================
+-- MISSION LIFECYCLE HOOKS
+-- ============================================================
+
+---Debug_OnMissionStart: Call from Mission_Start() to initialize logging.
+function Debug_OnMissionStart()
+    if not DEBUG_ENABLED then return end
+    
+    DEBUG_START_TIME = World_GetGameTime()
+    Debug_Log(DEBUG_EVT_MISSION_START, "GLOBAL", "Mission initialized, difficulty=" .. tostring(AI_Difficulty))
+    
+    print("[DEBUG] ===== MISSION START =====")
+    print("[DEBUG] Difficulty Tier: " .. AI_Difficulty .. " (" .. DC.label .. ")")
+    print("[DEBUG] Player Count: " .. tostring(_CountKeys(PLAYERS)))
+    for _, player in ipairs(PLAYERS) do
+        print("[DEBUG]   Player " .. tostring(player.id) .. ": " .. Player_GetRaceName(player.id) 
+            .. " (resolved: " .. GetPlayerCiv(player.id) .. ")")
+    end
+    print("")
+end
+
+---Debug_OnMissionEnd: Call at end of mission (victory/defeat).
+-- param end_reason: "victory" or "defeat"
+function Debug_OnMissionEnd(end_reason)
+    if not DEBUG_ENABLED then return end
+    
+    Debug_Log(DEBUG_EVT_MISSION_END, "GLOBAL", "Mission ended: " .. end_reason)
+    
+    print("[DEBUG] ===== MISSION END =====")
+    print("[DEBUG] Reason: " .. end_reason)
+    print("[DEBUG] Total Events Logged: " .. tostring(#DEBUG_EVENT_LOG))
+    print("")
+    
+    -- Auto-flush summary
+    Debug_PrintStats()
+    Debug_Flush()
+end
+
+---Debug_OnPlayerReady: Called when player has initial army spawned.
+function Debug_OnPlayerReady(player)
+    if not DEBUG_ENABLED then return end
+    
+    Debug_Log(DEBUG_EVT_PLAYER_READY, player.id, "Ready to command " .. Player_GetRaceName(player.id))
+end
+
+---Debug_OnPlayerDisconnect: Called when player disconnects.
+function Debug_OnPlayerDisconnect(player_id)
+    if not DEBUG_ENABLED then return end
+    
+    Debug_Log(DEBUG_EVT_PLAYER_DISCONNECT, player_id, "Disconnected")
+end
+
+---Debug_OnPlayerTakeover: Called when AI assumes control of a disconnected player.
+function Debug_OnPlayerTakeover(player_id, ai_difficulty)
+    if not DEBUG_ENABLED then return end
+    
+    Debug_Log(DEBUG_EVT_PLAYER_TAKEOVER, player_id, "AI takeover, tier=" .. tostring(ai_difficulty))
+end
+
+---Debug_OnRestrictionApplied: Log when a restriction profile is applied.
+function Debug_OnRestrictionApplied(player_id, profile_name)
+    if not DEBUG_ENABLED then return end
+    
+    Debug_Log(DEBUG_EVT_RESTRICTION_APPLIED, player_id, "Profile: " .. profile_name)
+end
+
+---Debug_OnObjectiveStarted: Log objective activation.
+function Debug_OnObjectiveStarted(player_id, obj_name)
+    if not DEBUG_ENABLED then return end
+    
+    Debug_Log(DEBUG_EVT_OBJECTIVE_STARTED, player_id, obj_name)
+end
+
+---Debug_OnObjectiveCompleted: Log objective completion with time elapsed.
+function Debug_OnObjectiveCompleted(player_id, obj_name)
+    if not DEBUG_ENABLED then return end
+    
+    Debug_Log(DEBUG_EVT_OBJECTIVE_COMPLETED, player_id, obj_name)
+end
+
+---Debug_OnPhaseEntered: Log phase transitions.
+function Debug_OnPhaseEntered(phase_num, phase_name)
+    if not DEBUG_ENABLED then return end
+    
+    Debug_Log(DEBUG_EVT_PHASE_ENTERED, "GLOBAL", "Phase " .. tostring(phase_num) .. ": " .. phase_name)
+end
+
+---Debug_OnSpawnWave: Log AI spawn waves.
+function Debug_OnSpawnWave(wave_name, unit_count, spawn_marker)
+    if not DEBUG_ENABLED then return end
+    
+    Debug_Log(DEBUG_EVT_SPAWN_WAVE, "GLOBAL", wave_name .. " | " .. tostring(unit_count) .. " units")
+end
+
+---Debug_OnSiegeUnlock: Log siege system unlock.
+function Debug_OnSiegeUnlock(player_id)
+    if not DEBUG_ENABLED then return end
+    
+    Debug_Log(DEBUG_EVT_SIEGE_UNLOCK, player_id, "Siege weapons unlocked")
+end
+
+---Debug_OnWorkshopUnlock: Log workshop unlock.
+function Debug_OnWorkshopUnlock(player_id)
+    if not DEBUG_ENABLED then return end
+    
+    Debug_Log(DEBUG_EVT_WORKSHOP_UNLOCK, player_id, "Siege workshop unlocked")
+end
+
+---Debug_OnPlayerDefeat: Log player elimination.
+function Debug_OnPlayerDefeat(player_id, reason)
+    if not DEBUG_ENABLED then return end
+    
+    Debug_Log(DEBUG_EVT_PLAYER_DEFEAT, player_id, "Defeated: " .. (reason or "unknown"))
+end
+
+---Debug_OnPlayerVictory: Log player victory.
+function Debug_OnPlayerVictory(player_id)
+    if not DEBUG_ENABLED then return end
+    
+    Debug_Log(DEBUG_EVT_PLAYER_VICTORY, player_id, "Victory!")
+end
+
+---Debug_OnLandmarkDestroyed: Log when a restricted landmark is destroyed (can be rebuilt).
+function Debug_OnLandmarkDestroyed(player_id, landmark_bp, landmark_name)
+    if not DEBUG_ENABLED then return end
+    
+    Debug_Log(DEBUG_EVT_LANDMARK_DESTROYED, player_id, "Destroyed: " .. landmark_name .. " (bp=" .. landmark_bp .. ") - can rebuild")
+end
+
+---Debug_OnLandmarkAvailable: Log when a restricted landmark becomes available for rebuild.
+function Debug_OnLandmarkAvailable(player_id, landmark_bp, landmark_name)
+    if not DEBUG_ENABLED then return end
+    
+    Debug_Log(DEBUG_EVT_LANDMARK_AVAILABLE, player_id, "Now available: " .. landmark_name .. " (bp=" .. landmark_bp .. ")")
+end
+
+---Debug_OnDefeatCheck: Log periodic defeat condition checks (verbose).
+function Debug_OnDefeatCheck(p1_squads, p1_buildings, p2_squads, p2_buildings)
+    if not DEBUG_ENABLED then return end
+    
+    local detail = string.format("P1: %d squads, %d buildings | P2: %d squads, %d buildings", 
+        p1_squads, p1_buildings, p2_squads, p2_buildings)
+    Debug_Log(DEBUG_EVT_DEFEAT_CHECK, "GLOBAL", detail)
+end
+
+---Debug_OnDefeatTriggered: Log when defeat condition is activated.
+function Debug_OnDefeatTriggered(p1_squads, p1_buildings, p2_squads, p2_buildings)
+    if not DEBUG_ENABLED then return end
+    
+    local detail = string.format("All destroyed! P1: %d+%d, P2: %d+%d → Defeat triggered", 
+        p1_squads, p1_buildings, p2_squads, p2_buildings)
+    Debug_Log(DEBUG_EVT_DEFEAT_TRIGGERED, "GLOBAL", detail)
+    print("[DEFEAT] Defeat condition activated!")
+end
+
+-- ============================================================
+-- STATISTICS & ANALYSIS
+-- ============================================================
+
+---Debug_PrintStats: Print summary statistics from the event log.
+function Debug_PrintStats()
+    if not DEBUG_ENABLED or #DEBUG_EVENT_LOG == 0 then return end
+    
+    local stats = {
+        total_events = #DEBUG_EVENT_LOG,
+        by_type = {},
+        by_player = {},
+        first_event_time = DEBUG_EVENT_LOG[1].elapsed_sec,
+        last_event_time = DEBUG_EVENT_LOG[#DEBUG_EVENT_LOG].elapsed_sec,
+        total_duration = DEBUG_EVENT_LOG[#DEBUG_EVENT_LOG].elapsed_sec - DEBUG_EVENT_LOG[1].elapsed_sec,
+    }
+    
+    -- Aggregate by event type
+    for _, evt in ipairs(DEBUG_EVENT_LOG) do
+        stats.by_type[evt.event_type] = (stats.by_type[evt.event_type] or 0) + 1
+    end
+    
+    -- Aggregate by player
+    for _, evt in ipairs(DEBUG_EVENT_LOG) do
+        if evt.player_id ~= "GLOBAL" then
+            stats.by_player[evt.player_id] = (stats.by_player[evt.player_id] or 0) + 1
+        end
+    end
+    
+    print("[DEBUG] ===== STATISTICS =====")
+    print("[DEBUG] Total Events: " .. stats.total_events)
+    print("[DEBUG] Mission Duration: " .. string.format("%.1f seconds", stats.total_duration))
+    print("")
+    print("[DEBUG] Events by Type:")
+    for evt_type, count in pairs(stats.by_type) do
+        print("[DEBUG]   " .. evt_type .. ": " .. count)
+    end
+    print("")
+    print("[DEBUG] Events by Player:")
+    for player_id, count in pairs(stats.by_player) do
+        print("[DEBUG]   Player " .. tostring(player_id) .. ": " .. count .. " events")
+    end
+    print("")
+end
+
+---Debug_GetEventsSince: Return all events after a given elapsed time threshold.
+-- Useful for filtering to a specific phase or time window.
+function Debug_GetEventsSince(elapsed_sec_threshold)
+    local result = {}
+    for _, evt in ipairs(DEBUG_EVENT_LOG) do
+        if evt.elapsed_sec >= elapsed_sec_threshold then
+            table.insert(result, evt)
+        end
+    end
+    return result
+end
+
+---Debug_GetEventsByType: Return all events of a specific type.
+function Debug_GetEventsByType(event_type)
+    local result = {}
+    for _, evt in ipairs(DEBUG_EVENT_LOG) do
+        if evt.event_type == event_type then
+            table.insert(result, evt)
+        end
+    end
+    return result
+end
+
+---Debug_GetEventsByPlayer: Return all events for a specific player.
+function Debug_GetEventsByPlayer(player_id)
+    local result = {}
+    for _, evt in ipairs(DEBUG_EVENT_LOG) do
+        if evt.player_id == player_id then
+            table.insert(result, evt)
+        end
+    end
+    return result
+end
+
+-- ============================================================
+-- TEST HARNESS
+-- ============================================================
+-- Console-safe functions to simulate mission events for validation.
+-- These do NOT call Player_Set* APIs; they only validate the data layer.
+-- ============================================================
+
+---Debug_SimulatePlayerProgression: Test harness for player progression chain.
+-- Simulates: mission start → players ready → restrictions applied → objectives unlocked.
+function Debug_SimulatePlayerProgression()
+    print("[TEST] ===== Player Progression Simulation =====")
+    
+    for _, player in ipairs(PLAYERS) do
+        local pid = player.id
+        local civ = GetPlayerCiv(pid)
+        local raceName = string.lower(Player_GetRaceName(pid))
+        
+        print("")
+        print("[TEST] Player " .. tostring(pid) .. " (" .. raceName .. " → " .. civ .. "):")
+        
+        -- [1] Mission start
+        print("[TEST]   [START] Restriction profile applied: 'starting'")
+        if DC.restrict_siege then
+            print("[TEST]      ✓ Siege locked")
+        else
+            print("[TEST]      ✗ Siege unlocked (Easy)")
+        end
+        if DC.restrict_engineers then
+            print("[TEST]      ✓ Engineers locked")
+        else
+            print("[TEST]      ✗ Engineers unlocked (Easy)")
+        end
+        if DC.restrict_workshop then
+            print("[TEST]      ✓ Workshop locked")
+        end
+        
+        -- [2] Phase 2 objectives
+        print("[TEST]   [PHASE2] Profile applied: '" .. DC.phase2_siege_profile .. "'")
+        if DC.phase2_siege_profile == "siege_available" then
+            print("[TEST]      ✓ Siege unlocked")
+        elseif DC.phase2_siege_profile == "engineers_available" then
+            print("[TEST]      ✓ Siege unlocked + Engineers unlocked")
+        end
+        if DC.phase2_workshop_unlock then
+            print("[TEST]      ✓ Workshop unlocked")
+        end
+        
+        -- [3] Profile chain validation
+        local profile_chain = {
+            "starting",
+            DC.phase2_siege_profile,
+        }
+        if DC.phase2_workshop_unlock then
+            table.insert(profile_chain, "workshop_available")
+        end
+        
+        print("[TEST]   Profile chain:")
+        for i, pname in ipairs(profile_chain) do
+            local prof = Restriction_Profile[pname]
+            if prof then
+                print("[TEST]      [" .. i .. "] " .. pname .. " ✓")
+            else
+                print("[TEST]      [" .. i .. "] " .. pname .. " ✗ NOT FOUND")
+            end
+        end
+    end
+    
+    print("")
+end
+
+---Debug_SimulateDLCResolution: Validate DLC civ resolution for all players.
+function Debug_SimulateDLCResolution()
+    print("[TEST] ===== DLC Civ Resolution ===== ")
+    
+    for _, player in ipairs(PLAYERS) do
+        local pid = player.id
+        local raw = string.lower(Player_GetRaceName(pid))
+        local resolved = GetPlayerCiv(pid)
+        
+        print("")
+        print("[TEST] Player " .. tostring(pid) .. ":")
+        print("[TEST]   Raw: " .. raw)
+        print("[TEST]   Resolved: " .. resolved)
+        
+        -- Verify AGS_ENTITY_TABLE entry exists
+        if AGS_ENTITY_TABLE[resolved] then
+            print("[TEST]   AGS_ENTITY_TABLE entry: ✓")
+        else
+            print("[TEST]   AGS_ENTITY_TABLE entry: ✗ MISSING")
+        end
+        
+        -- Verify parent chain if DLC civ
+        if raw ~= resolved then
+            print("[TEST]   Parent chain: " .. raw .. " → " .. resolved)
+            if DLC_CIV_PARENT_MAP[raw] then
+                print("[TEST]   DLC registration: ✓")
+            else
+                print("[TEST]   DLC registration: ✗ NO PARENT MAP")
+            end
+        else
+            print("[TEST]   Parent chain: Base civ (no DLC)")
+        end
+        
+        -- Check siege weapon entry
+        local siege_sq = AGS_GetSiegeSquad(resolved, BP_SIEGE_MANGONEL)
+        if siege_sq then
+            print("[TEST]   Siege weapon (Mangonel): ✓ " .. tostring(siege_sq))
+        else
+            print("[TEST]   Siege weapon (Mangonel): ✗ MISSING")
+        end
+    end
+    
+    print("")
+end
+
+---Debug_DumpRestrictionState: Print current restriction state for all players.
+-- Interprets profile name to show what's actually unlocked/locked.
+function Debug_DumpRestrictionState()
+    print("[TEST] ===== Current Restriction State =====")
+    
+    for _, player in ipairs(PLAYERS) do
+        local pid = player.id
+        local profile = GetPlayerProfile(pid)
+        
+        print("")
+        print("[TEST] Player " .. tostring(pid) .. ":")
+        print("[TEST]   Current profile: " .. profile)
+        
+        -- Interpret profile state (what's UNLOCKED at this point)
+        if profile == "starting" then
+            print("[TEST]   Siege: LOCKED")
+            print("[TEST]   Engineers: LOCKED")
+            print("[TEST]   Workshop: LOCKED")
+        elseif profile == "siege_available" then
+            print("[TEST]   Siege: UNLOCKED")
+            print("[TEST]   Engineers: LOCKED")
+            print("[TEST]   Workshop: LOCKED")
+        elseif profile == "engineers_available" then
+            print("[TEST]   Siege: UNLOCKED")
+            print("[TEST]   Engineers: UNLOCKED")
+            print("[TEST]   Workshop: LOCKED")
+        elseif profile == "workshop_available" then
+            print("[TEST]   Siege: UNLOCKED")
+            print("[TEST]   Engineers: UNLOCKED")
+            print("[TEST]   Workshop: UNLOCKED")
+        else
+            print("[TEST]   Unknown profile: " .. profile)
+        end
+    end
+    
+    print("")
+end
+
+---Debug_ComparisonWithJapan: Compare Arabia restrictions vs Japan mod for feature parity.
+function Debug_ComparisonWithJapan()
+    print("[TEST] ===== Arabia vs Japan: Feature Parity Check =====")
+    print("")
+    print("[TEST] Arabia v1.4 Features:")
+    print("[TEST]   ✓ CBA_SIEGE_TABLE (16 entries: 12 base + 4 DLC with unique attribNames)")
+    print("[TEST]   ✓ AGS_GetSiegeSquad / AGS_GetSiegeEntity (DLC-aware, improved)")
+    print("[TEST]   ✓ Data-driven landmark tables (LANDMARK_KEEP/AGE4, HOUSE_OF_WISDOM)")
+    print("[TEST]   ✓ 4-profile restriction system (starting, siege_available, engineers_available, workshop_available)")
+    print("[TEST]   ✓ DC-driven profile selection (phase2_siege_profile, phase2_workshop_unlock)")
+    print("[TEST]   ✓ Restriction validators (Validator_RestrictionState, Simulate_PlayerProgression)")
+    print("[TEST]   ✓ IsCivFamily / IsCivExact / IsCivFamilyAny helpers")
+    print("")
+    print("[TEST] Japan v1.3 for reference:")
+    print("[TEST]   - Same CBA_SIEGE_TABLE structure")
+    print("[TEST]   - Same 4-profile concepts (with minor naming differences)")
+    print("[TEST]   - Same DLC resolver + composition map generation")
+    print("")
+    print("[TEST] Arabia improvements over Japan:")
+    print("[TEST]   ✓ Improved siege lookup (check exact civ BEFORE parent chain)")
+    print("[TEST]   ✓ Data-driven landmark tables (Japan had some hardcoded)")
+    print("[TEST]   ✓ Cleaner restriction profile design (less nested depth)")
+    print("")
+end
+
+---Debug_SpawnWaveSimulation: Dry-run validation of spawn compositions.
+function Debug_SpawnWaveSimulation()
+    print("[TEST] ===== Spawn Wave Composition Validation =====")
+    print("")
+    
+    -- Check key compositions exist
+    local compositions_to_check = {
+        "units_camp",
+        "units_patrol_hard",
+        "wave_city_5m",
+        "wave_city_10m",
+        "wave_city_15m",
+        "wave_siege",
+    }
+    
+    print("[TEST] Critical spawn compositions:")
+    for _, key in ipairs(compositions_to_check) do
+        if Unit_Types[key] then
+            local count = #Unit_Types[key]
+            print("[TEST]   " .. key .. ": ✓ (" .. count .. " unit entries)")
+        else
+            print("[TEST]   " .. key .. ": ✗ MISSING")
+        end
+    end
+    
+    print("")
+end
+
+-- ============================================================
+-- INTEGRATION HOOKS (Call from main mission files)
+-- ============================================================
+-- These are stub functions to be called from the main .scar files.
+-- Replace the function definitions in main.scar/objectives.scar with calls
+-- to these Debug_* functions for full logging support.
+-- ============================================================
+
+-- Example integration points (uncomment lines in target .scar files):
+--
+-- In main.scar / Mission_Start():
+--   Debug_OnMissionStart()
+--
+-- In main.scar / Defeat_Function():
+--   Debug_OnPlayerDefeat(player_id, "defeat_condition")
+--
+-- In objectives.scar / (DestroySiege_OnComplete = REMOVED):
+--   Debug_OnObjectiveCompleted(player.id, "Destroy Siege Workshop")
+--   Debug_OnSiegeUnlock(player.id)
+--
+-- In main.scar / CheckPlayerDisconnects():
+--   Debug_OnPlayerDisconnect(player_id)
+--   Debug_OnPlayerTakeover(player_id, AI_Difficulty)
+--
+
+print("[DEBUG] coop_2_arabia_debug.scar loaded (events logging available)")
+

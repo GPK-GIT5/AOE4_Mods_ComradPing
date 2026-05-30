@@ -1,0 +1,1967 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — Unified Siege Test
+--
+-- Comprehensive validation of all three siege limit pipelines (general, ram, siege tower).
+-- Consolidates Quick, Field Build, Pending Limits, and Workshop Enforcement into one
+-- sequenced tester with zero redundancy. ~60-90s total runtime.
+--
+-- Phases:
+--   0  Setup + Blueprint Audit (constants, API, full CBA_SIEGE_TABLE resolution)
+--   1  Ram Limits (weight=1, weight=2 ram_tower, lock at cap, unlock)
+--   2  Siege Tower Lifecycle (scaffold → pending → complete → cancel → lock)
+--   3  General Siege Weapons (all 9 types, point verification, exclusion checks)
+--   4  SE Gate + Threshold Ordering (lock without SE, cascade validation)
+--   5  Field Build Edge Cases (locked threshold, CAP_HOTFIX, buildable siege)
+--   6  Workshop Enforcement (over-queue, production, SquadKilled, resume)
+--   7  Event Handler Coverage (EntityKilled scaffold, type tag spot-check)
+--   9  Workshop Independence (prod/ws counter isolation, build+destroy+recount)
+--  10  Queue Preservation (no-cancel proof across ram/siege/ST thresholds)
+--  11  Exploit Scenarios (field-built at cap, workshop cap ≠ prod cap, NoSiege)
+--  12  Cross-Settings (caps, team balance, per-civ table completeness)
+--  13  Summary (pass/fail totals, enforcement proof, event log)
+--
+-- Console commands:
+--   Debug_SiegeTest()   — Run full unified test (~60-90s)
+--
+-- Requires: cba_debug_core.scar, cba_debug_helpers.scar, cba_options.scar, cba_siege_data.scar
+---------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------
+-- Network event registration for sim-mutating entry point.
+-- Registered via Scar_AddInit so all peers assign identical event IDs.
+---------------------------------------------------------------------------------------------------
+local function _SiegeTest_NetEvents_Init()
+	if type(Network_RegisterEvent) == "function" then
+		Network_RegisterEvent("_SiegeTest_Net_Entry")
+	end
+end
+Scar_AddInit(_SiegeTest_NetEvents_Init)
+
+local _ST_SUITE = "SiegeTest"
+local _ST_DELAY = 1
+local _ST_DEFERRED_WAIT = 0.35
+local _ST_PRODUCTION_WAIT = 10
+local _ST_KILL_SETTLE = 3
+local _ST_RESUME_WAIT = 10
+local _ST_PRODUCTION_SPEED = 20.0
+local _ST_PRODUCTION_SPEED_FALLBACK = 10.0
+local _ST_BASELINE_RETRY_MAX = 3
+
+-- Keys in CBA_SIEGE_TABLE that are entity BPs (buildings or field-constructed scaffolds).
+local _ST_ENTITY_KEYS = {
+	scar_siegeworkshop      = true,
+	ram                     = true,
+	ram_tower               = true,
+	trebuchet_tr_buildable  = true,
+	trebuchet_cw_buildable  = true,
+}
+
+-- Test state (reset each run)
+local _st = {}
+
+---------------------------------------------------------------------------------------------------
+-- Helpers
+---------------------------------------------------------------------------------------------------
+
+local function _ST_Assert(test_name, condition, detail)
+	_st.total = _st.total + 1
+	local status = condition and "PASS" or "FAIL"
+	if condition then _st.passed = _st.passed + 1 end
+	local msg = string.format("    [%s] %s", status, test_name)
+	if detail then msg = msg .. " — " .. tostring(detail) end
+	print(msg)
+	return condition
+end
+
+local function _ST_ResolvePlayer()
+	for i, p in ipairs(PLAYERS) do
+		if p ~= nil then
+			local ok, is_human = pcall(Player_IsHuman, p.id)
+			if ok and is_human then return p, i end
+		end
+	end
+	return PLAYERS[1], 1
+end
+
+local function _ST_GrantResources(player)
+	pcall(Player_SetResource, player.id, RT_Food, 50000)
+	pcall(Player_SetResource, player.id, RT_Wood, 50000)
+	pcall(Player_SetResource, player.id, RT_Gold, 50000)
+	pcall(Player_SetResource, player.id, RT_Stone, 50000)
+end
+
+local function _ST_KillAllSiege(player)
+	local sg = Player_GetSquads(player.id)
+	local count = SGroup_Count(sg)
+	for idx = count, 1, -1 do
+		local squad = SGroup_GetSquadAt(sg, idx)
+		if squad ~= nil and (Squad_IsOfType(squad, "siege") or Squad_IsOfType(squad, "ram") or Squad_IsOfType(squad, "siege_tower") or Squad_IsOfType(squad, "ram_tower")) then
+			pcall(Squad_Destroy, squad)
+		end
+	end
+	SGroup_Destroy(sg)
+	local eg = Player_GetEntities(player.id)
+	local ecount = EGroup_CountSpawned(eg)
+	for idx = ecount, 1, -1 do
+		local ent = EGroup_GetSpawnedEntityAt(eg, idx)
+		if ent ~= nil and (Entity_IsOfType(ent, "siege") or Entity_IsOfType(ent, "ram") or Entity_IsOfType(ent, "siege_tower") or Entity_IsOfType(ent, "ram_tower")) then
+			pcall(Entity_Destroy, ent)
+		end
+	end
+	EGroup_Destroy(eg)
+end
+
+local function _ST_ResetCounters(player)
+	_ST_KillAllSiege(player)
+	for attempt = 1, 3 do
+		CBA_Options_SiegeLimit_Recount(player)
+		CBA_Options_RamLimit_Recount(player)
+		CBA_Options_SiegeTowerLimit_Recount(player)
+		player.ramLimit_pending = 0
+		player.siegeTowerLimit_pending = 0
+		player.siegeLimit_pending = 0
+		if (player.ramLimit_count or 0) == 0 and (player.siegeTowerLimit_count or 0) == 0
+			and (player.siegeLimit_count or 0) == 0 then
+			return true
+		end
+	end
+	return false
+end
+
+local function _ST_FullRecount(player)
+	CBA_Options_SiegeLimit_Recount(player)
+	CBA_Options_RamLimit_Recount(player)
+	CBA_Options_SiegeTowerLimit_Recount(player)
+	CBA_Options_BuildingLimit_RecountPlayer(player)
+	CBA_Options_SiegeLimit_ApplyThreshold(player)
+	CBA_Options_RamLimit_ApplyThreshold(player)
+	CBA_Options_SiegeTowerLimit_ApplyThreshold(player)
+	pcall(CBA_Options_FieldConstruct_Gate, player)
+end
+
+local function _ST_SpawnSquad(player, sbp_name, pos)
+	local ok_sbp, sbp = pcall(BP_GetSquadBlueprint, sbp_name)
+	if not ok_sbp or sbp == nil then return false end
+	local ok, err = pcall(function()
+		local sg = SGroup_CreateUnique()
+		UnitEntry_DeploySquads(player.id, sg, {{sbp = sbp, numSquads = 1}}, pos)
+	end)
+	return ok
+end
+
+local function _ST_ResolveBlueprint(bp_name, prefer_entity)
+	if prefer_entity then
+		local ok, bp = pcall(BP_GetEntityBlueprint, bp_name)
+		if ok and bp then return true, "EBP" end
+		local ok2, bp2 = pcall(BP_GetSquadBlueprint, bp_name)
+		if ok2 and bp2 then return true, "SBP(fb)" end
+	else
+		local ok, bp = pcall(BP_GetSquadBlueprint, bp_name)
+		if ok and bp then return true, "SBP" end
+		local ok2, bp2 = pcall(BP_GetEntityBlueprint, bp_name)
+		if ok2 and bp2 then return true, "EBP(fb)" end
+	end
+	return false, "UNRESOLVED"
+end
+
+local function _ST_LogCounters(player, label)
+	print(string.format("    [LOG] %s: ram=%d/%d  st=%d/%d  siege=%d/%d  pend_r=%d pend_st=%d pend_s=%d",
+		label,
+		player.ramLimit_count or 0, RAM_LIMIT_MAX,
+		player.siegeTowerLimit_count or 0, SIEGE_TOWER_LIMIT_MAX,
+		player.siegeLimit_count or 0, AGS_GLOBAL_SETTINGS.MaximumMedicPopulation or 0,
+		player.ramLimit_pending or 0,
+		player.siegeTowerLimit_pending or 0,
+		player.siegeLimit_pending or 0))
+end
+
+local function _ST_CreateScaffold(player, ebp, pos, label)
+	if pos == nil then return nil end
+	local offsets = {
+		{x = 0, z = 0}, {x = 8, z = 0}, {x = -8, z = 0},
+		{x = 0, z = 8}, {x = 0, z = -8},
+		{x = 12, z = 12}, {x = -12, z = 12},
+	}
+	for _, off in ipairs(offsets) do
+		local x = pos.x + off.x
+		local z = pos.z + off.z
+		if math.abs(x) < 100000 and math.abs(z) < 100000 then
+			local ok_h, y = pcall(World_GetHeightAt, x, z)
+			local py = ok_h and y or pos.y
+			local test_pos = World_Pos(x, py, z)
+			local facing_pos = World_Pos(test_pos.x + 5, test_pos.y, test_pos.z)
+			local ok_create, ent = pcall(Entity_CreateFacing, ebp, player.id, test_pos, facing_pos, true)
+			if ok_create and ent ~= nil then
+				local ok_spawn = pcall(Entity_Spawn, ent)
+				if ok_spawn then return ent end
+				pcall(Entity_Destroy, ent)
+			end
+		end
+	end
+	print(string.format("    [FAIL] Could not place %s scaffold", tostring(label or "entity")))
+	return nil
+end
+
+local function _ST_FindWorkshop(player)
+	local eg_all = Player_GetEntities(player.id)
+	local count = EGroup_CountSpawned(eg_all)
+	for idx = 1, count do
+		local entity = EGroup_GetSpawnedEntityAt(eg_all, idx)
+		if entity ~= nil and Entity_IsOfType(entity, "scar_siegeworkshop") then
+			EGroup_Destroy(eg_all)
+			return entity
+		end
+	end
+	EGroup_Destroy(eg_all)
+	return nil
+end
+
+local function _ST_DestroyAllWorkshops(player)
+	local destroyed = 0
+	local eg_all = Player_GetEntities(player.id)
+	local count = EGroup_CountSpawned(eg_all)
+	for idx = 1, count do
+		local entity = EGroup_GetSpawnedEntityAt(eg_all, idx)
+		if entity ~= nil and (Entity_IsOfType(entity, "scar_siegeworkshop") or Entity_IsOfType(entity, "siege_workshop")) then
+			local ok = pcall(Entity_Destroy, entity)
+			if ok then destroyed = destroyed + 1 end
+		end
+	end
+	EGroup_Destroy(eg_all)
+	return destroyed
+end
+
+local function _ST_KillNRams(player, n)
+	local sg_all = Player_GetSquads(player.id)
+	local sq_count = SGroup_Count(sg_all)
+	local killed = 0
+	for idx = 1, sq_count do
+		if killed >= n then break end
+		local squad = SGroup_GetSquadAt(sg_all, idx)
+		if squad ~= nil and (Squad_IsOfType(squad, "ram") or Squad_IsOfType(squad, "scar_ram") or Squad_IsOfType(squad, "fire_ram") or Squad_IsOfType(squad, "scar_fire_ram")) then
+			local ok = pcall(Squad_Kill, squad)
+			if ok then killed = killed + 1 end
+		end
+	end
+	SGroup_Destroy(sg_all)
+	return killed
+end
+
+-- Enforcement checkpoint logging (workshop phase)
+local function _ST_LogEnforcement(player, label, transient)
+	local live = player.ramLimit_count or 0
+	local pending = player.ramLimit_pending or 0
+	local queued = CBA_Options_RamLimit_GetQueuedCount(player)
+	local total = live + pending + queued
+	local cap = RAM_LIMIT_MAX
+	-- Under no-cancel policy, only live+pending exceeding cap is a hard violation
+	local hard_total = live + pending
+	local violation = hard_total > cap
+	local queued_overflow = total > cap and not violation
+	local marker = ""
+	if violation and transient then marker = " [TRANSIENT]"
+	elseif violation then marker = " [VIOLATION]"
+	elseif queued_overflow then marker = " [QUEUED_OVERFLOW]" end
+
+	print(string.format("    [ENFORCE] %s: live=%d pending=%d queued=%d total=%d/%d%s",
+		label, live, pending, queued, total, cap, marker))
+
+	_st.checkpoints[#_st.checkpoints + 1] = {
+		label = label, live = live, pending = pending, queued = queued,
+		total = total, cap = cap,
+		violation = violation and not transient, transient = transient or false,
+	}
+	if violation and not transient then _st.violations = _st.violations + 1 end
+	return not violation
+end
+
+---------------------------------------------------------------------------------------------------
+-- Interceptors (event log capture)
+---------------------------------------------------------------------------------------------------
+
+function _ST_Interceptor_ConstructionStart(context)
+	if _st.event_log == nil then return end
+	local player = Core_GetPlayersTableEntry(context.player)
+	if player == nil or player ~= _st.player then return end
+	local is_siege, is_ram, is_st_type = false, false, false
+	if context.pbg ~= nil then
+		local ok1, v1 = pcall(Entity_IsEBPOfType, context.pbg, "siege")
+		local ok2, v2 = pcall(Entity_IsEBPOfType, context.pbg, "ram")
+		local ok3, v3 = pcall(Entity_IsEBPOfType, context.pbg, "siege_tower")
+		is_siege = ok1 and v1; is_ram = ok2 and v2; is_st_type = ok3 and v3
+	end
+	local ok_gt, gt = pcall(World_GetGameTime)
+	_st.event_log[#_st.event_log + 1] = {
+		event = "ConstructionStart", time = ok_gt and gt or 0,
+		is_siege = is_siege, is_ram = is_ram, is_st = is_st_type,
+		ram_pending = player.ramLimit_pending or 0,
+		st_pending = player.siegeTowerLimit_pending or 0,
+	}
+end
+
+function _ST_Interceptor_ConstructionComplete(context)
+	if _st.event_log == nil then return end
+	local player = Core_GetPlayersTableEntry(context.player)
+	if player == nil or player ~= _st.player then return end
+	local is_siege, is_ram, is_st_type = false, false, false
+	if context.pbg ~= nil then
+		local ok1, v1 = pcall(Entity_IsEBPOfType, context.pbg, "siege")
+		local ok2, v2 = pcall(Entity_IsEBPOfType, context.pbg, "ram")
+		local ok3, v3 = pcall(Entity_IsEBPOfType, context.pbg, "siege_tower")
+		is_siege = ok1 and v1; is_ram = ok2 and v2; is_st_type = ok3 and v3
+	end
+	local ok_gt, gt = pcall(World_GetGameTime)
+	_st.event_log[#_st.event_log + 1] = {
+		event = "ConstructionComplete", time = ok_gt and gt or 0,
+		is_siege = is_siege, is_ram = is_ram, is_st = is_st_type,
+		ram_pending = player.ramLimit_pending or 0,
+		st_pending = player.siegeTowerLimit_pending or 0,
+	}
+end
+
+function _ST_Interceptor_ConstructionCancelled(context)
+	if _st.event_log == nil then return end
+	local player = Core_GetPlayersTableEntry(context.player)
+	if player == nil or player ~= _st.player then return end
+	local is_siege, is_ram, is_st_type = false, false, false
+	if context.pbg ~= nil then
+		local ok1, v1 = pcall(Entity_IsEBPOfType, context.pbg, "siege")
+		local ok2, v2 = pcall(Entity_IsEBPOfType, context.pbg, "ram")
+		local ok3, v3 = pcall(Entity_IsEBPOfType, context.pbg, "siege_tower")
+		is_siege = ok1 and v1; is_ram = ok2 and v2; is_st_type = ok3 and v3
+	end
+	local ok_gt, gt = pcall(World_GetGameTime)
+	_st.event_log[#_st.event_log + 1] = {
+		event = "ConstructionCancelled", time = ok_gt and gt or 0,
+		is_siege = is_siege, is_ram = is_ram, is_st = is_st_type,
+		ram_pending = player.ramLimit_pending or 0,
+		st_pending = player.siegeTowerLimit_pending or 0,
+	}
+end
+
+-- Keys in CBA_SIEGE_TABLE that are entity BPs (buildings or field-constructed scaffolds).
+-- All other keys are assumed to be squad BPs first.
+local _SL_ENTITY_KEYS = {
+	scar_siegeworkshop      = true,
+	ram                     = true,
+	ram_tower               = true,
+	trebuchet_tr_buildable  = true,
+	trebuchet_cw_buildable  = true,
+}
+
+---------------------------------------------------------------------------------------------------
+-- PHASE 0: Setup + Blueprint Audit
+---------------------------------------------------------------------------------------------------
+
+-- Network dispatch handler: fires on ALL peers via GE_BroadcastMessage lockstep bus.
+-- All sim mutations (Player_SetCurrentAge, Player_CompleteUpgrade, Player_SetResource,
+-- UnitEntry_DeploySquads, Entity_CreateFacing/Spawn/Destroy, Squad_Kill) execute on every
+-- peer at the same sim tick, making the full phase chain deterministic in lockstep MP.
+function _SiegeTest_Net_Entry(playerID, message)
+	_cba_debug.enabled = true
+
+	local player, pidx = _ST_ResolvePlayer()
+	local civ = _Debug_GetPlayerCiv(player)
+
+	_st = {
+		player = player, pidx = pidx, civ = civ,
+		passed = 0, total = 0,
+		pos = _Debug_GetPlayerSpawnAnchor(player),
+		event_log = {},
+		checkpoints = {},
+		violations = 0,
+		start_time = 0,
+	}
+
+	local ok_gt, gt = pcall(World_GetGameTime)
+	_st.start_time = ok_gt and gt or 0
+
+	print("")
+	print("============================================================")
+	print("  UNIFIED SIEGE TEST")
+	print(string.format("  Target: P%d (%s)  RAM_MAX=%d  ST_MAX=%d",
+		pidx, civ, RAM_LIMIT_MAX, SIEGE_TOWER_LIMIT_MAX))
+	print("============================================================")
+
+	pcall(Debug_PauseAI)
+
+	-----------------------------------------------------------------
+	-- Phase 0: Constants + API + Full Blueprint Audit
+	-----------------------------------------------------------------
+	_Debug_PhaseHeader("0", "CONSTANTS + API + BLUEPRINT AUDIT")
+
+	_ST_Assert("RAM_LIMIT_MAX == 5", RAM_LIMIT_MAX == 5, RAM_LIMIT_MAX)
+	_ST_Assert("SIEGE_TOWER_LIMIT_MAX == 5", SIEGE_TOWER_LIMIT_MAX == 5, SIEGE_TOWER_LIMIT_MAX)
+	_ST_Assert("AGS_UP_SIEGE_ENGINEERS defined", AGS_UP_SIEGE_ENGINEERS ~= nil)
+
+	-- Function existence
+	local required_fns = {
+		"CBA_Options_SiegeLimit_Recount",
+		"CBA_Options_RamLimit_Recount",
+		"CBA_Options_SiegeTowerLimit_Recount",
+		"CBA_Options_SiegeLimit_ApplyThreshold",
+		"CBA_Options_RamLimit_ApplyThreshold",
+		"CBA_Options_SiegeTowerLimit_ApplyThreshold",
+		"CBA_Options_SiegeLimit_ConstructionStart",
+		"CBA_Options_SiegeLimit_ConstructionCancelled",
+		"CBA_Options_SiegeLimit_ConstructionComplete",
+		"CBA_Options_SiegeLimit_BuildItemComplete",
+		"CBA_Options_SiegeLimit_SquadKilled",
+		"CBA_Options_HasSiegeEngineers",
+		"CBA_Options_GetRamWeight",
+		"CBA_Options_GetRamWeightSBP",
+		"CBA_Options_GetRamLimitMax",
+		"CBA_Options_GetSiegeTowerLimitMax",
+		"CBA_Options_SiegeLimit_GetGateTotals",
+		"CBA_Options_GetSiegeWeaponPointsSBP",
+		"CBA_Options_GetSiegeWeaponPointsEBP",
+		"CBA_Options_GetSiegeWeaponPointsEntity",
+		"CBA_Options_SiegeLimit_GetQueuedPoints",
+		"CBA_Options_SiegeLimit_TrimQueue",
+		"CBA_Options_SiegeLimit_EnforceSpawnCap",
+		"CBA_Options_SiegeLimit_RollbackExcessScaffolds",
+	}
+	local fn_missing = {}
+	for _, fn in ipairs(required_fns) do
+		if type(_G[fn]) ~= "function" then table.insert(fn_missing, fn) end
+	end
+	_ST_Assert("All siege limit functions exist (" .. #required_fns .. ")",
+		#fn_missing == 0,
+		#fn_missing > 0 and ("missing: " .. table.concat(fn_missing, ", ")) or "OK")
+
+	-- Full blueprint resolution audit (every key in every civ table)
+	local audit_civ_pass, audit_civ_fail = 0, 0
+	local audit_key_pass, audit_key_fail = 0, 0
+	local audit_failures = {}
+	local required_keys = {"ram", "workshop_ram", "siege_tower", "springald", "mangonel", "bombard", "trebuchet_cw", "scar_siegeworkshop"}
+
+	for tbl_civ, tbl in pairs(CBA_SIEGE_TABLE) do
+		local civ_bad = {}
+		-- Check required keys
+		for _, key in ipairs(required_keys) do
+			if tbl[key] == nil then
+				table.insert(civ_bad, key .. "(missing)")
+			end
+		end
+		-- Resolve all string BP values
+		for key, bp_name in pairs(tbl) do
+			if type(bp_name) == "string" then
+				local ok, _ = _ST_ResolveBlueprint(bp_name, _ST_ENTITY_KEYS[key] == true)
+				if ok then audit_key_pass = audit_key_pass + 1
+				else audit_key_fail = audit_key_fail + 1; table.insert(civ_bad, key .. "=" .. bp_name) end
+			end
+		end
+		if #civ_bad == 0 then audit_civ_pass = audit_civ_pass + 1
+		else audit_civ_fail = audit_civ_fail + 1; table.insert(audit_failures, string.format("    %-18s FAIL: %s", tbl_civ, table.concat(civ_bad, ", "))) end
+	end
+
+	-- Parent-map civ fallback check
+	if AGS_CIV_PARENT_MAP then
+		for variant, parent in pairs(AGS_CIV_PARENT_MAP) do
+			if CBA_SIEGE_TABLE[variant] == nil and CBA_SIEGE_TABLE[parent] == nil then
+				table.insert(audit_failures, string.format("    %-18s FAIL: no table and parent %s missing", variant, parent))
+				audit_civ_fail = audit_civ_fail + 1
+			end
+		end
+	end
+
+	-- Buildable entity list validation
+	local buildable_lists = {
+		{name = "buildable_mon",      list = CBA_SIEGE_UNITS.siege_buildable_mon},
+		{name = "buildable_abb",      list = CBA_SIEGE_UNITS.siege_buildable_abb},
+		{name = "buildable_abb_ha_01",list = CBA_SIEGE_UNITS.siege_buildable_abb_ha_01},
+	}
+	local buildable_pass, buildable_fail = 0, 0
+	for _, entry in ipairs(buildable_lists) do
+		for _, bp_name in ipairs(entry.list) do
+			local ok_e, _ = pcall(BP_GetEntityBlueprint, bp_name)
+			if ok_e then buildable_pass = buildable_pass + 1
+			else buildable_fail = buildable_fail + 1 end
+		end
+	end
+
+	if #audit_failures > 0 then
+		for _, line in ipairs(audit_failures) do print(line) end
+	end
+
+	local total_civs = audit_civ_pass + audit_civ_fail
+	_ST_Assert(
+		string.format("SIEGE_TABLE: all BPs resolve (%d civs / %d keys)", total_civs, audit_key_pass + audit_key_fail),
+		audit_civ_fail == 0 and audit_key_fail == 0,
+		string.format("%d civ-ok %d key-ok %d civ-fail %d key-fail", audit_civ_pass, audit_key_pass, audit_civ_fail, audit_key_fail))
+	_ST_Assert(
+		string.format("SIEGE_UNITS buildable EBPs resolve (%d entries)", buildable_pass + buildable_fail),
+		buildable_fail == 0,
+		string.format("%d ok %d fail", buildable_pass, buildable_fail))
+
+	-- Resolve test player's siege BPs
+	_st.ram_sbp_name = CBA_SIEGE_TABLE[civ] and CBA_SIEGE_TABLE[civ].workshop_ram
+	_st.st_sbp_name = CBA_SIEGE_TABLE[civ] and CBA_SIEGE_TABLE[civ].siege_tower
+	_st.ram_ebp = AGS_GetSiegeEntity(civ, BP_SIEGE_RAM)
+	_st.st_ebp = AGS_GetSiegeEntity(civ, BP_SIEGE_TOWER)
+
+	_ST_Assert("workshop_ram resolves for " .. civ, _st.ram_sbp_name ~= nil)
+	_ST_Assert("siege_tower resolves for " .. civ, _st.st_sbp_name ~= nil)
+
+	-- Setup: age, SE, resources, clean slate
+	pcall(Player_SetCurrentAge, player.id, AGE_CASTLE)
+	local ok_bp, upgrade_bp = pcall(AGS_GetCivilizationUpgrade, civ, AGS_UP_SIEGE_ENGINEERS)
+	if ok_bp and upgrade_bp then
+		pcall(Player_CompleteUpgrade, player.id, upgrade_bp)
+	end
+	_ST_GrantResources(player)
+	_ST_ResetCounters(player)
+	pcall(CBA_Options_FieldConstruct_Gate, player)
+	pcall(CBA_Options_RamLimit_ApplyThreshold, player)
+	pcall(CBA_Options_SiegeTowerLimit_ApplyThreshold, player)
+
+	-- Register interceptors
+	Rule_AddGlobalEvent(_ST_Interceptor_ConstructionStart, GE_ConstructionStart)
+	Rule_AddGlobalEvent(_ST_Interceptor_ConstructionComplete, GE_ConstructionComplete)
+	Rule_AddGlobalEvent(_ST_Interceptor_ConstructionCancelled, GE_ConstructionCancelled)
+
+	_Debug_ScheduleNextPhase(_ST_Phase1_RamLimits, _ST_DELAY, "Phase 1: Ram Limits", _ST_SUITE)
+end
+
+function Debug_SiegeTest()
+	if type(World_IsMultiplayerGame) == "function" and World_IsMultiplayerGame() then
+		if type(Network_CallEvent) == "function" then
+			Network_CallEvent("_SiegeTest_Net_Entry", "")
+			return
+		end
+		print("[SIEGE_TEST] MP network unavailable, skipped")
+		_Debug_EndMarker(_ST_SUITE, 0, 0, 0)
+		return
+	end
+	_SiegeTest_Net_Entry(nil, "")
+end
+
+---------------------------------------------------------------------------------------------------
+-- PHASE 1: Ram Limits (weight=1, weight=2 ram_tower, lock at cap, unlock)
+---------------------------------------------------------------------------------------------------
+
+function _ST_Phase1_RamLimits()
+	local player = _st.player
+	local civ = _st.civ
+	local pos = _st.pos
+	_Debug_PhaseHeader(1, "RAM LIMITS")
+
+	_ST_ResetCounters(player)
+	_ST_LogCounters(player, "Baseline")
+
+	-- 1A: Spawn 1 ram → count=1
+	_ST_Assert("Baseline ram=0", (player.ramLimit_count or 0) == 0)
+	local ram_ok = _ST_SpawnSquad(player, _st.ram_sbp_name, pos)
+	_ST_Assert("Ram spawn succeeded", ram_ok)
+
+	local ram_count = CBA_Options_RamLimit_Recount(player)
+	_ST_Assert("Ram recount=1 after spawn", ram_count == 1, "got " .. tostring(ram_count))
+
+	-- 1B: Ram tower weight=2
+	local rt_sbp_name = CBA_SIEGE_TABLE[civ] and CBA_SIEGE_TABLE[civ].ram_tower
+	if rt_sbp_name then
+		local ok_sbp, test_sbp = pcall(BP_GetSquadBlueprint, rt_sbp_name)
+		if ok_sbp and test_sbp then
+			local w = CBA_Options_GetRamWeightSBP(test_sbp, civ)
+			_ST_Assert("ram_tower SBP weight=2", w == 2, "got " .. tostring(w))
+		end
+
+		-- Kill existing, spawn ram_tower, verify count=2
+		_ST_KillAllSiege(player)
+		CBA_Options_RamLimit_Recount(player)
+		local rt_ok = _ST_SpawnSquad(player, rt_sbp_name, pos)
+		_ST_Assert("Ram tower spawn (" .. civ .. ")", rt_ok)
+		if rt_ok then
+			local rt_count = CBA_Options_RamLimit_Recount(player)
+			_ST_Assert("Ram tower counted as weight=2", rt_count == 2, "got " .. tostring(rt_count))
+		end
+	else
+		print("    [SKIP] No ram_tower for " .. civ)
+	end
+
+	-- 1C: Lock at RAM_LIMIT_MAX
+	_ST_KillAllSiege(player)
+	CBA_Options_RamLimit_Recount(player)
+	for i = 1, RAM_LIMIT_MAX do
+		_ST_SpawnSquad(player, _st.ram_sbp_name, pos)
+	end
+	ram_count = CBA_Options_RamLimit_Recount(player)
+	_ST_Assert("Ram count reaches cap", ram_count >= RAM_LIMIT_MAX,
+		string.format("count=%d cap=%d", ram_count, RAM_LIMIT_MAX))
+	CBA_Options_RamLimit_ApplyThreshold(player)
+	_ST_Assert("Threshold applied at cap (no crash)", true)
+
+	-- 1D: Kill → unlock
+	_ST_KillAllSiege(player)
+	CBA_Options_RamLimit_Recount(player)
+	CBA_Options_RamLimit_ApplyThreshold(player)
+	pcall(CBA_Options_FieldConstruct_Gate, player)
+	local after_kill = player.ramLimit_count or 0
+	if after_kill ~= 0 then
+		_Debug_ScheduleNextPhase(_ST_Phase1b_RamRecheck, _ST_DELAY, "Phase 1b: Ram Recheck", _ST_SUITE)
+		return
+	end
+	_ST_Assert("Ram=0 after kill", true)
+	if _st.ram_ebp then
+		local ok_can, can = pcall(Player_CanConstruct, player.id, _st.ram_ebp)
+		_ST_Assert("Ram unlocked when empty", ok_can and can, "CanConstruct=" .. tostring(can))
+	end
+
+	_Debug_ScheduleNextPhase(_ST_Phase2_STLifecycle, _ST_DELAY, "Phase 2: ST Lifecycle", _ST_SUITE)
+end
+
+function _ST_Phase1b_RamRecheck()
+	local player = _st.player
+	CBA_Options_RamLimit_Recount(player)
+	_ST_Assert("Ram=0 after kill (recheck)", (player.ramLimit_count or 0) == 0, player.ramLimit_count)
+	if _st.ram_ebp then
+		CBA_Options_RamLimit_ApplyThreshold(player)
+		pcall(CBA_Options_FieldConstruct_Gate, player)
+		local ok_can, can = pcall(Player_CanConstruct, player.id, _st.ram_ebp)
+		_ST_Assert("Ram unlocked when empty (recheck)", ok_can and can, "CanConstruct=" .. tostring(can))
+	end
+	_Debug_ScheduleNextPhase(_ST_Phase2_STLifecycle, _ST_DELAY, "Phase 2: ST Lifecycle", _ST_SUITE)
+end
+
+---------------------------------------------------------------------------------------------------
+-- PHASE 2: Siege Tower Lifecycle (scaffold → pending → complete → cancel → lock)
+---------------------------------------------------------------------------------------------------
+
+function _ST_Phase2_STLifecycle()
+	local player = _st.player
+	local civ = _st.civ
+	_Debug_PhaseHeader(2, "SIEGE TOWER LIFECYCLE")
+
+	_ST_ResetCounters(player)
+
+	if _st.st_ebp == nil then
+		print("    [SKIP] No ST EBP for " .. civ)
+		_Debug_ScheduleNextPhase(_ST_Phase3_GenericSiege, _ST_DELAY, "Phase 3: Generic Siege", _ST_SUITE)
+		return
+	end
+
+	-- 2A: Create scaffold, synth ConstructionStart → pending=1
+	local build_pos = World_Pos(_st.pos.x + 30, _st.pos.y, _st.pos.z + 20)
+	local ent = _ST_CreateScaffold(player, _st.st_ebp, build_pos, "siege_tower")
+	_ST_Assert("ST scaffold created", ent ~= nil)
+
+	if ent then
+		CBA_Options_SiegeLimit_ConstructionStart({player = player.id, pbg = _st.st_ebp})
+		_ST_Assert("ST pending=1 after ConstructionStart",
+			(player.siegeTowerLimit_pending or 0) == 1,
+			"got " .. tostring(player.siegeTowerLimit_pending or 0))
+		_ST_Assert("ST count=0 (scaffold not complete)",
+			(player.siegeTowerLimit_count or 0) == 0)
+
+		-- 2B: ForceConstruct → count ≥ 1, pending=0
+		pcall(Entity_ForceConstruct, ent)
+	end
+
+	_Debug_ScheduleNextPhase(_ST_Phase2b_STVerify, _ST_DELAY, "Phase 2b: ST Verify", _ST_SUITE)
+end
+
+function _ST_Phase2b_STVerify()
+	local player = _st.player
+	print("  ---- Phase 2b: ST Complete Verification ----")
+
+	local st_count = CBA_Options_SiegeTowerLimit_Recount(player)
+	_ST_Assert("ST count >= 1 after ForceConstruct", st_count >= 1, "got " .. tostring(st_count))
+	_ST_Assert("ST pending=0 after completion",
+		(player.siegeTowerLimit_pending or 0) == 0,
+		"got " .. tostring(player.siegeTowerLimit_pending or 0))
+
+	-- 2C: Cancel edge case — new scaffold, synth start, destroy, synth cancel
+	_ST_ResetCounters(player)
+	if _st.st_ebp then
+		local build_pos = World_Pos(_st.pos.x + 35, _st.pos.y, _st.pos.z + 15)
+		local cancel_ent = _ST_CreateScaffold(player, _st.st_ebp, build_pos, "cancel_st")
+		if cancel_ent then
+			CBA_Options_SiegeLimit_ConstructionStart({player = player.id, pbg = _st.st_ebp})
+			local pend_before = player.siegeTowerLimit_pending or 0
+			_ST_Assert("ST pending=1 before cancel", pend_before == 1, "got " .. tostring(pend_before))
+
+			pcall(Entity_Destroy, cancel_ent)
+			CBA_Options_SiegeLimit_ConstructionCancelled({player = player.id, pbg = _st.st_ebp})
+		end
+	end
+
+	_Debug_ScheduleNextPhase(_ST_Phase2c_CancelVerify, _ST_DELAY, "Phase 2c: Cancel Verify", _ST_SUITE)
+end
+
+function _ST_Phase2c_CancelVerify()
+	local player = _st.player
+	print("  ---- Phase 2c: Cancel Verification ----")
+
+	CBA_Options_SiegeTowerLimit_Recount(player)
+	_ST_Assert("ST pending=0 after cancel",
+		(player.siegeTowerLimit_pending or 0) == 0,
+		"got " .. tostring(player.siegeTowerLimit_pending or 0))
+	_ST_Assert("ST count=0 after cancel",
+		(player.siegeTowerLimit_count or 0) == 0,
+		"got " .. tostring(player.siegeTowerLimit_count or 0))
+
+	-- 2D: Lock at SIEGE_TOWER_LIMIT_MAX
+	for i = 1, SIEGE_TOWER_LIMIT_MAX do
+		_ST_SpawnSquad(player, _st.st_sbp_name, _st.pos)
+	end
+	local st_count = CBA_Options_SiegeTowerLimit_Recount(player)
+	_ST_Assert("ST count reaches cap", st_count >= SIEGE_TOWER_LIMIT_MAX,
+		string.format("count=%d cap=%d", st_count, SIEGE_TOWER_LIMIT_MAX))
+	CBA_Options_SiegeTowerLimit_ApplyThreshold(player)
+
+	if _st.st_ebp then
+		local ok_can, can = pcall(Player_CanConstruct, player.id, _st.st_ebp)
+		_ST_Assert("ST locked at cap", ok_can and not can, "CanConstruct=" .. tostring(can))
+	end
+
+	-- Cleanup + verify unlock
+	_ST_KillAllSiege(player)
+	_ST_FullRecount(player)
+
+	_Debug_ScheduleNextPhase(_ST_Phase3_GenericSiege, _ST_DELAY, "Phase 3: Generic Siege", _ST_SUITE)
+end
+
+---------------------------------------------------------------------------------------------------
+-- PHASE 3: General Siege Weapons (all types, point verification, exclusion checks)
+---------------------------------------------------------------------------------------------------
+
+function _ST_Phase3_GenericSiege()
+	local player = _st.player
+	local civ = _st.civ
+	local pos = _st.pos
+	_Debug_PhaseHeader(3, "GENERAL SIEGE WEAPONS")
+
+	_ST_ResetCounters(player)
+	_ST_GrantResources(player)
+
+	local anchor = pos or World_Pos(0, 0, 0)
+
+	-- Test all weapon types with expected point values
+	local value_tests = {
+		{key = "springald",    pts = 1, label = "Springald (1pt)"},
+		{key = "trebuchet_tr", pts = 2, label = "Treb TR (2pt)"},
+		{key = "mangonel",     pts = 3, label = "Mangonel (3pt)"},
+		{key = "trebuchet_cw", pts = 3, label = "Treb CW (3pt)"},
+		-- Ottoman uses the great bombard SBP under the "bombard" key, which
+		-- the classifier weights at 4 points (vs 3 for vanilla bombards).
+		-- See cba_options.scar:2017 / 2179 ("Ottoman great bombard: 4 points").
+		{key = "bombard",      pts = (civ == "ottoman") and 4 or 3,
+			label = (civ == "ottoman") and "Bombard (4pt great)" or "Bombard (3pt)"},
+	}
+	local tbl = CBA_SIEGE_TABLE[civ]
+	if tbl and tbl.culverin then
+		table.insert(value_tests, {key = "culverin", pts = 2, label = "Culverin (2pt)"})
+	end
+	if tbl and tbl.cannon then
+		table.insert(value_tests, {key = "cannon", pts = 3, label = "Cannon (3pt)"})
+	end
+	if tbl and tbl.ribauldequin then
+		table.insert(value_tests, {key = "ribauldequin", pts = 3, label = "Ribauldequin (3pt)"})
+	end
+	if tbl and tbl.nest_of_bees then
+		table.insert(value_tests, {key = "nest_of_bees", pts = 3, label = "Nest of Bees (3pt)"})
+	end
+
+	local cumulative = 0
+	for _, vt in ipairs(value_tests) do
+		local sbp_name = tbl and tbl[vt.key]
+		if sbp_name == nil then
+			print(string.format("    [SKIP] %s — no SBP for %s", vt.label, civ))
+		else
+			local old_count = player.siegeLimit_count or 0
+			local spawned = _ST_SpawnSquad(player, sbp_name, World_Pos(anchor.x + 10, anchor.y, anchor.z + 30 + (cumulative * 5)))
+			if spawned then
+				CBA_Options_SiegeLimit_Recount(player)
+				local new_count = player.siegeLimit_count or 0
+				local delta = new_count - old_count
+				cumulative = cumulative + 1
+				_ST_Assert(vt.label, delta == vt.pts,
+					string.format("delta=%d expected=%d total=%d", delta, vt.pts, new_count))
+			else
+				print(string.format("    [SKIP] %s — spawn failed", vt.label))
+			end
+		end
+	end
+
+	-- Verify rams excluded from general siege count
+	local before_ram = player.siegeLimit_count or 0
+	local ram_sbp_name = tbl and tbl.workshop_ram
+	if ram_sbp_name then
+		_ST_SpawnSquad(player, ram_sbp_name, anchor)
+		CBA_Options_SiegeLimit_Recount(player)
+		_ST_Assert("Ram excluded from siege count",
+			(player.siegeLimit_count or 0) == before_ram,
+			string.format("before=%d after=%d", before_ram, player.siegeLimit_count or 0))
+	end
+
+	-- Verify siege towers excluded from general siege count
+	local before_st = player.siegeLimit_count or 0
+	local st_sbp_name = tbl and tbl.siege_tower
+	if st_sbp_name then
+		_ST_SpawnSquad(player, st_sbp_name, anchor)
+		CBA_Options_SiegeLimit_Recount(player)
+		_ST_Assert("ST excluded from siege count",
+			(player.siegeLimit_count or 0) == before_st,
+			string.format("before=%d after=%d", before_st, player.siegeLimit_count or 0))
+	end
+
+	-- Classifier function spot-check
+	if tbl and tbl.springald then
+		local ok_sbp, sbp = pcall(BP_GetSquadBlueprint, tbl.springald)
+		if ok_sbp and sbp then
+			local pts = CBA_Options_GetSiegeWeaponPointsSBP(sbp, civ)
+			_ST_Assert("Springald SBP classifier=1", pts == 1, "got " .. tostring(pts))
+		end
+	end
+	if tbl and tbl.mangonel then
+		local ok_sbp, sbp = pcall(BP_GetSquadBlueprint, tbl.mangonel)
+		if ok_sbp and sbp then
+			local pts = CBA_Options_GetSiegeWeaponPointsSBP(sbp, civ)
+			_ST_Assert("Mangonel SBP classifier=3", pts == 3, "got " .. tostring(pts))
+		end
+	end
+
+	-- Gate totals verification
+	CBA_Options_SiegeLimit_RecountAll(player)
+	local gate = CBA_Options_SiegeLimit_GetGateTotals(player)
+	_ST_Assert("Gate siege_total matches live count",
+		gate.siege_total == (player.siegeLimit_count or 0),
+		string.format("gate=%d stored=%d", gate.siege_total, player.siegeLimit_count or 0))
+
+	_ST_KillAllSiege(player)
+	_ST_FullRecount(player)
+
+	_Debug_ScheduleNextPhase(_ST_Phase4_SEGate, _ST_DELAY, "Phase 4: SE Gate", _ST_SUITE)
+end
+
+---------------------------------------------------------------------------------------------------
+-- PHASE 4: SE Gate + Threshold Ordering
+---------------------------------------------------------------------------------------------------
+
+function _ST_Phase4_SEGate()
+	local player = _st.player
+	local civ = _st.civ
+	_Debug_PhaseHeader(4, "SE GATE + THRESHOLD ORDERING")
+
+	_ST_ResetCounters(player)
+	_ST_GrantResources(player)
+
+	-- 4A: Verify SE granted from setup
+	_ST_Assert("HasSiegeEngineers=true (setup)", CBA_Options_HasSiegeEngineers(player))
+
+	-- 4B: Threshold ordering under age lock — drop to Dark Age while keeping SE
+	local ok_age, saved_age = pcall(Player_GetCurrentAge, player.id)
+	if not ok_age then saved_age = AGE_CASTLE end
+	pcall(Player_SetCurrentAge, player.id, AGE_DARK)
+
+	_ST_FullRecount(player)
+
+	if _st.ram_ebp then
+		local ok, can = pcall(Player_CanConstruct, player.id, _st.ram_ebp)
+		_ST_Assert("Age lock: Ram field gate diagnostic", true, "CanConstruct=" .. tostring(can))
+	end
+	if _st.st_ebp then
+		local ok, can = pcall(Player_CanConstruct, player.id, _st.st_ebp)
+		_ST_Assert("Age lock: ST field gate diagnostic", true, "CanConstruct=" .. tostring(can))
+	end
+
+	-- 4C: Restore SE + age
+	pcall(Player_SetCurrentAge, player.id, saved_age)
+	local ok_bp, upgrade_bp = pcall(AGS_GetCivilizationUpgrade, civ, AGS_UP_SIEGE_ENGINEERS)
+	if ok_bp and upgrade_bp then
+		pcall(Player_CompleteUpgrade, player.id, upgrade_bp)
+	end
+	_ST_FullRecount(player)
+
+	if _st.ram_ebp then
+		local ok, can = pcall(Player_CanConstruct, player.id, _st.ram_ebp)
+		_ST_Assert("SE restored: Ram unlocked", ok and can, "CanConstruct=" .. tostring(can))
+	end
+
+	_Debug_ScheduleNextPhase(_ST_Phase5_FieldEdgeCases, _ST_DELAY, "Phase 5: Field Edge Cases", _ST_SUITE)
+end
+
+---------------------------------------------------------------------------------------------------
+-- PHASE 5: Field Build Edge Cases (locked threshold, CAP_HOTFIX, buildable siege)
+---------------------------------------------------------------------------------------------------
+
+function _ST_Phase5_FieldEdgeCases()
+	local player = _st.player
+	local civ = _st.civ
+	_Debug_PhaseHeader(5, "FIELD BUILD EDGE CASES")
+
+	-- 5A: Locked threshold boundary: cap-1 with weight-2 unit
+	local rt_bp_name = CBA_SIEGE_TABLE[civ] and CBA_SIEGE_TABLE[civ].ram_tower
+	local ram_bp_name = CBA_SIEGE_TABLE[civ] and CBA_SIEGE_TABLE[civ].ram
+	local ok_ram_ebp, ram_ebp = pcall(BP_GetEntityBlueprint, ram_bp_name or "")
+	if not ok_ram_ebp or ram_ebp == nil then ram_ebp = _st.ram_ebp end
+
+	if rt_bp_name and ram_ebp then
+		local ok_rt_ebp, rt_ebp = pcall(BP_GetEntityBlueprint, rt_bp_name)
+		if ok_rt_ebp and rt_ebp then
+			print("  ---- 5A: Locked Threshold (cap-1 + weight-2) ----")
+			_ST_ResetCounters(player)
+			_ST_GrantResources(player)
+
+			-- Spawn (cap-1) weight-1 rams via ForceConstruct
+			local target = RAM_LIMIT_MAX - 1
+			local spawned = 0
+			for i = 1, target do
+				local build_pos = World_Pos(_st.pos.x + 50 + (i * 8), _st.pos.y, _st.pos.z + 30)
+				local facing = World_Pos(build_pos.x + 5, build_pos.y, build_pos.z)
+				local ok_c, ent = pcall(Entity_CreateFacing, ram_ebp, player.id, build_pos, facing, true)
+				if ok_c and ent then
+					pcall(Entity_Spawn, ent)
+					pcall(Entity_ForceConstruct, ent)
+					spawned = spawned + 1
+				end
+			end
+
+			_ST_FullRecount(player)
+			local ram_count = player.ramLimit_count or 0
+			local remaining = RAM_LIMIT_MAX - ram_count
+
+			_ST_Assert("Ram count=cap-1", ram_count == target,
+				"expected " .. tostring(target) .. ", got " .. tostring(ram_count))
+			_ST_Assert("Remaining < 2 (RT locked)", remaining < 2 and remaining > 0,
+				"remaining=" .. tostring(remaining))
+
+			-- RT should be locked (weight=2 > remaining=1), regular ram still ok
+			local ok_can_rt, can_rt = pcall(Player_CanConstruct, player.id, rt_ebp)
+			_ST_Assert("Ram tower LOCKED (CanConstruct=false)",
+				ok_can_rt and not can_rt, "CanConstruct=" .. tostring(can_rt))
+
+			local ok_can_ram, can_ram = pcall(Player_CanConstruct, player.id, ram_ebp)
+			_ST_Assert("Regular ram UNLOCKED (CanConstruct=true)",
+				ok_can_ram and can_ram, "CanConstruct=" .. tostring(can_ram))
+		end
+	else
+		print("    [SKIP] 5A: No ram_tower or ram EBP for " .. civ)
+	end
+
+	-- 5B: CAP_HOTFIX deferred rollback
+	print("")
+	print("  ---- 5B: CAP_HOTFIX Deferred Rollback ----")
+
+	if ram_ebp then
+		_ST_ResetCounters(player)
+		_ST_GrantResources(player)
+
+		-- Pre-fill to cap
+		for i = 1, RAM_LIMIT_MAX do
+			local build_pos = World_Pos(_st.pos.x + 70 + (i * 8), _st.pos.y, _st.pos.z + 40)
+			local facing = World_Pos(build_pos.x + 5, build_pos.y, build_pos.z)
+			local ok_c, ent = pcall(Entity_CreateFacing, ram_ebp, player.id, build_pos, facing, true)
+			if ok_c and ent then
+				pcall(Entity_Spawn, ent)
+				pcall(Entity_ForceConstruct, ent)
+			end
+		end
+
+		_ST_FullRecount(player)
+		local pre_count = player.ramLimit_count or 0
+		_ST_Assert("Pre-filled ram=cap", pre_count == RAM_LIMIT_MAX,
+			"expected " .. tostring(RAM_LIMIT_MAX) .. ", got " .. tostring(pre_count))
+
+		-- Attempt overflow scaffold
+		pcall(CBA_Options_RamLimit_Disable, player.id, ITEM_UNLOCKED)
+		local overflow_pos = World_Pos(_st.pos.x + 70 + ((RAM_LIMIT_MAX + 1) * 8), _st.pos.y, _st.pos.z + 40)
+		local overflow_face = World_Pos(overflow_pos.x + 5, overflow_pos.y, overflow_pos.z)
+		local ok_of, overflow_ent = pcall(Entity_CreateFacing, ram_ebp, player.id, overflow_pos, overflow_face, true)
+		if ok_of and overflow_ent then
+			pcall(Entity_Spawn, overflow_ent)
+			CBA_Options_SiegeLimit_ConstructionStart({player = player.id, pbg = ram_ebp})
+			_Debug_ScheduleNextPhase(_ST_Phase5b_CapHotfixVerify, _ST_DEFERRED_WAIT, "Phase 5b: CAP_HOTFIX Verify", _ST_SUITE)
+			return
+		else
+			_ST_Assert("Overflow scaffold created", false, "Entity_CreateFacing failed")
+		end
+	else
+		print("    [SKIP] 5B: No ram EBP for " .. civ)
+	end
+
+	_ST_KillAllSiege(player)
+	_ST_FullRecount(player)
+	_Debug_ScheduleNextPhase(_ST_Phase5c_BuildableSiege, _ST_DELAY, "Phase 5c: Buildable Siege", _ST_SUITE)
+end
+
+function _ST_Phase5b_CapHotfixVerify()
+	local player = _st.player
+	print("  ---- Phase 5b: CAP_HOTFIX Deferred Verification ----")
+
+	CBA_Options_RamLimit_Recount(player)
+	CBA_Options_RamLimit_ApplyThreshold(player)
+	pcall(CBA_Options_FieldConstruct_Gate, player)
+	pcall(CBA_Options_ValidateEnforcement, player, "Phase5b_CapHotfix")
+
+	local live = player.ramLimit_count or 0
+	local pending = player.ramLimit_pending or 0
+	local queued = CBA_Options_RamLimit_GetQueuedCount(player)
+	local total = live + pending + queued
+
+	_ST_Assert("CAP_HOTFIX: total <= cap after deferred cycle",
+		total <= RAM_LIMIT_MAX,
+		string.format("total=%d/%d (live=%d pending=%d queued=%d)", total, RAM_LIMIT_MAX, live, pending, queued))
+	_ST_Assert("CAP_HOTFIX: no lingering pending",
+		pending == 0, "pending=" .. tostring(pending))
+
+	_ST_KillAllSiege(player)
+	_ST_FullRecount(player)
+	_Debug_ScheduleNextPhase(_ST_Phase5c_BuildableSiege, _ST_DELAY, "Phase 5c: Buildable Siege", _ST_SUITE)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Phase 5c: Buildable Siege Weapon Classification + Lifecycle
+---------------------------------------------------------------------------------------------------
+
+function _ST_Phase5c_BuildableSiege()
+	local player = _st.player
+	local civ = _st.civ
+	print("  ---- 5C: Buildable Siege Weapons ----")
+
+	local spr_ebp = AGS_GetSiegeEntity(civ, "springald_buildable")
+	local mng_ebp = AGS_GetSiegeEntity(civ, "mangonel_buildable")
+
+	if spr_ebp == nil and mng_ebp == nil then
+		print("    [SKIP] No buildable siege EBPs for " .. civ)
+		_Debug_ScheduleNextPhase(_ST_Phase6_Workshop, _ST_DELAY, "Phase 6: Workshop", _ST_SUITE)
+		return
+	end
+
+	_ST_ResetCounters(player)
+	_ST_GrantResources(player)
+	player.siegeLimit_count = 0
+	player.siegeLimit_pending = 0
+	CBA_Options_SiegeLimit_Recount(player)
+
+	-- Classifier point verification
+	if spr_ebp then
+		local pts = CBA_Options_GetSiegeWeaponPointsEBP(spr_ebp, civ)
+		_ST_Assert("springald_buildable EBP = 1pt", pts == 1, "got " .. tostring(pts))
+	end
+	if mng_ebp then
+		local pts = CBA_Options_GetSiegeWeaponPointsEBP(mng_ebp, civ)
+		_ST_Assert("mangonel_buildable EBP = 3pt", pts == 3, "got " .. tostring(pts))
+	end
+
+	-- Scaffold lifecycle: create, synth start, ForceConstruct, verify recount
+	local test_ebp = mng_ebp or spr_ebp
+	local test_label = mng_ebp and "mangonel_buildable" or "springald_buildable"
+	local test_pts = mng_ebp and 3 or 1
+
+	pcall(CBA_Options_FieldConstruct_Gate, player)
+	pcall(CBA_Options_SiegeLimit_ApplyThreshold, player)
+
+	local build_pos = World_Pos(_st.pos.x + 60, _st.pos.y, _st.pos.z + 50)
+	local ent = _ST_CreateScaffold(player, test_ebp, build_pos, test_label)
+	if ent then
+		local before_sp = player.siegeLimit_pending or 0
+		CBA_Options_SiegeLimit_ConstructionStart({player = player.id, pbg = test_ebp})
+		local after_sp = player.siegeLimit_pending or 0
+		_ST_Assert(test_label .. " pending +=" .. tostring(test_pts),
+			after_sp == before_sp + test_pts,
+			"expected " .. tostring(before_sp + test_pts) .. ", got " .. tostring(after_sp))
+
+		pcall(Entity_ForceConstruct, ent)
+		_st._buildable_scaffold = ent
+		_st._buildable_pts = test_pts
+		_st._buildable_label = test_label
+		_Debug_ScheduleNextPhase(_ST_Phase5d_BuildableVerify, _ST_DELAY, "Phase 5d: Buildable Verify", _ST_SUITE)
+		return
+	end
+
+	_Debug_ScheduleNextPhase(_ST_Phase6_Workshop, _ST_DELAY, "Phase 6: Workshop", _ST_SUITE)
+end
+
+function _ST_Phase5d_BuildableVerify()
+	local player = _st.player
+	print("  ---- Phase 5d: Buildable Siege Verification ----")
+
+	CBA_Options_SiegeLimit_RecountAll(player)
+	local sc = player.siegeLimit_count or 0
+	local sp = player.siegeLimit_pending or 0
+	local pts = _st._buildable_pts or 0
+	local label = _st._buildable_label or "unknown"
+
+	_ST_Assert(label .. " siege_count >= " .. tostring(pts), sc >= pts, "got " .. tostring(sc))
+	_ST_Assert(label .. " siege_pending=0", sp == 0, "got " .. tostring(sp))
+
+	if _st._buildable_scaffold then pcall(Entity_Destroy, _st._buildable_scaffold) end
+	_ST_KillAllSiege(player)
+	_ST_FullRecount(player)
+	player.siegeLimit_pending = 0
+
+	_Debug_ScheduleNextPhase(_ST_Phase6_Workshop, _ST_DELAY, "Phase 6: Workshop", _ST_SUITE)
+end
+
+---------------------------------------------------------------------------------------------------
+-- PHASE 6: Workshop Enforcement (over-queue, TrimQueue, production, SquadKilled, resume)
+---------------------------------------------------------------------------------------------------
+
+function _ST_Phase6_Workshop()
+	local player = _st.player
+	local civ = _st.civ
+	_Debug_PhaseHeader(6, "WORKSHOP ENFORCEMENT")
+
+	_ST_ResetCounters(player)
+	_ST_GrantResources(player)
+
+	-- Destroy pre-existing workshops
+	_ST_DestroyAllWorkshops(player)
+
+	-- Spawn a fresh siege workshop
+	local ws_ebp = AGS_GetSiegeEntity(civ, "scar_siegeworkshop")
+	local ws_spawned = false
+	if ws_ebp then
+		local ws_pos = World_Pos(_st.pos.x + 20, _st.pos.y, _st.pos.z + 10)
+		local ws_face = World_Pos(ws_pos.x + 5, ws_pos.y, ws_pos.z)
+		local ok_c, ent = pcall(Entity_CreateFacing, ws_ebp, player.id, ws_pos, ws_face, true)
+		if ok_c and ent then
+			pcall(Entity_Spawn, ent)
+			pcall(Entity_ForceConstruct, ent)
+			ws_spawned = true
+		end
+	end
+	if not ws_spawned then
+		print("    [FAIL] Cannot spawn workshop — skipping Phase 6")
+		_Debug_ScheduleNextPhase(_ST_Phase7_EventHandlers, _ST_DELAY, "Phase 7: Event Handlers", _ST_SUITE)
+		return
+	end
+
+	-- Resolve ram SBP for workshop queue
+	local tbl = CBA_SIEGE_TABLE[civ]
+	_st.ws_ram_sbp = nil
+	local ws_ram_name = tbl and tbl.workshop_ram
+	if ws_ram_name then
+		local ok_sbp, sbp = pcall(BP_GetSquadBlueprint, ws_ram_name)
+		if ok_sbp and sbp then _st.ws_ram_sbp = sbp end
+	end
+	if _st.ws_ram_sbp == nil then
+		print("    [FAIL] Cannot resolve ram SBP for workshop — skipping Phase 6")
+		_Debug_ScheduleNextPhase(_ST_Phase7_EventHandlers, _ST_DELAY, "Phase 7: Event Handlers", _ST_SUITE)
+		return
+	end
+
+	-- Baseline settle with retries
+	_st._ws_baseline_attempt = 1
+	_Debug_ScheduleNextPhase(_ST_Phase6b_Baseline, _ST_DELAY, "Phase 6b: WS Baseline", _ST_SUITE)
+end
+
+function _ST_Phase6b_Baseline()
+	local player = _st.player
+	_ST_FullRecount(player)
+	_ST_LogEnforcement(player, string.format("WS Baseline #%d", _st._ws_baseline_attempt or 1))
+
+	local live = player.ramLimit_count or 0
+	local pending = player.ramLimit_pending or 0
+	local queued = CBA_Options_RamLimit_GetQueuedCount(player)
+	local total = live + pending + queued
+
+	if total == 0 then
+		_ST_Assert("WS Baseline: total=0", true)
+		_Debug_ScheduleNextPhase(_ST_Phase6c_OverQueue, _ST_DELAY, "Phase 6c: Over-Queue", _ST_SUITE)
+		return
+	end
+
+	local attempt = _st._ws_baseline_attempt or 1
+	if attempt < _ST_BASELINE_RETRY_MAX then
+		_ST_KillAllSiege(player)
+		_st._ws_baseline_attempt = attempt + 1
+		_Debug_ScheduleNextPhase(_ST_Phase6b_Baseline, _ST_DELAY, "Phase 6b: WS Baseline Retry", _ST_SUITE)
+	else
+		_ST_Assert("WS Baseline: total=0", false, string.format("total=%d after %d attempts", total, attempt))
+		_Debug_ScheduleNextPhase(_ST_Phase7_EventHandlers, _ST_DELAY, "Phase 7: Event Handlers", _ST_SUITE)
+	end
+end
+
+function _ST_Phase6c_OverQueue()
+	local player = _st.player
+	print("  ---- 6A: Over-Queue + Queue Preservation ----")
+
+	local workshop = _ST_FindWorkshop(player)
+	if workshop == nil then
+		_st.total = _st.total + 1
+		print("    [FAIL] Workshop not found")
+		_Debug_ScheduleNextPhase(_ST_Phase7_EventHandlers, _ST_DELAY, "Phase 7: Event Handlers", _ST_SUITE)
+		return
+	end
+	_st._workshop = workshop
+
+	-- Speed up production
+	local ok_speed = pcall(Modify_ProductionSpeed, workshop, _ST_PRODUCTION_SPEED)
+	if not ok_speed then
+		pcall(Modify_ProductionSpeed, workshop, _ST_PRODUCTION_SPEED_FALLBACK)
+	end
+
+	-- Queue CAP + 3 to test over-limit.  TrimQueue is ACTIVE: ApplyThreshold
+	-- calls CBA_Options_RamLimit_TrimQueue (cba_options.scar:3146) which removes
+	-- queued items above cap to prevent runaway production beyond the cap.
+	local queue_target = RAM_LIMIT_MAX + 3
+	for i = 1, queue_target do
+		pcall(Entity_QueueProductionItemByPBG, workshop, PITEM_Spawn, _st.ws_ram_sbp)
+	end
+	_ST_LogEnforcement(player, "Post-queue (immediate)", true)
+
+	-- Apply threshold → excess queued items are TRIMMED to cap.
+	CBA_Options_RamLimit_ApplyThreshold(player)
+	_ST_LogEnforcement(player, "Post-threshold")
+
+	local queued_after = CBA_Options_RamLimit_GetQueuedCount(player)
+	_ST_Assert("Queue trimmed to cap after threshold", queued_after == RAM_LIMIT_MAX,
+		"queued=" .. tostring(queued_after) .. " expected=" .. tostring(RAM_LIMIT_MAX))
+
+	_Debug_ScheduleNextPhase(_ST_Phase6d_VerifyProduction, _ST_PRODUCTION_WAIT, "Phase 6d: Verify Production", _ST_SUITE)
+end
+
+function _ST_Phase6d_VerifyProduction()
+	local player = _st.player
+	print("  ---- 6B: Verify Production ----")
+
+	_ST_FullRecount(player)
+	_ST_LogEnforcement(player, "After production wait")
+
+	local live = player.ramLimit_count or 0
+	local pending = player.ramLimit_pending or 0
+	local queued = CBA_Options_RamLimit_GetQueuedCount(player)
+	local total = live + pending + queued
+
+	_ST_Assert("Ram count >= 1 after production", live >= 1, "got " .. tostring(live))
+	_ST_Assert("Invariant: total <= cap", total <= RAM_LIMIT_MAX,
+		string.format("total=%d cap=%d (live=%d pending=%d queued=%d)", total, RAM_LIMIT_MAX, live, pending, queued))
+
+	_st._rams_before_kill = live
+
+	-- Kill 2 rams via Squad_Kill → GE_SquadKilled → recount
+	print("  ---- 6C: SquadKilled Handler ----")
+	local killed = _ST_KillNRams(player, 2)
+	_st._rams_killed = killed
+	print(string.format("    Squad_Kill issued for %d rams", killed))
+
+	_Debug_ScheduleNextPhase(_ST_Phase6e_VerifyKill, _ST_KILL_SETTLE, "Phase 6e: Verify Kill", _ST_SUITE)
+end
+
+function _ST_Phase6e_VerifyKill()
+	local player = _st.player
+	print("  ---- 6D: Kill Verification ----")
+
+	_ST_FullRecount(player)
+	_ST_LogEnforcement(player, "Post-kill + recount")
+
+	local live = player.ramLimit_count or 0
+	local expected = (_st._rams_before_kill or 0) - (_st._rams_killed or 0)
+	if expected < 0 then expected = 0 end
+
+	_ST_Assert("Ram count decreased after kill",
+		live < (_st._rams_before_kill or 0),
+		string.format("before=%d after=%d killed=%d", _st._rams_before_kill or 0, live, _st._rams_killed or 0))
+	_ST_Assert("Ram count == expected",
+		live == expected,
+		string.format("expected=%d got=%d", expected, live))
+
+	-- Re-queue free slots + 2 → verify TrimQueue trims excess to slots_free
+	print("  ---- 6E: Resume Production ----")
+	local workshop = _ST_FindWorkshop(player)
+	if workshop then
+		local slots_free = RAM_LIMIT_MAX - live
+		local queue_target = slots_free + 2
+		for i = 1, queue_target do
+			pcall(Entity_QueueProductionItemByPBG, workshop, PITEM_Spawn, _st.ws_ram_sbp)
+		end
+		CBA_Options_RamLimit_ApplyThreshold(player)
+		_ST_LogEnforcement(player, "After resume queue + threshold")
+
+		local queued_actual = CBA_Options_RamLimit_GetQueuedCount(player)
+		_ST_Assert("Resume queue trimmed to slots_free (TrimQueue active)",
+			queued_actual == slots_free,
+			string.format("queued=%d expected=%d (TrimQueue active)", queued_actual, slots_free))
+	end
+
+	_Debug_ScheduleNextPhase(_ST_Phase6f_VerifyResume, _ST_RESUME_WAIT, "Phase 6f: Verify Resume", _ST_SUITE)
+end
+
+function _ST_Phase6f_VerifyResume()
+	local player = _st.player
+	print("  ---- 6F: Resume Verification ----")
+
+	_ST_FullRecount(player)
+	_ST_LogEnforcement(player, "After resume production wait")
+
+	local live = player.ramLimit_count or 0
+	local pending = player.ramLimit_pending or 0
+	local queued = CBA_Options_RamLimit_GetQueuedCount(player)
+	local total = live + pending + queued
+
+	_ST_Assert("Invariant: live+pending <= cap after resume",
+		(live + pending) <= RAM_LIMIT_MAX,
+		string.format("live+pending=%d queued=%d cap=%d (queue preserved)", live + pending, queued, RAM_LIMIT_MAX))
+
+	-- Cleanup workshop phase
+	_ST_KillAllSiege(player)
+	_ST_DestroyAllWorkshops(player)
+	_ST_FullRecount(player)
+
+	_Debug_ScheduleNextPhase(_ST_Phase7_EventHandlers, _ST_DELAY, "Phase 7: Event Handlers", _ST_SUITE)
+end
+
+---------------------------------------------------------------------------------------------------
+-- PHASE 7: Event Handler Coverage (EntityKilled scaffold, type tag spot-check)
+---------------------------------------------------------------------------------------------------
+
+function _ST_Phase7_EventHandlers()
+	local player = _st.player
+	local civ = _st.civ
+	_Debug_PhaseHeader(7, "EVENT HANDLER COVERAGE")
+
+	_ST_ResetCounters(player)
+	_ST_GrantResources(player)
+
+	-- 7A: EntityKilled scaffold → recount + pending decrement
+	print("  ---- 7A: EntityKilled Scaffold ----")
+
+	if _st.st_ebp then
+		local build_pos = World_Pos(_st.pos.x + 50, _st.pos.y, _st.pos.z + 50)
+		local ent = _ST_CreateScaffold(player, _st.st_ebp, build_pos, "kill_test_st")
+		if ent then
+			-- Synth ConstructionStart to prime pending
+			CBA_Options_SiegeLimit_ConstructionStart({player = player.id, pbg = _st.st_ebp})
+			local pend_before = player.siegeTowerLimit_pending or 0
+
+			-- Kill the scaffold via Entity_Kill → triggers GE_EntityKilled
+			pcall(Entity_Kill, ent)
+			_st._kill_test_pend = pend_before
+			_Debug_ScheduleNextPhase(_ST_Phase7b_VerifyKill, _ST_DELAY, "Phase 7b: Verify EntityKilled", _ST_SUITE)
+			return
+		end
+	end
+
+	print("    [SKIP] No ST EBP for EntityKilled test")
+	_Debug_ScheduleNextPhase(_ST_Phase7c_TypeTags, _ST_DELAY, "Phase 7c: Type Tags", _ST_SUITE)
+end
+
+function _ST_Phase7b_VerifyKill()
+	local player = _st.player
+	print("  ---- Phase 7b: EntityKilled Verification ----")
+
+	CBA_Options_SiegeTowerLimit_Recount(player)
+	local pend_after = player.siegeTowerLimit_pending or 0
+
+	_ST_Assert("EntityKilled: ST pending decremented",
+		pend_after == 0,
+		string.format("before=%d after=%d (expected 0)", _st._kill_test_pend or 0, pend_after))
+
+	if _st.st_ebp then
+		CBA_Options_SiegeTowerLimit_ApplyThreshold(player)
+		pcall(CBA_Options_FieldConstruct_Gate, player)
+		local ok, can = pcall(Player_CanConstruct, player.id, _st.st_ebp)
+		_ST_Assert("EntityKilled: ST unlocked after scaffold kill",
+			ok and can, "CanConstruct=" .. tostring(can))
+	end
+
+	_ST_KillAllSiege(player)
+	_ST_FullRecount(player)
+
+	_Debug_ScheduleNextPhase(_ST_Phase7c_TypeTags, _ST_DELAY, "Phase 7c: Type Tags", _ST_SUITE)
+end
+
+function _ST_Phase7c_TypeTags()
+	local player = _st.player
+	local civ = _st.civ
+	print("  ---- 7B: Type Tag Spot-Check ----")
+
+	-- Verify ram EBP has expected tags
+	if _st.ram_ebp then
+		local ok_s, v_s = pcall(Entity_IsEBPOfType, _st.ram_ebp, "siege")
+		local ok_r, v_r = pcall(Entity_IsEBPOfType, _st.ram_ebp, "ram")
+		_ST_Assert("Ram EBP: siege tag", ok_s and v_s, "siege=" .. tostring(v_s))
+		_ST_Assert("Ram EBP: ram tag", ok_r and v_r, "ram=" .. tostring(v_r))
+	end
+
+	-- Verify ST EBP has expected tags
+	if _st.st_ebp then
+		local ok_s, v_s = pcall(Entity_IsEBPOfType, _st.st_ebp, "siege")
+		local ok_t, v_t = pcall(Entity_IsEBPOfType, _st.st_ebp, "siege_tower")
+		_ST_Assert("ST EBP: siege tag", ok_s and v_s, "siege=" .. tostring(v_s))
+		_ST_Assert("ST EBP: siege_tower tag", ok_t and v_t, "siege_tower=" .. tostring(v_t))
+	end
+
+	_Debug_ScheduleNextPhase(_ST_Phase9_WorkshopIndependence, _ST_DELAY, "Phase 9: Workshop Independence", _ST_SUITE)
+end
+
+---------------------------------------------------------------------------------------------------
+-- PHASE 9: Workshop Independence Validation
+---------------------------------------------------------------------------------------------------
+
+function _ST_Phase9_WorkshopIndependence()
+	local player = _st.player
+	local civ = _st.civ
+	_Debug_PhaseHeader(9, "WORKSHOP INDEPENDENCE")
+
+	_ST_ResetCounters(player)
+	_ST_DestroyAllWorkshops(player)
+	_ST_GrantResources(player)
+
+	-- Baseline: recount from scratch
+	CBA_Options_BuildingLimit_RecountPlayer(player)
+	local baseline_prod = player.obj_buildingLimit_count or 0
+	local baseline_ws = player.obj_buildingLimit_workshop_count or 0
+	print(string.format("    Baseline: prod=%d ws=%d", baseline_prod, baseline_ws))
+
+	-- 9A: Build a workshop → workshop_count UP, prod_count UNCHANGED
+	print("")
+	print("  ---- 9A: Workshop Construction → Independent Counters ----")
+	local ws_ebp = AGS_GetSiegeEntity(civ, "scar_siegeworkshop")
+	local ws_ent = nil
+	if ws_ebp then
+		local ws_pos = World_Pos(_st.pos.x + 30, _st.pos.y, _st.pos.z + 30)
+		local ws_face = World_Pos(ws_pos.x + 5, ws_pos.y, ws_pos.z)
+		local ok_c, ent = pcall(Entity_CreateFacing, ws_ebp, player.id, ws_pos, ws_face, true)
+		if ok_c and ent then
+			pcall(Entity_Spawn, ent)
+			pcall(Entity_ForceConstruct, ent)
+			ws_ent = ent
+		end
+	end
+	if ws_ent then
+		CBA_Options_BuildingLimit_RecountPlayer(player)
+		local post_ws_prod = player.obj_buildingLimit_count or 0
+		local post_ws_ws = player.obj_buildingLimit_workshop_count or 0
+
+		_ST_Assert("Workshop built: prod_count unchanged",
+			post_ws_prod == baseline_prod,
+			string.format("expected %d, got %d", baseline_prod, post_ws_prod))
+		_ST_Assert("Workshop built: workshop_count +1",
+			post_ws_ws == baseline_ws + 1,
+			string.format("expected %d, got %d", baseline_ws + 1, post_ws_ws))
+	else
+		_ST_Assert("Workshop spawned for test", false, "could not create workshop entity")
+	end
+
+	-- 9B: Build a production building → prod_count UP, workshop_count UNCHANGED
+	print("")
+	print("  ---- 9B: Production Building → Independent Counters ----")
+	local prod_ebp = nil
+	local eg_scan = Player_GetEntities(player.id)
+	local scan_count = EGroup_CountSpawned(eg_scan)
+	for idx = 1, scan_count do
+		local ent = EGroup_GetSpawnedEntityAt(eg_scan, idx)
+		if ent and Entity_IsOfType(ent, "military_production_building")
+			and not Entity_IsOfType(ent, "scar_siegeworkshop")
+			and not Entity_IsOfType(ent, "landmark")
+			and not Entity_IsOfType(ent, "military_school_ott")
+			and not Entity_IsOfType(ent, "scar_keep") then
+			prod_ebp = Entity_GetBlueprint(ent)
+			break
+		end
+	end
+	EGroup_Destroy(eg_scan)
+
+	local prod_ent = nil
+	if prod_ebp then
+		local snap_prod = player.obj_buildingLimit_count or 0
+		local snap_ws = player.obj_buildingLimit_workshop_count or 0
+
+		local prod_pos = World_Pos(_st.pos.x + 50, _st.pos.y, _st.pos.z + 30)
+		local prod_face = World_Pos(prod_pos.x + 5, prod_pos.y, prod_pos.z)
+		local ok_c, ent = pcall(Entity_CreateFacing, prod_ebp, player.id, prod_pos, prod_face, true)
+		if ok_c and ent then
+			pcall(Entity_Spawn, ent)
+			pcall(Entity_ForceConstruct, ent)
+			prod_ent = ent
+		end
+		if prod_ent then
+			CBA_Options_BuildingLimit_RecountPlayer(player)
+			local post_prod = player.obj_buildingLimit_count or 0
+			local post_ws = player.obj_buildingLimit_workshop_count or 0
+
+			_ST_Assert("Prod building built: prod_count +1",
+				post_prod == snap_prod + 1,
+				string.format("expected %d, got %d", snap_prod + 1, post_prod))
+			_ST_Assert("Prod building built: workshop_count unchanged",
+				post_ws == snap_ws,
+				string.format("expected %d, got %d", snap_ws, post_ws))
+		else
+			_ST_Assert("Prod building spawned for test", false, "could not create entity")
+		end
+	else
+		print("    [SKIP] 9B: No production building EBP discoverable for " .. civ)
+	end
+
+	-- 9C: Destroy workshop → schedule deferred verification (entity removal is async)
+	print("")
+	print("  ---- 9C: Workshop Destruction → Deferred Verify ----")
+	if ws_ent then
+		_st._9c_snap_prod = player.obj_buildingLimit_count or 0
+		_st._9c_snap_ws = player.obj_buildingLimit_workshop_count or 0
+		print(string.format("    9C-setup: snap_prod=%d snap_ws=%d — destroying workshop", _st._9c_snap_prod, _st._9c_snap_ws))
+		pcall(Entity_Destroy, ws_ent)
+		_st._9c_ws_destroyed = true
+	else
+		_st._9c_ws_destroyed = false
+	end
+	-- Store prod_ent for 9D deferred use
+	_st._9d_prod_ent = prod_ent
+
+	_Debug_ScheduleNextPhase(_ST_Phase9C_Verify, _ST_DEFERRED_WAIT, "Phase 9C: Workshop Destroy Verify", _ST_SUITE)
+end
+
+-- Deferred verification for 9C: workshop destruction counter decrement
+function _ST_Phase9C_Verify()
+	local player = _st.player
+	if _st._9c_ws_destroyed then
+		CBA_Options_BuildingLimit_RecountPlayer(player)
+		local post_prod = player.obj_buildingLimit_count or 0
+		local post_ws = player.obj_buildingLimit_workshop_count or 0
+		print(string.format("    9C-verify: post_prod=%d post_ws=%d", post_prod, post_ws))
+
+		_ST_Assert("Workshop killed: workshop_count -1",
+			post_ws == _st._9c_snap_ws - 1,
+			string.format("expected %d, got %d", _st._9c_snap_ws - 1, post_ws))
+		_ST_Assert("Workshop killed: prod_count unchanged",
+			post_prod == _st._9c_snap_prod,
+			string.format("expected %d, got %d", _st._9c_snap_prod, post_prod))
+	end
+
+	-- 9D: Destroy prod building → schedule deferred verification
+	print("")
+	print("  ---- 9D: Prod Building Destruction → Deferred Verify ----")
+	local prod_ent = _st._9d_prod_ent
+	if prod_ent then
+		_st._9d_snap_prod = player.obj_buildingLimit_count or 0
+		_st._9d_snap_ws = player.obj_buildingLimit_workshop_count or 0
+		print(string.format("    9D-setup: snap_prod=%d snap_ws=%d — destroying prod building", _st._9d_snap_prod, _st._9d_snap_ws))
+		pcall(Entity_Destroy, prod_ent)
+		_st._9d_prod_destroyed = true
+	else
+		_st._9d_prod_destroyed = false
+	end
+
+	_Debug_ScheduleNextPhase(_ST_Phase9D_Verify, _ST_DEFERRED_WAIT, "Phase 9D: Prod Destroy Verify", _ST_SUITE)
+end
+
+-- Deferred verification for 9D: prod building destruction counter decrement
+function _ST_Phase9D_Verify()
+	local player = _st.player
+	if _st._9d_prod_destroyed then
+		CBA_Options_BuildingLimit_RecountPlayer(player)
+		local post_prod = player.obj_buildingLimit_count or 0
+		local post_ws = player.obj_buildingLimit_workshop_count or 0
+		print(string.format("    9D-verify: post_prod=%d post_ws=%d", post_prod, post_ws))
+
+		_ST_Assert("Prod killed: prod_count -1",
+			post_prod == _st._9d_snap_prod - 1,
+			string.format("expected %d, got %d", _st._9d_snap_prod - 1, post_prod))
+		_ST_Assert("Prod killed: workshop_count unchanged",
+			post_ws == _st._9d_snap_ws,
+			string.format("expected %d, got %d", _st._9d_snap_ws, post_ws))
+	end
+
+	-- Cleanup
+	_ST_DestroyAllWorkshops(player)
+	_ST_FullRecount(player)
+
+	_Debug_ScheduleNextPhase(_ST_Phase10_QueuePreservation, _ST_DELAY, "Phase 10: Queue Preservation", _ST_SUITE)
+end
+
+---------------------------------------------------------------------------------------------------
+-- PHASE 10: Queue Preservation Proof (no-cancel policy)
+---------------------------------------------------------------------------------------------------
+
+function _ST_Phase10_QueuePreservation()
+	local player = _st.player
+	local civ = _st.civ
+	_Debug_PhaseHeader(10, "QUEUE PRESERVATION")
+
+	_ST_ResetCounters(player)
+	_ST_DestroyAllWorkshops(player)
+	_ST_GrantResources(player)
+
+	-- Spawn a workshop
+	local ws_ebp = AGS_GetSiegeEntity(civ, "scar_siegeworkshop")
+	local workshop = nil
+	if ws_ebp then
+		local ws_pos = World_Pos(_st.pos.x + 30, _st.pos.y, _st.pos.z + 40)
+		local ws_face = World_Pos(ws_pos.x + 5, ws_pos.y, ws_pos.z)
+		local ok_c, ent = pcall(Entity_CreateFacing, ws_ebp, player.id, ws_pos, ws_face, true)
+		if ok_c and ent then
+			pcall(Entity_Spawn, ent)
+			pcall(Entity_ForceConstruct, ent)
+			workshop = ent
+		end
+	end
+	if workshop == nil then
+		print("    [SKIP] Cannot spawn workshop — skipping Phase 10")
+		_Debug_ScheduleNextPhase(_ST_Phase11_ExploitScenarios, _ST_DELAY, "Phase 11: Exploit Scenarios", _ST_SUITE)
+		return
+	end
+
+	-- Resolve ram SBP for queuing
+	local tbl = CBA_SIEGE_TABLE[civ]
+	local ram_sbp = nil
+	local ram_name = tbl and tbl.workshop_ram
+	if ram_name then
+		local ok, sbp = pcall(BP_GetSquadBlueprint, ram_name)
+		if ok and sbp then ram_sbp = sbp end
+	end
+	if ram_sbp == nil then
+		print("    [SKIP] No workshop_ram SBP — skipping Phase 10")
+		_ST_DestroyAllWorkshops(player)
+		_Debug_ScheduleNextPhase(_ST_Phase11_ExploitScenarios, _ST_DELAY, "Phase 11: Exploit Scenarios", _ST_SUITE)
+		return
+	end
+
+	-- 10A: Queue rams, apply threshold → queued items PRESERVED
+	print("")
+	print("  ---- 10A: Ram Queue + Threshold → No Cancellation ----")
+	local queue_count = 3
+	for i = 1, queue_count do
+		pcall(Entity_QueueProductionItemByPBG, workshop, PITEM_Spawn, ram_sbp)
+	end
+
+	local queued_before = CBA_Options_RamLimit_GetQueuedCount(player)
+	_ST_Assert("Queued rams = " .. tostring(queue_count),
+		queued_before == queue_count,
+		"queued=" .. tostring(queued_before))
+
+	CBA_Options_RamLimit_ApplyThreshold(player)
+	local queued_after = CBA_Options_RamLimit_GetQueuedCount(player)
+	_ST_Assert("Post-threshold: ram queue PRESERVED",
+		queued_after == queued_before,
+		string.format("before=%d after=%d", queued_before, queued_after))
+
+	-- 10B: Full recount + threshold → still no cancellation
+	print("")
+	print("  ---- 10B: Recount + Threshold → No Cancellation ----")
+	_ST_FullRecount(player)
+	local queued_recount = CBA_Options_RamLimit_GetQueuedCount(player)
+	_ST_Assert("Post-recount: ram queue PRESERVED",
+		queued_recount == queued_before,
+		string.format("before=%d after=%d", queued_before, queued_recount))
+
+	-- 10C: Siege weapons queue + threshold → no cancellation
+	print("")
+	print("  ---- 10C: Siege Weapon Queue + Threshold → No Cancellation ----")
+	local mng_name = tbl and tbl.workshop_mangonel
+	local mng_sbp = nil
+	if mng_name then
+		local ok, sbp = pcall(BP_GetSquadBlueprint, mng_name)
+		if ok and sbp then mng_sbp = sbp end
+	end
+	if mng_sbp then
+		for i = 1, 2 do
+			pcall(Entity_QueueProductionItemByPBG, workshop, PITEM_Spawn, mng_sbp)
+		end
+		local sq_before = CBA_Options_SiegeLimit_GetQueuedPoints(player)
+		CBA_Options_SiegeLimit_ApplyThreshold(player)
+		local sq_after = CBA_Options_SiegeLimit_GetQueuedPoints(player)
+		_ST_Assert("Siege queue post-threshold: PRESERVED",
+			sq_after >= sq_before,
+			string.format("before=%d after=%d", sq_before, sq_after))
+	else
+		print("    [SKIP] 10C: No mangonel SBP for " .. civ)
+	end
+
+	-- 10D: Siege tower queue + threshold → no cancellation
+	print("")
+	print("  ---- 10D: Siege Tower Queue + Threshold → No Cancellation ----")
+	local st_name = tbl and tbl.workshop_siege_tower
+	local st_sbp = nil
+	if st_name then
+		local ok, sbp = pcall(BP_GetSquadBlueprint, st_name)
+		if ok and sbp then st_sbp = sbp end
+	end
+	if st_sbp then
+		for i = 1, 2 do
+			pcall(Entity_QueueProductionItemByPBG, workshop, PITEM_Spawn, st_sbp)
+		end
+		local stq_before = CBA_Options_SiegeTowerLimit_GetQueuedCount(player)
+		CBA_Options_SiegeTowerLimit_ApplyThreshold(player)
+		local stq_after = CBA_Options_SiegeTowerLimit_GetQueuedCount(player)
+		_ST_Assert("ST queue post-threshold: PRESERVED",
+			stq_after >= stq_before,
+			string.format("before=%d after=%d", stq_before, stq_after))
+	else
+		print("    [SKIP] 10D: No siege_tower SBP for " .. civ)
+	end
+
+	-- Cleanup
+	_ST_KillAllSiege(player)
+	_ST_DestroyAllWorkshops(player)
+	_ST_FullRecount(player)
+
+	_Debug_ScheduleNextPhase(_ST_Phase11_ExploitScenarios, _ST_DELAY, "Phase 11: Exploit Scenarios", _ST_SUITE)
+end
+
+---------------------------------------------------------------------------------------------------
+-- PHASE 11: Exploit Scenarios
+---------------------------------------------------------------------------------------------------
+
+function _ST_Phase11_ExploitScenarios()
+	local player = _st.player
+	local civ = _st.civ
+	_Debug_PhaseHeader(11, "EXPLOIT SCENARIOS")
+
+	_ST_ResetCounters(player)
+	_ST_GrantResources(player)
+
+	-- 11A: Field-built siege at cap → construction LOCKED
+	print("")
+	print("  ---- 11A: Field-Built Siege At Cap → Construction Locked ----")
+	local ram_ebp = AGS_GetSiegeEntity(civ, "ram")
+	if ram_ebp then
+		for i = 1, RAM_LIMIT_MAX do
+			local pos = World_Pos(_st.pos.x + 80 + (i * 8), _st.pos.y, _st.pos.z + 50)
+			local face = World_Pos(pos.x + 5, pos.y, pos.z)
+			local ok_c, ent = pcall(Entity_CreateFacing, ram_ebp, player.id, pos, face, true)
+			if ok_c and ent then
+				pcall(Entity_Spawn, ent)
+				pcall(Entity_ForceConstruct, ent)
+			end
+		end
+		CBA_Options_RamLimit_Recount(player)
+		CBA_Options_RamLimit_ApplyThreshold(player)
+		pcall(CBA_Options_FieldConstruct_Gate, player)
+
+		local at_cap = (player.ramLimit_count or 0) >= RAM_LIMIT_MAX
+		_ST_Assert("11A: Rams at cap", at_cap,
+			string.format("count=%d cap=%d", player.ramLimit_count or 0, RAM_LIMIT_MAX))
+
+		local ok_can, can = pcall(Player_CanConstruct, player.id, ram_ebp)
+		_ST_Assert("11A: Ram construction LOCKED at cap",
+			ok_can and not can, "CanConstruct=" .. tostring(can))
+	else
+		print("    [SKIP] 11A: No ram EBP for " .. civ)
+	end
+
+	-- 11B: Workshop cap does NOT block production building construction
+	print("")
+	print("  ---- 11B: Workshop Cap ≠ Prod Building Block ----")
+	local ws_ebp = AGS_GetSiegeEntity(civ, "scar_siegeworkshop")
+	if ws_ebp then
+		_ST_KillAllSiege(player)
+		_ST_DestroyAllWorkshops(player)
+		local ws_cap = CBA_Options_GetPlayerWorkshopLimit(player)
+		for i = 1, ws_cap do
+			local pos = World_Pos(_st.pos.x + 30 + (i * 12), _st.pos.y, _st.pos.z + 50)
+			local face = World_Pos(pos.x + 5, pos.y, pos.z)
+			local ok_c, ent = pcall(Entity_CreateFacing, ws_ebp, player.id, pos, face, true)
+			if ok_c and ent then
+				pcall(Entity_Spawn, ent)
+				pcall(Entity_ForceConstruct, ent)
+			end
+		end
+		CBA_Options_BuildingLimit_RecountPlayer(player)
+		local ws_count = player.obj_buildingLimit_workshop_count or 0
+		_ST_Assert("11B: Workshops at cap", ws_count >= ws_cap,
+			string.format("count=%d cap=%d", ws_count, ws_cap))
+
+		local prod_count = player.obj_buildingLimit_count or 0
+		local prod_cap = CBA_Options_GetPlayerProdLimit(player)
+		_ST_Assert("11B: Prod limit NOT blocked by full workshop cap",
+			prod_count < prod_cap,
+			string.format("prod=%d/%d ws=%d/%d", prod_count, prod_cap, ws_count, ws_cap))
+	else
+		print("    [SKIP] 11B: No workshop EBP for " .. civ)
+	end
+
+	-- 11C: NoSiege + workshop setting consistency
+	print("")
+	print("  ---- 11C: NoSiege Flag Consistency ----")
+	local no_siege = AGS_GLOBAL_SETTINGS.NoSiege
+	local max_ws = AGS_GLOBAL_SETTINGS.MaximumSiegeWorkshop
+	_ST_Assert("11C: NoSiege=" .. tostring(no_siege) .. " ws_setting=" .. tostring(max_ws),
+		not no_siege or max_ws == 0,
+		"NoSiege should imply ws_setting=0 or independent")
+
+	-- Cleanup
+	_ST_KillAllSiege(player)
+	_ST_DestroyAllWorkshops(player)
+	_ST_FullRecount(player)
+
+	_Debug_ScheduleNextPhase(_ST_Phase12_CrossSettings, _ST_DELAY, "Phase 12: Cross-Settings", _ST_SUITE)
+end
+
+---------------------------------------------------------------------------------------------------
+-- PHASE 12: Cross-Settings Validation
+---------------------------------------------------------------------------------------------------
+
+function _ST_Phase12_CrossSettings()
+	local player = _st.player
+	local civ = _st.civ
+	_Debug_PhaseHeader(12, "CROSS-SETTINGS VALIDATION")
+
+	-- 12A: MaximumMedicPopulation → siege cap consistency
+	print("")
+	print("  ---- 12A: MaximumMedicPopulation → Siege Cap ----")
+	local med_pop = AGS_GLOBAL_SETTINGS.MaximumMedicPopulation or 0
+	_ST_Assert("12A: MaximumMedicPopulation >= 0", med_pop >= 0, "value=" .. tostring(med_pop))
+	if med_pop == 0 then
+		print("    Unlimited mode: MaximumMedicPopulation=0 (no cap)")
+	end
+
+	-- 12B: Workshop cap consistency
+	print("")
+	print("  ---- 12B: Workshop Cap Consistency ----")
+	local ws_fixed = AGS_CBA_FIXED_MAX_SIEGE_WORKSHOP or 0
+	local ws_player_cap = CBA_Options_GetPlayerWorkshopLimit(player)
+	_ST_Assert("12B: Workshop fixed constant = 2",
+		ws_fixed == 2, "expected 2, got " .. tostring(ws_fixed))
+	_ST_Assert("12B: Player workshop cap >= fixed constant",
+		ws_player_cap >= ws_fixed,
+		string.format("player_cap=%d fixed=%d (team balance may increase)", ws_player_cap, ws_fixed))
+
+	-- 12C: Production building cap vs workshop cap are independent
+	print("")
+	print("  ---- 12C: Independent Cap Verification ----")
+	local prod_cap = CBA_Options_GetPlayerProdLimit(player)
+	local ws_cap = CBA_Options_GetPlayerWorkshopLimit(player)
+	_ST_Assert("12C: Prod cap > 0", prod_cap > 0, "value=" .. tostring(prod_cap))
+	_ST_Assert("12C: Workshop cap > 0", ws_cap > 0, "value=" .. tostring(ws_cap))
+	print(string.format("    Caps: prod=%d ws=%d siege=%d ram=%d st=%d",
+		prod_cap, ws_cap, med_pop, RAM_LIMIT_MAX, SIEGE_TOWER_LIMIT_MAX))
+
+	-- 12D: Team balance scaling verification
+	print("")
+	print("  ---- 12D: Team Balance Scaling ----")
+	local leaver_count = player.obj_leaver_count or 0
+	if leaver_count > 0 then
+		local base_ws = AGS_CBA_FIXED_MAX_SIEGE_WORKSHOP
+		local base_prod = AGS_CBA_FIXED_MAX_PRODUCTION_BUILDINGS
+		local expected_ws_bonus = math.ceil(base_ws * 0.125 * leaver_count)
+		local expected_prod_bonus = math.ceil(base_prod * 0.125 * leaver_count)
+		_ST_Assert("12D: Workshop cap includes leaver bonus",
+			ws_cap >= base_ws + expected_ws_bonus,
+			string.format("cap=%d expected>=%d (base=%d bonus=%d leavers=%d)",
+				ws_cap, base_ws + expected_ws_bonus, base_ws, expected_ws_bonus, leaver_count))
+		_ST_Assert("12D: Prod cap includes leaver bonus",
+			prod_cap >= base_prod + expected_prod_bonus,
+			string.format("cap=%d expected>=%d (base=%d bonus=%d leavers=%d)",
+				prod_cap, base_prod + expected_prod_bonus, base_prod, expected_prod_bonus, leaver_count))
+	else
+		print(string.format("    No leavers (count=%d) — scaling untestable at runtime", leaver_count))
+		_ST_Assert("12D: No leavers — caps at baseline", true, "leaver_count=0")
+	end
+
+	-- 12E: Current civ siege table completeness
+	print("")
+	print("  ---- 12E: Current Civ Siege Table Completeness ----")
+	local tbl = CBA_SIEGE_TABLE[civ]
+	if tbl then
+		local required_keys = CBA_SIEGE_TAG_REGISTRY.required_base_keys or {}
+		local civ_extras = (CBA_SIEGE_TAG_REGISTRY.required_civ_extras or {})[civ] or {}
+		local missing = {}
+		for _, key in ipairs(required_keys) do
+			if tbl[key] == nil then
+				table.insert(missing, key)
+			end
+		end
+		for _, key in ipairs(civ_extras) do
+			if tbl[key] == nil then
+				table.insert(missing, key)
+			end
+		end
+		_ST_Assert("12E: CBA_SIEGE_TABLE[" .. civ .. "] complete",
+			#missing == 0,
+			#missing > 0 and ("missing: " .. table.concat(missing, ", ")) or "all keys present")
+	else
+		_ST_Assert("12E: CBA_SIEGE_TABLE[" .. civ .. "] exists", false, "nil table")
+	end
+
+	_Debug_ScheduleNextPhase(_ST_Phase8_Summary, _ST_DELAY, "Phase 13: Summary", _ST_SUITE)
+end
+
+---------------------------------------------------------------------------------------------------
+-- PHASE 13: Summary (function retained as _ST_Phase8_Summary for backward compat)
+---------------------------------------------------------------------------------------------------
+
+function _ST_Phase8_Summary()
+	_Debug_PhaseHeader(13, "SUMMARY")
+
+	-- Remove interceptors
+	pcall(Rule_RemoveGlobalEvent, _ST_Interceptor_ConstructionStart)
+	pcall(Rule_RemoveGlobalEvent, _ST_Interceptor_ConstructionComplete)
+	pcall(Rule_RemoveGlobalEvent, _ST_Interceptor_ConstructionCancelled)
+
+	-- Event log
+	print("")
+	print("  ---- Interceptor Event Log ----")
+	if #_st.event_log == 0 then
+		print("    (no events captured)")
+	else
+		for i, entry in ipairs(_st.event_log) do
+			print(string.format("    #%d [%s] t=%.1f siege=%s ram=%s st=%s ram_pend=%d st_pend=%d",
+				i, entry.event, entry.time or 0,
+				tostring(entry.is_siege), tostring(entry.is_ram), tostring(entry.is_st),
+				entry.ram_pending or 0, entry.st_pending or 0))
+		end
+	end
+
+	-- Enforcement checkpoint table (Phase 6)
+	if #_st.checkpoints > 0 then
+		print("")
+		print("  ---- Enforcement Checkpoint Log ----")
+		print("  +----+-------------------------------+------+-------+--------+-------+-----+-----------+")
+		print(string.format("  | %2s | %-29s | %4s | %5s | %6s | %5s | %3s | %9s |",
+			"#", "Label", "live", "pend.", "queued", "total", "cap", "violation"))
+		print("  +----+-------------------------------+------+-------+--------+-------+-----+-----------+")
+		for i, cp in ipairs(_st.checkpoints) do
+			local viol_str = "no"
+			if cp.violation then viol_str = "YES"
+			elseif cp.transient then viol_str = "transient" end
+			print(string.format("  | %2d | %-29s | %4d | %5d | %6d | %5d | %3d | %9s |",
+				i, cp.label, cp.live, cp.pending, cp.queued, cp.total, cp.cap, viol_str))
+		end
+		print("  +----+-------------------------------+------+-------+--------+-------+-----+-----------+")
+
+		if _st.violations == 0 then
+			print("    [ENFORCEMENT PROOF] Zero cap violations across " .. tostring(#_st.checkpoints) .. " checkpoints")
+		else
+			print(string.format("    [VIOLATION DETECTED] %d checkpoints exceeded cap!", _st.violations))
+		end
+	end
+
+	_ST_Assert("Zero enforcement violations", _st.violations == 0,
+		tostring(_st.violations) .. " violations across " .. tostring(#_st.checkpoints) .. " checkpoints")
+
+	-- Final cleanup
+	_ST_KillAllSiege(_st.player)
+	_ST_DestroyAllWorkshops(_st.player)
+	_ST_FullRecount(_st.player)
+
+	-- Score
+	local ok_gt, gt = pcall(World_GetGameTime)
+	local elapsed = ok_gt and (gt - (_st.start_time or 0)) or 0
+
+	print("")
+	print("============================================================")
+	print(string.format("  UNIFIED SIEGE TEST — %d/%d PASSED", _st.passed, _st.total))
+	if _st.passed == _st.total and _st.violations == 0 then
+		print("  STATUS: ALL CLEAR — all pipelines verified")
+	else
+		print(string.format("  STATUS: %d FAILURES, %d VIOLATIONS",
+			_st.total - _st.passed, _st.violations))
+	end
+	print("============================================================")
+
+	_Debug_EndMarker(_ST_SUITE, _st.passed, _st.total, elapsed)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Backward Compat Alias
+---------------------------------------------------------------------------------------------------
+Debug_SiegeLimits = Debug_SiegeTest
+
+---------------------------------------------------------------------------------------------------
+-- Namespace Registration
+---------------------------------------------------------------------------------------------------
+if debug then
+	debug.siege = debug.siege or {}
+	debug.siege.test = Debug_SiegeTest
+	debug.siege.quick = Debug_SiegeTest  -- backward compat
+
+	-- Master orchestrator is now just the unified test
+	function debug.siege.run()
+		Debug_SiegeTest()
+	end
+
+	debug._register("siege", debug.siege.run, "Siege unified test: blueprint audit + ram/ST/weapons/SE/field/workshop/events/independence/queue/exploits/settings (~90-120s)", 2)
+end

@@ -1,0 +1,1782 @@
+-----------------------------------------------------------------------
+-- DevMenu Actions
+--
+-- Thin named global wrappers around already-public cheat functions
+-- defined in scar gameplay/gameplay/cheat.scar and chatcheats.scar.
+-- Each handler resolves the local player and invokes the engine cheat
+-- with no additional context. Speed handlers manipulate Misc_SetSimRate
+-- directly (non-toggling step controls).
+--
+-- These are intentionally globals so UI_CreateCommand can bind to them
+-- by name. They never import from or modify any other module.
+-----------------------------------------------------------------------
+
+local function _devmenu_local_player()
+	if type(Game_GetLocalPlayer) == "function" then
+		local ok, p = pcall(Game_GetLocalPlayer)
+		if ok then return p end
+	end
+	return nil
+end
+
+local function _devmenu_safe_call(fn_name, ...)
+	local fn = _G[fn_name]
+	if type(fn) ~= "function" then
+		print("[DEVMENU] missing handler: " .. tostring(fn_name))
+		return
+	end
+	local ok, err = pcall(fn, ...)
+	if not ok then
+		print("[DEVMENU] " .. tostring(fn_name) .. " ERROR: " .. tostring(err))
+	end
+end
+
+-----------------------------------------------------------------------
+-- Simulation Speed (non-toggling step controls)
+-----------------------------------------------------------------------
+
+_DEVMENU_SPEED_MIN = 1.0
+_DEVMENU_SPEED_MAX = 1000.0
+
+function DevMenu_SpeedDefault()
+	if type(Misc_SetSimRate) ~= "function" or type(Misc_GetSimDefaultStepsPerSecond) ~= "function" then
+		print("[DEVMENU] sim rate API unavailable")
+		return
+	end
+	local def = Misc_GetSimDefaultStepsPerSecond()
+	Misc_SetSimRate(def)
+	print("[DEVMENU] sim rate -> default " .. tostring(def))
+end
+
+function DevMenu_SpeedIncrease()
+	if type(Misc_SetSimRate) ~= "function" or type(Misc_GetSimRate) ~= "function" then
+		print("[DEVMENU] sim rate API unavailable")
+		return
+	end
+	local cur = Misc_GetSimRate()
+	if type(cur) ~= "number" or cur <= 0 then
+		cur = Misc_GetSimDefaultStepsPerSecond()
+	end
+	local next_rate = cur * 2.0
+	if next_rate > _DEVMENU_SPEED_MAX then next_rate = _DEVMENU_SPEED_MAX end
+	Misc_SetSimRate(next_rate)
+	print("[DEVMENU] sim rate " .. tostring(cur) .. " -> " .. tostring(next_rate))
+end
+
+function DevMenu_SpeedDecrease()
+	if type(Misc_SetSimRate) ~= "function" or type(Misc_GetSimRate) ~= "function" then
+		print("[DEVMENU] sim rate API unavailable")
+		return
+	end
+	local cur = Misc_GetSimRate()
+	if type(cur) ~= "number" or cur <= 0 then
+		cur = Misc_GetSimDefaultStepsPerSecond()
+	end
+	local next_rate = cur * 0.5
+	if next_rate < _DEVMENU_SPEED_MIN then next_rate = _DEVMENU_SPEED_MIN end
+	Misc_SetSimRate(next_rate)
+	print("[DEVMENU] sim rate " .. tostring(cur) .. " -> " .. tostring(next_rate))
+end
+
+-----------------------------------------------------------------------
+-- Resources
+-----------------------------------------------------------------------
+
+function DevMenu_DoEconomy()
+	local player = _devmenu_local_player()
+	if _devmenu_mp_net_action(player, "ECONOMY") then return end
+	_devmenu_safe_call("CheatEconomy", player)
+	if type(DevMenu_ShowToast) == "function" then DevMenu_ShowToast("Economy boost applied") end
+end
+function DevMenu_DoResourcesAll()
+	local player = _devmenu_local_player()
+	if _devmenu_mp_net_action(player, "RESOURCES_ALL") then return end
+	_devmenu_safe_call("ResourcesCheatAllBasic", player)
+	if type(DevMenu_ShowToast) == "function" then DevMenu_ShowToast("+1000 of every resource") end
+end
+function DevMenu_DoResourcesFood()
+	local player = _devmenu_local_player()
+	if _devmenu_mp_net_action(player, "RESOURCES_FOOD") then return end
+	_devmenu_safe_call("ResourcesCheatFood", player)
+	if type(DevMenu_ShowToast) == "function" then DevMenu_ShowToast("Food: +max") end
+end
+function DevMenu_DoResourcesWood()
+	local player = _devmenu_local_player()
+	if _devmenu_mp_net_action(player, "RESOURCES_WOOD") then return end
+	_devmenu_safe_call("ResourcesCheatWood", player)
+	if type(DevMenu_ShowToast) == "function" then DevMenu_ShowToast("Wood: +max") end
+end
+function DevMenu_DoResourcesGold()
+	local player = _devmenu_local_player()
+	if _devmenu_mp_net_action(player, "RESOURCES_GOLD") then return end
+	_devmenu_safe_call("ResourcesCheatGold", player)
+	if type(DevMenu_ShowToast) == "function" then DevMenu_ShowToast("Gold: +max") end
+end
+function DevMenu_DoResourcesStone()
+	local player = _devmenu_local_player()
+	if _devmenu_mp_net_action(player, "RESOURCES_STONE") then return end
+	_devmenu_safe_call("ResourcesCheatStone", player)
+	if type(DevMenu_ShowToast) == "function" then DevMenu_ShowToast("Stone: +max") end
+end
+function DevMenu_DoResourcesOil()
+	local player = _devmenu_local_player()
+	if _devmenu_mp_net_action(player, "RESOURCES_OIL") then return end
+	_devmenu_safe_call("ResourcesCheatOil", player)
+	if type(DevMenu_ShowToast) == "function" then DevMenu_ShowToast("Oil: +max") end
+end
+
+-----------------------------------------------------------------------
+-- Progression
+-----------------------------------------------------------------------
+
+function DevMenu_DoAgeUp()
+	local player = _devmenu_local_player()
+	if _devmenu_mp_net_action(player, "AGE_UP") then return end
+	-- SP path: direct call via engine cheat.
+	if type(ChatCheatAgeUpMultiplayer) == "function" then
+		_devmenu_safe_call("ChatCheatAgeUpMultiplayer", player)
+	else
+		_devmenu_safe_call("CheatAgeUpMultiplayer", player)
+	end
+	if type(DevMenu_ShowToast) == "function" then DevMenu_ShowToast("Age up triggered") end
+end
+
+function DevMenu_DoPopCapMax()
+	local player = _devmenu_local_player()
+	if _devmenu_mp_net_action(player, "POP_CAP_MAX") then return end
+	_devmenu_safe_call("CheatSetCurrentPopCapToMax", player)
+	if type(DevMenu_ShowToast) == "function" then DevMenu_ShowToast("Pop cap raised to maximum") end
+end
+
+-----------------------------------------------------------------------
+-- Combat / Survivability
+--
+-- TOGGLE CONTRACT — applies to every stateful ON/OFF cheat action:
+--
+--   1. The action function (DevMenu_Do*) calls the engine cheat which
+--      stores toggle state in a chatcheats.scar global (e.g. gInvulnerableCheat,
+--      gFoWCheat, gInstantBuildCheat), keyed by Player_GetID.
+--
+--   2. A matching getter (DevMenu_Get*Enabled) reads that engine global and
+--      returns true/false. This function MUST be a named public global so the
+--      data entry's `toggle_state_fn` field can reference it by name.
+--
+--   3. The data entry in devmenu_data.scar MUST include:
+--        toggle_state_fn = "DevMenu_Get<Name>Enabled"
+--      Without this the card renders as a plain blue "RUN NOW" action,
+--      indistinguishable from one-shot commands like Spawn Army or Age Up.
+--
+--   4. Entries whose state depends on live selection (e.g. DoInvulnSelectedUnits)
+--      MUST NOT have toggle_state_fn — their state is not a persistent flag and
+--      would be stale at panel build time. Document this explicitly in data.scar.
+-----------------------------------------------------------------------
+
+function DevMenu_DoInvulnerable()
+	local player = _devmenu_local_player()
+	if _devmenu_mp_net_action(player, "INVULNERABLE") then
+		if type(Rule_AddOneShot) == "function" and type(DevMenu_RefreshToggleStates) == "function" then
+			Rule_AddOneShot(DevMenu_RefreshToggleStates, 0.3)
+		end
+		return
+	end
+	if type(ChatCheatInvulnerable) == "function" then
+		_devmenu_safe_call("ChatCheatInvulnerable", player)
+	else
+		_devmenu_safe_call("CheatInvulnerable", player)
+	end
+	if type(DevMenu_ShowToast) == "function" then
+		local on = (type(DevMenu_GetInvulnerableEnabled) == "function") and DevMenu_GetInvulnerableEnabled() or false
+		DevMenu_ShowToast({ prefix = "Invulnerability ", state_word = on and "ENABLED" or "DISABLED", state_on = on })
+	end
+	-- SP: cheat globals update synchronously — refresh immediately so cards show the new state.
+	if type(DevMenu_RefreshToggleStates) == "function" then
+		DevMenu_RefreshToggleStates()
+	end
+end
+
+-- Toggle state getter: reads gInvulnerableCheat[playerIndex] written by ChatCheatInvulnerable / CheatInvulnerable.
+function DevMenu_GetInvulnerableEnabled()
+	local p = _devmenu_local_player()
+	if p == nil or type(Player_GetID) ~= "function" then return false end
+	if type(gInvulnerableCheat) ~= "table" then return false end
+	return gInvulnerableCheat[Player_GetID(p)] == true
+end
+
+-----------------------------------------------------------------------
+-- Block Actions toggle
+--
+-- Toggles _DEVMENU_BLOCK_ACTIONS_MAP[local_playerID] (declared in
+-- devmenu_mp_gate.scar). When true for a player, DEVMENU_DESTROY,
+-- DEVMENU_CONVERT, DEVMENU_BURN, DEVMENU_TELEPORT, and DEVMENU_INVULN_SEL
+-- skip units/buildings owned by that player on all peers.
+--
+-- MP path: broadcasts DEVMENU_BLOCK_ACTIONS_SET via the lockstep bus;
+--   the net handler shows the toast and refreshes toggle states on all peers.
+-- SP path: modifies the map directly, then shows toast and refreshes.
+-----------------------------------------------------------------------
+function DevMenu_DoToggleBlockActions()
+	local player = _devmenu_local_player()
+	if player == nil then return end
+	if type(Player_GetID) ~= "function" then return end
+	local pid = Player_GetID(player)
+	if pid == nil then return end
+	-- Compute new state before dispatch so we send the correct target value.
+	local cur     = (_DEVMENU_BLOCK_ACTIONS_MAP ~= nil) and (_DEVMENU_BLOCK_ACTIONS_MAP[pid] == true) or false
+	local new_val = not cur
+	-- MP path: broadcast to all peers; net handler shows toast + refreshes.
+	if _devmenu_mp_net_action(player, "DEVMENU_BLOCK_ACTIONS_SET",
+			tostring(pid) .. " " .. (new_val and "1" or "0")) then return end
+	-- SP path: apply directly.
+	if type(_DEVMENU_BLOCK_ACTIONS_MAP) ~= "table" then _DEVMENU_BLOCK_ACTIONS_MAP = {} end
+	_DEVMENU_BLOCK_ACTIONS_MAP[pid] = new_val
+	if type(DevMenu_ShowToast) == "function" then
+		DevMenu_ShowToast({
+			prefix     = "Block Actions ",
+			state_word = new_val and "ENABLED" or "DISABLED",
+			state_on   = new_val,
+			suffix     = new_val and " - cheat actions targeting your units will be blocked"
+			                      or  " - your units are no longer protected",
+		})
+	end
+	if type(DevMenu_RefreshToggleStates) == "function" then
+		DevMenu_RefreshToggleStates()
+	end
+end
+
+-- Toggle state getter: reads _DEVMENU_BLOCK_ACTIONS_MAP[local_playerID] set by
+-- DevMenu_DoToggleBlockActions (SP) or DEVMENU_BLOCK_ACTIONS_SET net handler (MP).
+function DevMenu_GetBlockActionsEnabled()
+	local player = _devmenu_local_player()
+	if player == nil or type(Player_GetID) ~= "function" then return false end
+	local pid = Player_GetID(player)
+	return (_DEVMENU_BLOCK_ACTIONS_MAP ~= nil) and (_DEVMENU_BLOCK_ACTIONS_MAP[pid] == true) or false
+end
+
+-- Compute a world position offset `dist` units forward from the camera's
+-- current focal point, projected onto the ground plane (XZ).
+--
+-- Direction strategy (two attempts, logged for diagnostics):
+--
+--   1. eye→focal: derive forward from Camera_GetCurrentPos (eye) minus
+--      Camera_GetCurrentTargetPos (focal). Reliable when the two APIs
+--      return genuinely different XZ positions.
+--
+--   2. orbit angle: Camera_GetOrbit() returns the camera yaw in degrees.
+--      Used as fallback when the eye→focal XZ delta is near zero (which
+--      happens when both Camera_Get* APIs return the same pivot point).
+--      Convention tested in engine: orbit=0 → forward = (sin 0, cos 0) =
+--      (0, 1) = +Z. Increase clockwise. Confirmed via cardinal_narrative
+--      and salisbury orbit checks in the scar_dump.
+--
+-- All branch choices are logged under [DEVMENU-CAM] (always emitted).
+function _devmenu_camera_forward_pos(dist)
+	dist = dist or 0
+	if type(Camera_GetCurrentTargetPos) ~= "function" then return nil end
+	local target = Camera_GetCurrentTargetPos()
+	if target == nil then return nil end
+	if dist == 0 then return target end
+
+	local ok_tx, tx = pcall(function() return target.x end)
+	local ok_ty, ty = pcall(function() return target.y end)
+	local ok_tz, tz = pcall(function() return target.z end)
+	if not ok_tx or tx == nil then return target end
+	local y = (ok_ty and ty) or 0
+
+	local dx, dz = 0, 0
+	local method = "fallback"
+
+	-- Attempt 1: eye → focal XZ direction.
+	if type(Camera_GetCurrentPos) == "function" then
+		local cam = Camera_GetCurrentPos()
+		if cam ~= nil then
+			local ok_cx, cx = pcall(function() return cam.x end)
+			local ok_cz, cz = pcall(function() return cam.z end)
+			if ok_cx and ok_cz and cx ~= nil and cz ~= nil then
+				local ddx = tx - cx
+				local ddz = tz - cz
+				local len = math.sqrt(ddx * ddx + ddz * ddz)
+				print(string.format("[DEVMENU-CAM] eye=(%.2f,%.2f) focal=(%.2f,%.2f) delta_len=%.3f", cx, cz, tx, tz, len))
+				if len >= 0.001 then
+					dx = ddx / len
+					dz = ddz / len
+					method = "eye_to_focal"
+				end
+			end
+		end
+	end
+
+	-- Attempt 2: orbit angle (degrees → forward XZ).
+	if method == "fallback" and type(Camera_GetOrbit) == "function" then
+		local ok_orbit, orbit = pcall(Camera_GetOrbit)
+		if ok_orbit and orbit ~= nil then
+			local rad = math.rad(orbit)
+			dx = math.sin(rad)
+			dz = math.cos(rad)
+			method = "orbit"
+			print(string.format("[DEVMENU-CAM] orbit=%.1f deg -> dx=%.3f dz=%.3f", orbit, dx, dz))
+		end
+	end
+
+	local fx = tx + dx * dist
+	local fz = tz + dz * dist
+	print(string.format("[DEVMENU-CAM] forward_pos dist=%.1f method=%s result=(%.2f,%.2f,%.2f)", dist, method, fx, y, fz))
+
+	if method == "fallback" then
+		return target
+	end
+	return World_Pos(fx, y, fz)
+end
+
+-- Shared helper: resolve the spawn position for spawning.
+-- Always uses the player's Keep (town centre) as the target.
+local function _devmenu_resolve_spawn_pos(player)
+	if type(GetTownCentrePosition) == "function" then
+		local tc_pos = GetTownCentrePosition(player)
+		if tc_pos ~= nil then return tc_pos, "town_centre" end
+	end
+	return nil, "none"
+end
+
+function DevMenu_DoSpawnArmy()
+	local player = _devmenu_local_player()
+	if player == nil then return end
+	-- MP routing: DEVMENU_SPAWN_ARMY handler finds the player's Keep on each peer.
+	if _devmenu_mp_net_action(player, "DEVMENU_SPAWN_ARMY") then
+		if type(DevMenu_ShowToast) == "function" then DevMenu_ShowToast("Core army spawned at keep") end
+		return
+	end
+	-- SP path.
+	local pos, src = _devmenu_resolve_spawn_pos(player)
+	if pos == nil then
+		print("[DEVMENU] spawn army: no valid position (cursor off-map and no town centre found)")
+		return
+	end
+	print("[DEVMENU] spawn army at " .. tostring(src))
+	if type(CheatSpawnCoreUnits) == "function" then
+		_devmenu_safe_call("CheatSpawnCoreUnits", player, pos)
+	else
+		_devmenu_safe_call("SpawnCheatArmy", player)
+	end
+	if type(DevMenu_ShowToast) == "function" then
+		DevMenu_ShowToast("Core army spawned at " .. tostring(src))
+	end
+end
+
+-- Quick Panel variant: spawns at the current camera-forward position —
+-- the same position logic used by Teleport Selected — rather than the Keep.
+-- Falls back to _devmenu_resolve_spawn_pos (Keep) if camera pos is unavailable.
+function DevMenu_DoSpawnArmyAtCamera()
+	local player = _devmenu_local_player()
+	if player == nil then return end
+
+	local pos, src
+	if type(_devmenu_camera_forward_pos) == "function" then
+		pos = _devmenu_camera_forward_pos(-40)
+		src = "camera_forward"
+	end
+
+	if pos == nil then
+		pos, src = _devmenu_resolve_spawn_pos(player)
+	end
+	if pos == nil then
+		print("[DEVMENU] spawn army (quick): no valid position")
+		return
+	end
+
+	-- MP routing: serialize camera position so all peers spawn at the same world position.
+	if _devmenu_is_multiplayer() then
+		local ok_px, px = pcall(function() return pos.x end)
+		local ok_py, py = pcall(function() return pos.y end)
+		local ok_pz, pz = pcall(function() return pos.z end)
+		if ok_px and ok_py and ok_pz and type(px) == "number" then
+			if _devmenu_mp_net_action(player, "DEVMENU_SPAWN_ARMY_CAM",
+				string.format("%.4f %.4f %.4f", px, py, pz)) then
+				if type(DevMenu_ShowToast) == "function" then DevMenu_ShowToast("Core army spawned at " .. tostring(src)) end
+				return
+			end
+		else
+			-- Position not serializable: fall back to Keep-based spawn.
+			if _devmenu_mp_net_action(player, "DEVMENU_SPAWN_ARMY") then
+				if type(DevMenu_ShowToast) == "function" then DevMenu_ShowToast("Core army spawned at keep") end
+				return
+			end
+		end
+	end
+	-- SP path.
+	print("[DEVMENU] spawn army (quick) at " .. tostring(src))
+	if type(CheatSpawnCoreUnits) == "function" then
+		_devmenu_safe_call("CheatSpawnCoreUnits", player, pos)
+	else
+		_devmenu_safe_call("SpawnCheatArmy", player)
+	end
+	if type(DevMenu_ShowToast) == "function" then
+		DevMenu_ShowToast("Core army spawned at " .. tostring(src))
+	end
+end
+
+function DevMenu_DoSpawnPhotonMan()
+	local player = _devmenu_local_player()
+	if player == nil then return end
+	-- MP routing: DEVMENU_SPAWN_PHOTON handler calls SpawnCheatPhotonMan on all peers.
+	if _devmenu_mp_net_action(player, "DEVMENU_SPAWN_PHOTON") then
+		if type(DevMenu_ShowToast) == "function" then DevMenu_ShowToast("Photon Man spawned at Keep") end
+		return
+	end
+	-- SP path: direct call.
+	-- Delegate to the official SpawnCheatPhotonMan: it handles first-spawn
+	-- precaching via Squad_SlowLoadResources (tracked by hasLoadedPhoton flag)
+	-- AND uses GetTownCentrePosition for position - both correct behaviors.
+	-- Previously we called SpawnUnitBPForPlayer with needsLoad=false which
+	-- skipped precaching and caused missing/placeholder assets on first spawn.
+	if type(SpawnCheatPhotonMan) == "function" then
+		_devmenu_safe_call("SpawnCheatPhotonMan", player)
+		if type(DevMenu_ShowToast) == "function" then DevMenu_ShowToast("Photon Man spawned at Keep") end
+		return
+	end
+	-- Last-resort fallback (SpawnCheatPhotonMan unavailable): manual call without precaching.
+	local pos, src = _devmenu_resolve_spawn_pos(player)
+	if pos == nil then
+		print("[DEVMENU] spawn photon man: no valid position (fallback)")
+		return
+	end
+	print("[DEVMENU] spawn photon man fallback at " .. tostring(src))
+	if type(SpawnUnitBPForPlayer) == "function" then
+		_devmenu_safe_call("SpawnUnitBPForPlayer", "unit_photon_man", player, pos, false)
+		if type(DevMenu_ShowToast) == "function" then DevMenu_ShowToast("Photon Man spawned") end
+	end
+end
+
+-----------------------------------------------------------------------
+-- World
+-----------------------------------------------------------------------
+
+function DevMenu_DoFoW()
+	local player = _devmenu_local_player()
+	-- MP path: route through net dispatch so ChatCheatFOW fires on ALL peers at
+	-- the same sim tick (same lockstep-safe pattern as INVULNERABLE/INSTANT_BUILD).
+	if _devmenu_mp_net_action(player, "FOW_TOGGLE") then
+		if type(Rule_AddOneShot) == "function" and type(DevMenu_RefreshToggleStates) == "function" then
+			Rule_AddOneShot(DevMenu_RefreshToggleStates, 0.3)
+		end
+		return
+	end
+	-- SP path: call ChatCheatFOW directly; manages gFoWCheat toggle state.
+	if type(ChatCheatFOW) == "function" then
+		_devmenu_safe_call("ChatCheatFOW", player)
+	elseif type(CheatFoW) == "function" then
+		_devmenu_safe_call("CheatFoW", player, nil)
+	end
+	if type(DevMenu_ShowToast) == "function" then
+		local on = (type(DevMenu_GetFoWEnabled) == "function") and DevMenu_GetFoWEnabled() or false
+		DevMenu_ShowToast({ prefix = "Fog of War: ", state_word = on and "ENABLED" or "REVEALED", state_on = on })
+	end
+	-- SP: cheat globals update synchronously — refresh immediately so cards show the new state.
+	if type(DevMenu_RefreshToggleStates) == "function" then
+		DevMenu_RefreshToggleStates()
+	end
+end
+
+-- Toggle state getter: reads gFoWCheat[playerIndex] managed by ChatCheatFOW / CheatFoW.
+-- Returns true when FoW is active (fog visible), false when map is fully revealed.
+function DevMenu_GetFoWEnabled()
+	local p = _devmenu_local_player()
+	if p == nil or type(Player_GetID) ~= "function" then return true end  -- unknown: assume fog on
+	if type(gFoWCheat) ~= "table" then return true end  -- never toggled yet: fog is on
+	local idx = Player_GetID(p)
+	-- gFoWCheat[idx] == true means the cheat is "on" (fog was removed by ChatCheatFOW)
+	-- FoW is "enabled" (fog visible) when gFoWCheat entry is false/nil.
+	return not (gFoWCheat[idx] == true)
+end
+
+function DevMenu_DoExploreAll()
+	local player = _devmenu_local_player()
+	if _devmenu_mp_net_action(player, "EXPLORE_ALL") then return end
+	_devmenu_safe_call("CheatExploredAll", player)
+	if type(DevMenu_ShowToast) == "function" then DevMenu_ShowToast("Map fully explored") end
+end
+function DevMenu_DoSheepToWolves()
+	local player = _devmenu_local_player()
+	if _devmenu_mp_net_action(player, "SHEEP_WOLVES") then return end
+	_devmenu_safe_call("CheatReplaceSheepWithWolves", player)
+	if type(DevMenu_ShowToast) == "function" then DevMenu_ShowToast("Sheep replaced with wolves") end
+end
+function DevMenu_DoKillGaia()
+	local player = _devmenu_local_player()
+	if _devmenu_mp_net_action(player, "KILL_GAIA") then return end
+	_devmenu_safe_call("CheatKillAllGaia", player)
+	if type(DevMenu_ShowToast) == "function" then DevMenu_ShowToast("All neutral animals killed") end
+end
+
+-----------------------------------------------------------------------
+-- Production / Build
+-----------------------------------------------------------------------
+
+function DevMenu_DoInstantBuild()
+	local player = _devmenu_local_player()
+	if _devmenu_mp_net_action(player, "INSTANT_BUILD") then
+		if type(Rule_AddOneShot) == "function" and type(DevMenu_RefreshToggleStates) == "function" then
+			Rule_AddOneShot(DevMenu_RefreshToggleStates, 0.3)
+		end
+		return
+	end
+	_devmenu_safe_call("ChatCheatInstantBuildAndGather", player)
+	if type(DevMenu_ShowToast) == "function" then
+		local on = (type(DevMenu_GetInstantBuildEnabled) == "function") and DevMenu_GetInstantBuildEnabled() or false
+		DevMenu_ShowToast({ prefix = "Instant Build: ", state_word = on and "ON" or "OFF", state_on = on })
+	end
+	-- SP: cheat globals update synchronously — refresh immediately so cards show the new state.
+	if type(DevMenu_RefreshToggleStates) == "function" then
+		DevMenu_RefreshToggleStates()
+	end
+end
+
+-- Toggle state getter: reads gInstantBuildCheat[playerIndex] written by ChatCheatInstantBuildAndGather.
+function DevMenu_GetInstantBuildEnabled()
+	local p = _devmenu_local_player()
+	if p == nil or type(Player_GetID) ~= "function" then return false end
+	if type(gInstantBuildCheat) ~= "table" then return false end
+	return gInstantBuildCheat[Player_GetID(p)] == true
+end
+
+-----------------------------------------------------------------------
+-- Misc
+-----------------------------------------------------------------------
+
+function DevMenu_DoSwapAlarmSfx()  _devmenu_safe_call("CheatSwapAOEAlarmSound") end
+function DevMenu_DoLoseInstantly()
+	local player = _devmenu_local_player()
+	if _devmenu_mp_net_action(player, "LOSE_INSTANTLY") then return end
+	_devmenu_safe_call("CheatLoseInstantly", player)
+end
+
+-- No-op placeholder bound to dev_only entries when -dev is not active.
+-- Logs a message; never performs any real action.
+function DevMenu_NoOp()
+	print("[DEVMENU] blocked: this action requires the -dev launch flag")
+end
+
+-----------------------------------------------------------------------
+-- Speed: Turbo / Slow toggles (engine-style, mirrors CheatTurbo / CheatSlow
+-- in chatcheats.scar but kept SCAR-side so we don't depend on broadcast).
+-----------------------------------------------------------------------
+
+function DevMenu_DoTurbo()
+	if type(Misc_SetSimRate) ~= "function" or type(Misc_GetSimRate) ~= "function" then
+		print("[DEVMENU] sim rate API unavailable")
+		return
+	end
+	local cur = Misc_GetSimRate() or 1.0
+	local target
+	if math.abs(cur - _DEVMENU_SPEED_MAX) < 1.0 then
+		target = (type(Misc_GetSimDefaultStepsPerSecond) == "function") and Misc_GetSimDefaultStepsPerSecond() or 8.0
+	else
+		target = _DEVMENU_SPEED_MAX
+	end
+	Misc_SetSimRate(target)
+	print("[DEVMENU] turbo toggle " .. tostring(cur) .. " -> " .. tostring(target))
+	if type(DevMenu_ShowToast) == "function" then
+		DevMenu_ShowToast(string.format("Sim speed: %.1fx -> %.1fx", cur, target))
+	end
+end
+
+function DevMenu_DoSlow()
+	if type(Misc_SetSimRate) ~= "function" or type(Misc_GetSimRate) ~= "function" then
+		print("[DEVMENU] sim rate API unavailable")
+		return
+	end
+	local cur = Misc_GetSimRate() or 1.0
+	local target
+	if math.abs(cur - _DEVMENU_SPEED_MIN) < 0.01 then
+		target = (type(Misc_GetSimDefaultStepsPerSecond) == "function") and Misc_GetSimDefaultStepsPerSecond() or 8.0
+	else
+		target = _DEVMENU_SPEED_MIN
+	end
+	Misc_SetSimRate(target)
+	print("[DEVMENU] slow toggle " .. tostring(cur) .. " -> " .. tostring(target))
+	if type(DevMenu_ShowToast) == "function" then
+		DevMenu_ShowToast(string.format("Sim speed: %.1fx -> %.1fx", cur, target))
+	end
+end
+
+-----------------------------------------------------------------------
+-- Contextual cheats (depend on live unit/building selection and/or the
+-- current cursor world position). These exist in chatcheats.scar but are
+-- not routed through the standard CheatX(playerID,data) signature, so we
+-- adapt: gather selection / cursor here and call the chatcheats variant.
+-----------------------------------------------------------------------
+
+-- Returns true when `eid` is a town-centre or keep owned by a human player.
+--
+-- POLICY: Convert Selected and Destroy Selected MUST NEVER act on a human
+-- player's starter keep / town-centre. Destroying or converting that building
+-- is an irreversible, game-ending action that bypasses normal game rules and
+-- would create a confusing or unrecoverable state in coop / multiplayer.
+-- This filter is intentional and must be preserved at every call site.
+-- When filtering removes ALL selected entities, callers MUST surface a
+-- user-visible toast instead of silently returning (no silent no-op).
+local function _devmenu_is_human_player_keep(eid)
+	if eid == nil then return false end
+	if type(Entity_IsOfType) ~= "function" then return false end
+	local is_keep_type = Entity_IsOfType(eid, "town_center") or Entity_IsOfType(eid, "castle") or Entity_IsOfType(eid, "scar_keep")
+	if not is_keep_type then return false end
+	local owner = nil
+	if type(Entity_GetPlayerOwner) == "function" then
+		owner = Entity_GetPlayerOwner(eid)
+	end
+	if owner == nil then return false end
+	if type(Player_IsHuman) == "function" then
+		return Player_IsHuman(owner) == true
+	end
+	-- Fallback: protect if owned by the local player (conservative).
+	local local_p = _devmenu_local_player()
+	if local_p ~= nil and type(Player_GetID) == "function" then
+		return Player_GetID(owner) == Player_GetID(local_p)
+	end
+	return false
+end
+
+local function _devmenu_collect_selected_squads()
+	if type(SGroup_Create) ~= "function" or type(Misc_GetSelectedSquads) ~= "function" then
+		return nil
+	end
+	local sg
+	if type(SGroup_Exists) == "function" and SGroup_Exists("sg_devmenu_ctx_sel") then
+		sg = SGroup_FromName("sg_devmenu_ctx_sel")
+		if type(SGroup_Clear) == "function" then SGroup_Clear(sg) end
+	else
+		sg = SGroup_Create("sg_devmenu_ctx_sel")
+	end
+	Misc_GetSelectedSquads(sg, false)
+	return sg
+end
+
+local function _devmenu_collect_selected_entities()
+	if type(EGroup_Create) ~= "function" or type(Misc_GetSelectedEntities) ~= "function" then
+		return nil
+	end
+	local eg
+	if type(EGroup_Exists) == "function" and EGroup_Exists("eg_devmenu_ctx_sel") then
+		eg = EGroup_FromName("eg_devmenu_ctx_sel")
+		if type(EGroup_Clear) == "function" then EGroup_Clear(eg) end
+	else
+		eg = EGroup_Create("eg_devmenu_ctx_sel")
+	end
+	Misc_GetSelectedEntities(eg, false)
+	return eg
+end
+
+local function _devmenu_squads_table_from_sgroup(sg)
+	if sg == nil then return nil end
+	local count = (type(SGroup_CountSpawned) == "function") and SGroup_CountSpawned(sg) or 0
+	if count <= 0 then return nil end
+	local squads = {}
+	for i = 1, count do
+		squads[#squads + 1] = SGroup_GetSpawnedSquadAt(sg, i)
+	end
+	return squads
+end
+
+local function _devmenu_entities_table_from_egroup(eg)
+	if eg == nil then return nil end
+	local count = (type(EGroup_CountSpawned) == "function") and EGroup_CountSpawned(eg) or 0
+	if count <= 0 then return nil end
+	local entities = {}
+	for i = 1, count do
+		entities[#entities + 1] = EGroup_GetSpawnedEntityAt(eg, i)
+	end
+	return entities
+end
+
+local function _devmenu_buildings_egroup_from_selection()
+	if type(EGroup_Create) ~= "function" then return nil, 0 end
+	local eg_sel = _devmenu_collect_selected_entities()
+	if eg_sel == nil then return nil, 0 end
+	local eg_b
+	if type(EGroup_Exists) == "function" and EGroup_Exists("eg_devmenu_ctx_buildings") then
+		eg_b = EGroup_FromName("eg_devmenu_ctx_buildings")
+		if type(EGroup_Clear) == "function" then EGroup_Clear(eg_b) end
+	else
+		eg_b = EGroup_Create("eg_devmenu_ctx_buildings")
+	end
+	if type(EGroup_ForEach) == "function" then
+		EGroup_ForEach(eg_sel, function(_, _, eid)
+			if Entity_IsOfType(eid, "building") then
+				EGroup_Add(eg_b, eid)
+			end
+		end)
+	end
+	local count = (type(EGroup_CountSpawned) == "function") and EGroup_CountSpawned(eg_b) or 0
+	return eg_b, count
+end
+
+-- Sidebar-only variant: toggles invulnerability for the currently selected
+-- squads only. Uses Squad_GetInvulnerableMinCap on the first selected squad
+-- to decide the toggle direction: > 0 means an HP-floor is active (invuln ON),
+-- 0 means no floor (invuln OFF).
+--
+-- NOTE: Entity_IsInvincible cannot be used here — it only returns true when
+-- set by the engine's global ChatCheatInvulnerable path (a separate mechanism).
+-- Squad_SetInvulnerableMinCap sets an HP floor, never the invincible flag, so
+-- IsInvincible always returns false and detection would always trigger "apply".
+function DevMenu_DoInvulnSelectedUnits()
+	local sg = _devmenu_collect_selected_squads()
+	local sg_count = (sg ~= nil and type(SGroup_CountSpawned) == "function") and SGroup_CountSpawned(sg) or 0
+   -- Collect building entities (appear in EGroup, not SGroup; Entity_GetSquad returns nil for all buildings).
+   local eid_direct = {}
+   local eg = _devmenu_collect_selected_entities()
+   if eg ~= nil and type(EGroup_CountSpawned) == "function" and EGroup_CountSpawned(eg) > 0
+           and type(EGroup_ForEach) == "function" then
+           EGroup_ForEach(eg, function(_, _, eid)
+                   eid_direct[#eid_direct + 1] = eid
+           end)
+   end
+   local eid_count = #eid_direct
+   if sg_count == 0 and eid_count == 0 then
+           print("[DEVMENU] invuln selected: no selected squads or buildings")
+           return
+   end
+   -- Detect current state from the first available target (squad, then entity).
+   local currently_invuln = false
+   if sg_count > 0 and type(SGroup_GetSpawnedSquadAt) == "function"
+           and type(Squad_GetInvulnerableMinCap) == "function" then
+           local first_squad = SGroup_GetSpawnedSquadAt(sg, 1)
+           if first_squad ~= nil then
+                   local cap = Squad_GetInvulnerableMinCap(first_squad)
+                   currently_invuln = (type(cap) == "number" and cap > 0)
+           end
+   elseif eid_count > 0 and type(Entity_GetInvulnerableMinCap) == "function" then
+           local ok, cap = pcall(Entity_GetInvulnerableMinCap, eid_direct[1])
+           currently_invuln = ok and (type(cap) == "number" and cap > 0)
+   end
+   -- MP routing: serialize squad IDs + entity IDs + direction, broadcast to all peers.
+   if _devmenu_is_multiplayer()
+           and type(Squad_GetID) == "function"
+           and type(SGroup_GetSpawnedSquadAt) == "function" then
+           local dir = currently_invuln and 0 or 1
+           local sqids = {}
+           local eids  = {}
+           -- DEVMENU-RICH-TOAST: pid -> count for single-owner attribution.
+           local owner_pids = {}
+           for i = 1, sg_count do
+                   local sq = SGroup_GetSpawnedSquadAt(sg, i)
+                   if sq ~= nil then
+                           sqids[#sqids + 1] = tostring(Squad_GetID(sq))
+                           local _eid = (type(Squad_GetFirstEntity) == "function") and Squad_GetFirstEntity(sq) or nil
+                           local _o = (_eid ~= nil and type(Entity_GetPlayerOwner) == "function")
+                                   and ((type(World_OwnsEntity) ~= "function" or World_OwnsEntity(_eid)) and Entity_GetPlayerOwner(_eid) or nil)
+                                   or nil
+                           local _opid = (_o ~= nil and type(Player_GetID) == "function") and Player_GetID(_o) or nil
+                           if _opid ~= nil then owner_pids[_opid] = (owner_pids[_opid] or 0) + 1 end
+                   end
+           end
+           if type(Entity_GetID) == "function" then
+                   for _, eid in ipairs(eid_direct) do
+                           local eid_num = Entity_GetID(eid)
+                           if eid_num ~= nil then
+                                   eids[#eids + 1] = tostring(eid_num)
+                                   local _o = type(Entity_GetPlayerOwner) == "function"
+                                           and (type(World_OwnsEntity) ~= "function" or World_OwnsEntity(eid))
+                                           and Entity_GetPlayerOwner(eid) or nil
+                                   local _opid = (_o ~= nil and type(Player_GetID) == "function") and Player_GetID(_o) or nil
+                                   if _opid ~= nil then owner_pids[_opid] = (owner_pids[_opid] or 0) + 1 end
+                           end
+                   end
+           end
+           if #sqids + #eids > 0 then
+                   -- Payload: "dir nsquads sqid1...sqidN eid1...eidM"
+                   local payload = tostring(dir) .. " " .. tostring(#sqids)
+                   if #sqids > 0 then payload = payload .. " " .. table.concat(sqids, " ") end
+                   if #eids  > 0 then payload = payload .. " " .. table.concat(eids,  " ") end
+                   if _devmenu_mp_net_action(_devmenu_local_player(), "DEVMENU_INVULN_SEL", payload) then
+                           -- Toast fires via gate handler result notify (after lockstep dispatch).
+                           return
+                   end
+           end
+   end
+   -- SP path.
+   local unit_changed = 0
+   local bldg_changed = 0
+   if currently_invuln then
+           if type(SGroup_ForEach) == "function" then
+                   SGroup_ForEach(sg, function(_, _, sid)
+                           if type(Squad_SetInvulnerableMinCap) == "function" then
+                                   Squad_SetInvulnerableMinCap(sid, 0, -1)
+                                   unit_changed = unit_changed + 1
+                           end
+                   end)
+           end
+           if type(Entity_SetInvulnerableMinCap) == "function" then
+                   for _, eid in ipairs(eid_direct) do
+                           if not _devmenu_is_human_player_keep(eid) then
+                                   pcall(Entity_SetInvulnerableMinCap, eid, 0, -1)
+                                   bldg_changed = bldg_changed + 1
+                           end
+                   end
+           end
+   else
+           if type(SGroup_ForEach) == "function" then
+                   SGroup_ForEach(sg, function(_, _, sid)
+                           if type(Squad_SetInvulnerableMinCap) == "function"
+                                   and type(Squad_GetHealthPercentage) == "function" then
+                                   Squad_SetInvulnerableMinCap(sid, Squad_GetHealthPercentage(sid, false), -1)
+                                   unit_changed = unit_changed + 1
+                           end
+                   end)
+           end
+           if type(Entity_SetInvulnerableMinCap) == "function" then
+                   for _, eid in ipairs(eid_direct) do
+                           if not _devmenu_is_human_player_keep(eid) then
+                                   local cap = (type(Entity_GetHealthPercentage) == "function") and Entity_GetHealthPercentage(eid) or 1.0
+                                   pcall(Entity_SetInvulnerableMinCap, eid, cap, -1)
+                                   bldg_changed = bldg_changed + 1
+                           end
+                   end
+           end
+   end
+   local verb = currently_invuln and "removed" or "applied"
+   local prep = currently_invuln and " from " or " to "
+   local target_desc = (unit_changed > 0 and bldg_changed > 0)
+           and (tostring(unit_changed) .. " squad(s) + " .. tostring(bldg_changed) .. " building(s)")
+           or (unit_changed > 0 and tostring(unit_changed) .. " squad(s)" or tostring(bldg_changed) .. " building(s)")
+   print("[DEVMENU] invuln selected: " .. verb .. prep .. target_desc)
+   if type(DevMenu_ShowToast) == "function" then
+           DevMenu_ShowToast({ prefix = "invulnerability ", state_word = currently_invuln and "REMOVED" or "APPLIED",
+                   state_on = not currently_invuln, suffix = prep .. target_desc })
+   end
+end
+
+function DevMenu_DoTeleportSelected()
+	if type(DevMenu_TeleportSelectedToCameraCenter) == "function" then
+		DevMenu_TeleportSelectedToCameraCenter()
+	else
+		print("[DEVMENU] teleport: handler not available — UI not initialised yet")
+	end
+end
+
+-- True if `p` should appear in the convert rotation: alive, non-world, real
+-- player slot. Eliminated, surrendered, and disconnected slots return false
+-- (Player_IsAlive is the engine's authoritative liveness flag and covers all
+-- three). Disconnected players replaced by AI remain alive and are kept in
+-- the rotation; this matches the engine `zconvert` behaviour.
+local function _devmenu_is_valid_target_player(p)
+	if p == nil then return false end
+	if type(Player_GetID) == "function" then
+		local id = Player_GetID(p)
+		if id == nil then return false end
+		-- World/Gaia is conventionally id 0 (or negative on some builds); skip.
+		if id == 0 or id < 0 then return false end
+	end
+	if type(Player_IsAlive) == "function" and not Player_IsAlive(p) then
+		return false
+	end
+	return true
+end
+
+-- Build the ordered list of players the convert rotation should iterate
+-- through, preserving World_GetPlayerAt() index order so wraparound is
+-- deterministic across calls within a match.
+local function _devmenu_build_convert_rotation()
+	local list = {}
+	if type(World_GetPlayerCount) ~= "function" or type(World_GetPlayerAt) ~= "function" then
+		return list
+	end
+	local count = World_GetPlayerCount()
+	for i = 1, count do
+		local p = World_GetPlayerAt(i)
+		if _devmenu_is_valid_target_player(p) then
+			list[#list + 1] = p
+		end
+	end
+	return list
+end
+
+-- Re-order `rotation` so players allied to `anchor` appear first, then enemies.
+-- Uses Player_GetRelationship(p, anchor) == R_ALLY as the ally test.
+-- Falls back to unchanged order if the API is unavailable or anchor is nil.
+local function _devmenu_sort_rotation_allies_first(rotation, anchor)
+	if #rotation <= 1 then return rotation end
+	if anchor == nil then
+		print("[DEVMENU-CONV] sort: anchor=nil, skipping")
+		return rotation
+	end
+	if type(Player_GetRelationship) ~= "function" then
+		print("[DEVMENU-CONV] sort: Player_GetRelationship unavailable, skipping")
+		return rotation
+	end
+	-- R_ALLY may be a global number (1) or nil if undefined.
+	local ally_val = R_ALLY
+	if ally_val == nil then
+		print("[DEVMENU-CONV] sort: R_ALLY=nil, skipping")
+		return rotation
+	end
+	print("[DEVMENU-CONV] sort: anchor=" .. tostring(Player_GetID and Player_GetID(anchor))
+		.. " R_ALLY=" .. tostring(ally_val))
+	local anchor_id = Player_GetID and Player_GetID(anchor)
+	local allies, others = {}, {}
+	for _, p in ipairs(rotation) do
+		local pid = Player_GetID and Player_GetID(p)
+		local rel = Player_GetRelationship(p, anchor)
+		print("[DEVMENU-CONV] sort: p=" .. tostring(pid) .. " rel=" .. tostring(rel) .. " R_ALLY=" .. tostring(ally_val))
+		if anchor_id ~= nil and pid == anchor_id then
+			others[#others + 1] = p  -- self goes at end
+		elseif rel == ally_val then
+			allies[#allies + 1] = p
+		else
+			others[#others + 1] = p
+		end
+	end
+	local result = {}
+	for _, p in ipairs(allies) do result[#result + 1] = p end
+	for _, p in ipairs(others) do result[#result + 1] = p end
+	local order = {}
+	for _, p in ipairs(result) do order[#order+1] = tostring(Player_GetID and Player_GetID(p)) end
+	print("[DEVMENU-CONV] sort result: " .. table.concat(order, ","))
+	return result
+end
+
+-----------------------------------------------------------------------
+-- Player metadata helpers (used by Convert Selected for rich toasts +
+-- team-grouped rotation, and by future cheats that need a friendly
+-- player label).
+--
+-- _DEVMENU_RACE_FLAG_BASE      - WPF resource prefix for civ flag images.
+-- _DEVMENU_RACE_FLAG_OVERRIDES - race_name -> file stem when the file name
+--                                does NOT match the canonical race name
+--                                (e.g. sultanate -> flag_sultanates.png).
+-- _devmenu_get_player_team_safe(p) -> int (>=100 means "no team")
+-- _devmenu_player_info(p)      -> { display_name, civ_icon, team_id, is_ally, is_self }
+-- _devmenu_team_label(info)    -> "Team N (allied|enemy|you)" or "No team (...)"
+-- _devmenu_build_team_grouped_rotation(local_player) -> ordered player list
+-----------------------------------------------------------------------
+
+_DEVMENU_RACE_FLAG_BASE = _DEVMENU_RACE_FLAG_BASE
+	or "pack://application:,,,/WPFGUI;component/images/civ_flags/flag_"
+
+-- File-stem corrections only: race name != flag filename stem (same civ, different filename).
+-- Parent-redirect entries removed; variant civs with no own flag are listed in
+-- _DEVMENU_RACE_NO_FLAG below, which suppresses Tier-2 for them entirely.
+_DEVMENU_RACE_FLAG_OVERRIDES = _DEVMENU_RACE_FLAG_OVERRIDES or {
+	sultanate   = "sultanates",  -- flag_sultanates.png (plural)
+	jin_dynasty = "jin",         -- flag_jin.png (not flag_jin_dynasty.png)
+}
+
+-- Variant civs that share their parent's flag image: no own flag_<race>.png exists
+-- in WPFGUI. When Tier 3 (World_GetRaceIcon) also returns nothing, Tier 2 is skipped
+-- so the toast shows no flag rather than the parent faction's flag.
+_DEVMENU_RACE_NO_FLAG = _DEVMENU_RACE_NO_FLAG or {
+	-- Dynasties DLC
+	jeanne_darc         = true,
+	order_of_the_dragon = true,
+	zhu_xi_legacy       = true,
+	mongol_ha_gol       = true,
+	lancaster           = true,
+	templar             = true,
+	-- Sultan's Ascend DLC
+	abbasid_ha_01       = true,
+	chinese_ha_01       = true,
+	french_ha_01        = true,
+	hre_ha_01           = true,
+	byzantine_ha_mac    = true,
+	japanese_ha_sen     = true,
+	sultanate_ha_tug    = true,
+}
+
+local function _devmenu_get_player_team_safe(p)
+	if p == nil or type(Player_GetTeam) ~= "function" then return 0 end
+	local ok, t = pcall(Player_GetTeam, p)
+	if not ok or t == nil then return 0 end
+	return t
+end
+
+-- Global (was `local`) so cross-file callers in devmenu_mp_gate.scar (e.g.
+-- _devmenu_pressing_notify_blocked) can resolve it at runtime. SCAR `import()`
+-- gives each file its own chunk-local scope, so a `local function` here would
+-- be invisible to other devmenu .scar files even after both have loaded.
+function _devmenu_player_info(player)
+	local info = {
+		display_name = "Unknown",
+		civ_icon     = nil,
+		team_id      = nil,
+		is_ally      = false,
+		is_self      = false,
+	}
+	if player == nil then return info end
+
+	-- Display name (Player_GetDisplayName returns a LocString table).
+	if type(Player_GetDisplayName) == "function" then
+		local ok, ln = pcall(Player_GetDisplayName, player)
+		if ok and ln ~= nil then
+			if type(ln) == "table" and ln.LocString ~= nil then
+				info.display_name = tostring(ln.LocString)
+			else
+				info.display_name = tostring(ln)
+			end
+		end
+	end
+	if (info.display_name == "" or info.display_name == "Unknown")
+		and type(Player_GetID) == "function" then
+		info.display_name = "Player " .. tostring(Player_GetID(player))
+	end
+
+	-- Civ flag icon: three-tier resolution (Tier1 → Tier3 → Tier2).
+	-- Tier 1: _PlayerUI_RaceImage table (10 base civs; provably correct pack:// paths).
+	-- Tier 3: World_GetRaceIcon + PlayerUI_AdaptIconPathForXaml — tried BEFORE Tier 2
+	--         so DLC civs (jin_dynasty, byzantine, japanese, etc.) get a real engine
+	--         icon rather than a constructed pack:// URI for a PNG that does not exist
+	--         in WPFGUI.dll.  Previous code had Tier 3 guarded by `civ_icon == nil`
+	--         which was never true after Tier 2 ran — Tier 3 was dead code.
+	-- Tier 2: _DEVMENU_RACE_FLAG_BASE path construction — final fallback for civs
+	--         where Tier 3 also returns empty (e.g. truly unknown/modded races).
+	-- [DEVMENU-FLAG]      — which tier fired, final URI.
+	-- [DEVMENU-FLAG-TEST] — raw World_GetRaceIcon return value for runtime verification.
+	if type(Player_GetRaceName) == "function" then
+		local ok, race = pcall(Player_GetRaceName, player)
+		if ok and race ~= nil and race ~= "" then
+			-- Tier 1: pre-built table (proven working paths).
+			if type(_PlayerUI_RaceImage) == "table" and _PlayerUI_RaceImage[race] ~= nil then
+				info.civ_icon = _PlayerUI_RaceImage[race]
+				print("[DEVMENU-FLAG] " .. tostring(race) .. " -> Tier1 RaceImage: " .. tostring(info.civ_icon))
+			else
+				-- Tier 3: engine icon (runs BEFORE Tier 2 so DLC civs don't get a
+				-- broken pack:// path for a PNG that isn't embedded in WPFGUI.dll).
+				local tier3_used = false
+				if type(Player_GetRace) == "function"
+					and type(World_GetRaceIcon) == "function"
+					and type(PlayerUI_AdaptIconPathForXaml) == "function" then
+					local ok_race, race_bp = pcall(Player_GetRace, player)
+					if ok_race and race_bp ~= nil then
+						local ok_icon, icon_path = pcall(World_GetRaceIcon, race_bp)
+						-- [DEVMENU-FLAG-TEST] logs the raw engine return so you can
+						-- verify at runtime whether DLC civs get a valid path, an
+						-- empty string, or something else entirely.
+						print("[DEVMENU-FLAG-TEST] " .. tostring(race)
+							.. " -> World_GetRaceIcon raw: " .. tostring(icon_path)
+							.. " (ok=" .. tostring(ok_icon) .. ")")
+						if ok_icon and icon_path ~= nil and icon_path ~= "" then
+							info.civ_icon = PlayerUI_AdaptIconPathForXaml(icon_path)
+							tier3_used = true
+							print("[DEVMENU-FLAG] " .. tostring(race)
+								.. " -> Tier3 RaceIcon: " .. tostring(info.civ_icon))
+						end
+					end
+				end
+				-- Tier 2: path construction — only if Tier 3 produced nothing.
+				-- _DEVMENU_RACE_FLAG_OVERRIDES handles known filename mismatches.
+				-- _DEVMENU_RACE_NO_FLAG civs have no own flag image; skip Tier 2
+				-- rather than showing the parent faction's flag in the toast.
+				if not tier3_used then
+					if type(_DEVMENU_RACE_NO_FLAG) == "table" and _DEVMENU_RACE_NO_FLAG[race] then
+						print("[DEVMENU-FLAG] " .. tostring(race)
+							.. " -> Tier2 skip: no own flag (variant civ)")
+					else
+						local key = _DEVMENU_RACE_FLAG_OVERRIDES[race] or race
+						info.civ_icon = _DEVMENU_RACE_FLAG_BASE .. tostring(key) .. ".png"
+						print("[DEVMENU-FLAG] " .. tostring(race)
+							.. " -> Tier2 path: " .. tostring(info.civ_icon))
+					end
+				end
+			end
+			print("[DEVMENU-FLAG-TEST] " .. tostring(race)
+				.. " -> final civ_icon: " .. tostring(info.civ_icon))
+		end
+	end
+
+	-- Team id (>=100 is the engine convention for "no team").
+	info.team_id = _devmenu_get_player_team_safe(player)
+
+	-- Ally / self check vs local player.
+	local local_p = _devmenu_local_player()
+	if local_p ~= nil then
+		if type(Player_GetID) == "function"
+			and Player_GetID(local_p) == Player_GetID(player) then
+			info.is_self = true
+			info.is_ally = true
+		elseif type(Player_GetRelationship) == "function" and R_ALLY ~= nil then
+			local ok, rel = pcall(Player_GetRelationship, player, local_p)
+			if ok and rel == R_ALLY then info.is_ally = true end
+		end
+	end
+
+	return info
+end
+
+-- Global (was `local`) for the same cross-file-import reason as
+-- _devmenu_player_info above.
+function _devmenu_team_label(info)
+	if info == nil then return "" end
+	local relation
+	if info.is_self then
+		relation = "you"
+	elseif info.is_ally then
+		relation = "allied"
+	else
+		relation = "enemy"
+	end
+	local team = info.team_id
+	if team == nil or team >= 100 then
+		return "No team (" .. relation .. ")"
+	end
+	return "Team " .. tostring(team) .. " (" .. relation .. ")"
+end
+
+-- Resolve player info from a numeric Player_GetID with robust fallbacks.
+-- Used by both action dispatchers (single-owner attribution toast) and the
+-- block-actions notification in devmenu_mp_gate.scar.
+-- Tiers:
+--   1) World_GetPlayerAt iteration -> _devmenu_player_info(Player object)
+--      (matches the pattern Convert uses; deterministic on all peers).
+--   2) Synthetic info with display_name = "Player <pid>" so toasts never
+--      surface raw "Unknown"/"that player" defaults to the user.
+function _devmenu_resolve_player_info_by_pid(pid)
+	local pid_num = tonumber(pid)
+	if pid_num ~= nil
+		and type(World_GetPlayerCount) == "function"
+		and type(World_GetPlayerAt)    == "function"
+		and type(Player_GetID)         == "function" then
+		for i = 1, World_GetPlayerCount() do
+			local p = World_GetPlayerAt(i)
+			if p ~= nil and Player_GetID(p) == pid_num then
+				return _devmenu_player_info(p)
+			end
+		end
+	end
+	return {
+		display_name = (pid_num ~= nil) and ("Player " .. tostring(pid_num)) or "Unknown player",
+		civ_icon     = nil,
+		team_id      = nil,
+		is_self      = false,
+		is_ally      = false,
+	}
+end
+
+-- Given a {[pid] = count} table populated while iterating a selection,
+-- return (single_owner_pid, total_count) where single_owner_pid is non-nil
+-- only when the selection had exactly one owner. Used by DESTROY / BURN /
+-- TELEPORT / INVULN_SEL dispatchers to decide whether to emit the rich
+-- Convert-style {msg, flag, name, subtext} toast or fall back to a generic
+-- toast for mixed-owner selections.
+function _devmenu_single_owner(owner_pids)
+	if type(owner_pids) ~= "table" then return nil, 0 end
+	local single, count, total = nil, 0, 0
+	for pid, n in pairs(owner_pids) do
+		count = count + 1
+		single = pid
+		total = total + (tonumber(n) or 0)
+	end
+	if count == 1 then return single, total end
+	return nil, total
+end
+
+-- Build the convert rotation grouped by team. Order:
+--   1. Local player's team allies (excluding self), sorted by player ID
+--   2. Each other team in ascending team_id, sorted by player ID
+--   3. "No team" players (team_id >= 100) at end
+--   4. Local player (self) appended last
+--
+-- This produces deterministic cycling that:
+--   - Starting from self, jumps to the first allied teammate
+--   - Cycles through allies in ID order, then through enemy teams
+--   - Wraps from the last enemy back through self, then to allies again
+-- Supports 1..8 teams transparently; uses Player_GetTeam values.
+local function _devmenu_build_team_grouped_rotation(local_player)
+	local raw = _devmenu_build_convert_rotation()
+	if #raw == 0 then return {} end
+
+	local local_team = nil
+	local local_id   = nil
+	if local_player ~= nil then
+		if type(Player_GetID) == "function" then
+			local_id = Player_GetID(local_player)
+		end
+		local_team = _devmenu_get_player_team_safe(local_player)
+	end
+
+	-- Group non-self players by team_id.
+	local by_team    = {}
+	local team_ids   = {}
+	local self_player = nil
+	for _, p in ipairs(raw) do
+		local pid = (type(Player_GetID) == "function") and Player_GetID(p) or nil
+		if local_id ~= nil and pid == local_id then
+			self_player = p
+		else
+			local t = _devmenu_get_player_team_safe(p)
+			if by_team[t] == nil then
+				by_team[t] = {}
+				table.insert(team_ids, t)
+			end
+			table.insert(by_team[t], p)
+		end
+	end
+
+	-- Sort each team's player list by player ID.
+	for _, plist in pairs(by_team) do
+		table.sort(plist, function(a, b)
+			local ia = (type(Player_GetID) == "function") and Player_GetID(a) or 0
+			local ib = (type(Player_GetID) == "function") and Player_GetID(b) or 0
+			return ia < ib
+		end)
+	end
+
+	-- Sort team IDs: local_team first, then ascending; team_id >= 100 last.
+	table.sort(team_ids, function(a, b)
+		if local_team ~= nil then
+			if a == local_team and b ~= local_team then return true end
+			if b == local_team and a ~= local_team then return false end
+		end
+		local a_unteam = a >= 100
+		local b_unteam = b >= 100
+		if a_unteam ~= b_unteam then return not a_unteam end
+		return a < b
+	end)
+
+	-- Compose final rotation: groups in team-order, self appended last.
+	local rotation = {}
+	for _, t in ipairs(team_ids) do
+		for _, p in ipairs(by_team[t]) do
+			table.insert(rotation, p)
+		end
+	end
+	if self_player ~= nil then
+		table.insert(rotation, self_player)
+	end
+
+	-- Diagnostic dump: log every player in the rotation with team / relation.
+	local lines = {}
+	for i, p in ipairs(rotation) do
+		local info = _devmenu_player_info(p)
+		local pid  = (type(Player_GetID) == "function") and Player_GetID(p) or "?"
+		lines[#lines + 1] = string.format("  [%d] pid=%s team=%s self=%s ally=%s name=%s",
+			i, tostring(pid), tostring(info.team_id),
+			tostring(info.is_self), tostring(info.is_ally), info.display_name)
+	end
+	print("[DEVMENU-CONV] team-grouped rotation (" .. tostring(#rotation) .. " players):")
+	for _, l in ipairs(lines) do print(l) end
+
+	return rotation
+end
+
+-- Returns the player immediately after `current_owner` in the rotation
+-- (wrapping). If `current_owner` is not present in the rotation (e.g. owned
+-- by world/gaia or an eliminated player), returns the first valid player.
+local function _devmenu_next_convert_target(current_owner, rotation)
+	local n = #rotation
+	if n == 0 then return nil end
+	if n == 1 then return rotation[1] end
+	if current_owner == nil or type(Player_GetID) ~= "function" then
+		return rotation[1]
+	end
+	local current_id = Player_GetID(current_owner)
+	for i = 1, n do
+		if Player_GetID(rotation[i]) == current_id then
+			return rotation[(i % n) + 1]
+		end
+	end
+	-- Owner not in rotation (dead/world): start at the first valid player.
+	return rotation[1]
+end
+
+function DevMenu_DoConvertSelected()
+	-- Cycle behaviour: each press transfers the selection to the next valid player.
+	-- Allied team players (same non-zero team as the current owner) come first in
+	-- the rotation; enemies follow. Eliminated/world/gaia slots are skipped.
+	--
+	-- Unit squads are converted via Squad_SetPlayerOwner.
+	-- Buildings are also converted via Entity_SetPlayerOwner in case they are not
+	-- reliably exposed through Misc_GetSelectedSquads.
+	local sg = _devmenu_collect_selected_squads()
+	local eg = _devmenu_collect_selected_entities()
+	local sq_count = (sg ~= nil and type(SGroup_CountSpawned) == "function") and SGroup_CountSpawned(sg) or 0
+	local eg_count = (eg ~= nil and type(EGroup_CountSpawned) == "function") and EGroup_CountSpawned(eg) or 0
+
+	if sq_count == 0 and eg_count == 0 then
+		print("[DEVMENU] convert: no selection")
+		return
+	end
+
+	-- Identify current owner: prefer squad source, fall back to entity source.
+	local current_owner = nil
+	if sq_count > 0
+		and type(SGroup_GetSpawnedSquadAt) == "function"
+		and type(Squad_GetPlayerOwner) == "function" then
+		local first = SGroup_GetSpawnedSquadAt(sg, 1)
+		if first ~= nil then current_owner = Squad_GetPlayerOwner(first) end
+	end
+	if current_owner == nil and eg_count > 0
+		and type(EGroup_GetSpawnedEntityAt) == "function"
+		and type(Entity_GetPlayerOwner) == "function" then
+		local first_eid = EGroup_GetSpawnedEntityAt(eg, 1)
+		if first_eid ~= nil then current_owner = Entity_GetPlayerOwner(first_eid) end
+	end
+
+	-- Build rotation grouped by team: local_team allies first (excluding self),
+	-- then teams in ascending team_id, with self appended at the very end so
+	-- pressing Convert while owning the target wraps to the first allied teammate.
+	local local_player = _devmenu_local_player()
+	local rotation = _devmenu_build_team_grouped_rotation(local_player)
+	if #rotation == 0 then
+		print("[DEVMENU] convert: no valid target players (rotation empty)")
+		return
+	end
+
+	local target_player = _devmenu_next_convert_target(current_owner, rotation)
+	if target_player == nil then
+		print("[DEVMENU] convert: failed to pick next target")
+		return
+	end
+
+	-- Compute cycle position before any routing so both MP and SP toasts show [N/M].
+	-- Renumber so local player always displays as slot 1 (local is always appended last
+	-- in _devmenu_build_team_grouped_rotation, so its position in the rotation is known).
+	-- Formula: display = (target_idx - local_idx + N) % N + 1
+	-- Example: rotation=[ally1,ally2,self] (N=3), local at 3.
+	--   target=self  (idx 3): (3-3+3)%3+1 = 0%3+1 = 1  -> shows 1/3
+	--   target=ally1 (idx 1): (1-3+3)%3+1 = 1%3+1 = 2  -> shows 2/3
+	local cycle_idx  = 0
+	local local_idx  = 0
+	local cycle_size = #rotation
+	if type(Player_GetID) == "function" then
+		local tid       = Player_GetID(target_player)
+		local local_pid = (local_player ~= nil) and Player_GetID(local_player) or nil
+		for i, p in ipairs(rotation) do
+			local pid = Player_GetID(p)
+			if pid == tid                                    then cycle_idx = i end
+			if local_pid ~= nil and pid == local_pid then local_idx = i end
+		end
+	end
+	local display_idx = 0
+	if cycle_idx > 0 and cycle_size > 0 then
+		if local_idx > 0 then
+			display_idx = (cycle_idx - local_idx + cycle_size) % cycle_size + 1
+		else
+			display_idx = cycle_idx
+		end
+	end
+	local cycle_str = (display_idx > 0 and cycle_size > 0)
+		and string.format(" [%d/%d]", display_idx, cycle_size) or ""
+
+	-- MP routing: serialize target player ID + squad/entity IDs and broadcast to all peers.
+	if _devmenu_is_multiplayer()
+		and type(Player_GetID) == "function"
+		and type(Squad_GetID) == "function"
+		and type(Entity_GetID) == "function" then
+		local target_pid = Player_GetID(target_player)
+		local sqids = {}
+		if sq_count > 0 and type(SGroup_ForEach) == "function" then
+			SGroup_ForEach(sg, function(_, _, sid)
+				sqids[#sqids + 1] = tostring(Squad_GetID(sid))
+			end)
+		end
+		local eids = {}
+		local ent_skipped_mp = 0
+		if eg_count > 0 and type(EGroup_ForEach) == "function" then
+			EGroup_ForEach(eg, function(_, _, eid)
+				if Entity_IsOfType(eid, "building") then
+					-- POLICY: never convert a human player's starter keep/TC.
+					if _devmenu_is_human_player_keep(eid) then
+						ent_skipped_mp = ent_skipped_mp + 1
+					else
+						eids[#eids + 1] = tostring(Entity_GetID(eid))
+					end
+				end
+			end)
+		end
+		-- When every selected building was a protected keep, surface a toast instead
+		-- of broadcasting a zero-item convert that silently does nothing.
+		if #sqids == 0 and #eids == 0 then
+			if type(DevMenu_ShowToast) == "function" and ent_skipped_mp > 0 then
+				DevMenu_ShowToast(string.format("%d starter keep(s) protected — cannot convert", ent_skipped_mp))
+			end
+			return
+		end
+		local payload_parts = { tostring(target_pid), tostring(#sqids) }
+		for _, v in ipairs(sqids) do payload_parts[#payload_parts + 1] = v end
+		for _, v in ipairs(eids) do payload_parts[#payload_parts + 1] = v end
+		if _devmenu_mp_net_action(_devmenu_local_player(), "DEVMENU_CONVERT",
+			table.concat(payload_parts, " ")) then
+			-- Toast fires via gate handler result notify (after lockstep dispatch).
+			return
+		end
+	end
+
+	local from_info = _devmenu_player_info(current_owner)
+	local to_info   = _devmenu_player_info(target_player)
+	local from_label = (current_owner ~= nil and type(Player_GetID) == "function")
+		and tostring(Player_GetID(current_owner)) or "?"
+	local to_label   = (target_player ~= nil and type(Player_GetID) == "function")
+		and tostring(Player_GetID(target_player)) or "?"
+
+	-- Squad path: unit squads and any building squads the engine exposes here.
+	local sq_converted = 0
+	if sq_count > 0 and type(SGroup_ForEach) == "function" and type(Squad_SetPlayerOwner) == "function" then
+		SGroup_ForEach(sg, function(_, _, sid)
+			Squad_SetPlayerOwner(sid, target_player)
+			sq_converted = sq_converted + 1
+		end)
+	end
+
+	-- Entity path: buildings that may only appear in entity selection.
+	local ent_converted = 0
+	local ent_skipped   = 0
+	if eg_count > 0 and type(EGroup_ForEach) == "function" and type(Entity_SetPlayerOwner) == "function" then
+		EGroup_ForEach(eg, function(_, _, eid)
+			if Entity_IsOfType(eid, "building") then
+				-- POLICY: never convert a human player's starter keep/TC.
+				if _devmenu_is_human_player_keep(eid) then
+					ent_skipped = ent_skipped + 1
+					print("[DEVMENU] convert: skipped human player's keep/town-centre")
+					return
+				end
+				Entity_SetPlayerOwner(eid, target_player)
+				ent_converted = ent_converted + 1
+			end
+		end)
+	end
+
+	local total_converted = sq_converted + ent_converted
+
+	print(string.format("[DEVMENU] converted %d squad(s) + %d building(s) from player %s -> player %s (rotation %s, skipped_keeps=%d)",
+		sq_converted, ent_converted, from_label, to_label,
+		tostring(cycle_idx) .. "/" .. tostring(cycle_size), ent_skipped))
+	if type(DevMenu_ShowToast) == "function" then
+		if total_converted > 0 then
+			DevMenu_ShowToast({
+				msg     = string.format("%d item(s) converted ->%s", total_converted, cycle_str),
+				flag    = to_info.civ_icon,
+				name    = to_info.display_name,
+				subtext = _devmenu_team_label(to_info),
+			})
+		elseif ent_skipped > 0 then
+			-- All selected buildings were protected starter keeps.
+			DevMenu_ShowToast(string.format("%d starter keep(s) protected — cannot convert", ent_skipped))
+		end
+	end
+end
+
+function DevMenu_DoDestroySelected()
+	-- ChatCheatDestroySelected requires Misc_AddEntitiesToGroup(group, String)
+	-- with an engine-encoded string — passing a Lua table silently does nothing.
+	-- Use EGroup_ForEach + Entity_Kill directly on the selected EGroup instead.
+	if type(Entity_Kill) ~= "function" then
+		print("[DEVMENU] destroy: Entity_Kill API unavailable")
+		return
+	end
+	-- MP routing: collect entity IDs from selection and broadcast for all-peer kill.
+	if _devmenu_is_multiplayer() and type(Entity_GetID) == "function" then
+		local ids = {}
+		local skipped_mp = 0  -- keeps/TCs blocked by policy; used for feedback on empty result
+		local owner_pids = {}  -- DEVMENU-RICH-TOAST: pid -> count for single-owner attribution
+		local eg_mp = _devmenu_collect_selected_entities()
+		if eg_mp ~= nil and type(EGroup_CountSpawned) == "function" and EGroup_CountSpawned(eg_mp) > 0 then
+			if type(EGroup_ForEach) == "function" then
+				EGroup_ForEach(eg_mp, function(_, _, eid)
+					if eid ~= nil then
+						-- POLICY: never destroy a human player's starter keep/TC.
+						if _devmenu_is_human_player_keep(eid) then
+							skipped_mp = skipped_mp + 1
+						elseif type(Entity_IsInvincible) ~= "function" or not Entity_IsInvincible(eid) then
+							ids[#ids + 1] = tostring(Entity_GetID(eid))
+							-- DEVMENU-RICH-TOAST: track owner for attribution toast.
+							local _o = (type(Entity_GetPlayerOwner) == "function")
+								and ((type(World_OwnsEntity) ~= "function" or World_OwnsEntity(eid)) and Entity_GetPlayerOwner(eid) or nil)
+								or nil
+							local _opid = (_o ~= nil and type(Player_GetID) == "function") and Player_GetID(_o) or nil
+							if _opid ~= nil then owner_pids[_opid] = (owner_pids[_opid] or 0) + 1 end
+						end
+					end
+				end)
+			end
+		else
+			local sg_mp = _devmenu_collect_selected_squads()
+			if sg_mp ~= nil and type(SGroup_CountSpawned) == "function" and SGroup_CountSpawned(sg_mp) > 0
+				and type(SGroup_ForEach) == "function" and type(Squad_GetFirstEntity) == "function" then
+				SGroup_ForEach(sg_mp, function(_, _, sid)
+					local eid = Squad_GetFirstEntity(sid)
+					if eid ~= nil then
+						-- POLICY: never destroy a human player's starter keep/TC.
+						if _devmenu_is_human_player_keep(eid) then
+							skipped_mp = skipped_mp + 1
+						elseif type(Entity_IsInvincible) ~= "function" or not Entity_IsInvincible(eid) then
+							ids[#ids + 1] = tostring(Entity_GetID(eid))
+							-- DEVMENU-RICH-TOAST: track owner for attribution toast.
+							local _o = (type(Entity_GetPlayerOwner) == "function")
+								and ((type(World_OwnsEntity) ~= "function" or World_OwnsEntity(eid)) and Entity_GetPlayerOwner(eid) or nil)
+								or nil
+							local _opid = (_o ~= nil and type(Player_GetID) == "function") and Player_GetID(_o) or nil
+							if _opid ~= nil then owner_pids[_opid] = (owner_pids[_opid] or 0) + 1 end
+						end
+					end
+				end)
+			end
+		end
+		if #ids == 0 then
+			if type(DevMenu_ShowToast) == "function" and skipped_mp > 0 then
+				DevMenu_ShowToast(string.format("%d starter keep(s) protected — cannot destroy", skipped_mp))
+			else
+				print("[DEVMENU] destroy: no selection")
+			end
+			return
+		end
+		if _devmenu_mp_net_action(_devmenu_local_player(), "DEVMENU_DESTROY",
+			table.concat(ids, " ")) then
+			-- Toast fires via gate handler result notify (after lockstep dispatch).
+			return
+		end
+	end
+	-- SP path: direct Entity_Kill.
+	local killed  = 0
+	local skipped = 0
+	-- Primary path: EGroup from Misc_GetSelectedEntities.
+	local eg = _devmenu_collect_selected_entities()
+	if eg ~= nil and type(EGroup_CountSpawned) == "function" and EGroup_CountSpawned(eg) > 0 then
+		EGroup_ForEach(eg, function(_, _, eid)
+			if eid ~= nil then
+				-- POLICY: never destroy a human player's starter keep/TC.
+				if _devmenu_is_human_player_keep(eid) then
+					skipped = skipped + 1
+					print("[DEVMENU] destroy: skipped human player's keep/town-centre")
+					return
+				end
+				if (type(Entity_IsInvincible) ~= "function" or not Entity_IsInvincible(eid)) then
+					Entity_Kill(eid)
+					killed = killed + 1
+				end
+			end
+		end)
+	else
+		-- Fallback: kill the first entity of every selected squad.
+		local sg = _devmenu_collect_selected_squads()
+		if sg == nil or (type(SGroup_CountSpawned) == "function" and SGroup_CountSpawned(sg) == 0) then
+			print("[DEVMENU] destroy: no selection")
+			return
+		end
+		if type(SGroup_ForEach) == "function" and type(Squad_GetFirstEntity) == "function" then
+			SGroup_ForEach(sg, function(_, _, sid)
+				local eid = Squad_GetFirstEntity(sid)
+				if eid ~= nil then
+					-- POLICY: never destroy a human player's starter keep/TC.
+					if _devmenu_is_human_player_keep(eid) then
+						skipped = skipped + 1
+						print("[DEVMENU] destroy: skipped human player's keep/town-centre")
+						return
+					end
+					if (type(Entity_IsInvincible) ~= "function" or not Entity_IsInvincible(eid)) then
+						Entity_Kill(eid)
+						killed = killed + 1
+					end
+				end
+			end)
+		end
+	end
+	print("[DEVMENU] destroyed " .. tostring(killed) .. " entity/entities"
+		.. (skipped > 0 and (" (skipped " .. tostring(skipped) .. " keep(s))") or ""))
+	if type(DevMenu_ShowToast) == "function" then
+		if killed > 0 then
+			DevMenu_ShowToast(string.format("%d entity/entities destroyed", killed))
+		elseif skipped > 0 then
+			-- All selected entities were protected starter keeps.
+			DevMenu_ShowToast(string.format("%d starter keep(s) protected — cannot destroy", skipped))
+		end
+	end
+end
+
+-- Per-entity table storing the modifier IDs applied to lift the fire threshold.
+-- Keyed by Entity_GetID so we can remove the modifier cleanly on extinguish.
+-- Per-client only (same scope as all other devmenu state).
+_devmenu_burn_modifier_table = _devmenu_burn_modifier_table or {}
+
+function DevMenu_DoBurnSelected()
+	-- Toggle behaviour: calling this on a burning building extinguishes it;
+	-- calling it on a non-burning building ignites it.
+	-- Ignition path: lift the on_fire_health_percentage_modifier threshold so
+	-- the building can ignite at any health level (reference: CheatSetFireToBuildings
+	-- in chatcheats.scar), then Entity_SetOnFire. Modifier ID stored per entity.
+	-- Extinguish path: Entity_StopFire (if available) + Modifier_Remove for the
+	-- stored threshold modifier. Mirrors the repair extinguish path in ManageTheFires.
+	if type(Entity_SetOnFire) ~= "function" then
+		print("[DEVMENU] burn: Entity_SetOnFire API unavailable")
+		return
+	end
+	local eg = _devmenu_collect_selected_entities()
+	if eg == nil or (type(EGroup_CountSpawned) == "function" and EGroup_CountSpawned(eg) == 0) then
+		print("[DEVMENU] burn: no entities in selection")
+		return
+	end
+	-- MP routing: separate burning vs non-burning buildings and broadcast each batch.
+	if _devmenu_is_multiplayer() and type(Entity_GetID) == "function" then
+		local burn_ids   = {}
+		local unburn_ids = {}
+		-- DEVMENU-RICH-TOAST: pid -> count, combined across ignite + extinguish.
+		local owner_pids = {}
+		EGroup_ForEach(eg, function(_, _, eid)
+			if eid == nil then return end
+			if not (type(Entity_IsBuilding) == "function" and Entity_IsBuilding(eid)) then return end
+			if type(Entity_IsUnderConstruction) == "function" and Entity_IsUnderConstruction(eid) then return end
+			local id_str = tostring(Entity_GetID(eid))
+			if type(Entity_IsBurning) == "function" and Entity_IsBurning(eid) then
+				unburn_ids[#unburn_ids + 1] = id_str
+			else
+				burn_ids[#burn_ids + 1] = id_str
+			end
+			-- DEVMENU-RICH-TOAST: track owner.
+			local _o = (type(Entity_GetPlayerOwner) == "function")
+				and ((type(World_OwnsEntity) ~= "function" or World_OwnsEntity(eid)) and Entity_GetPlayerOwner(eid) or nil)
+				or nil
+			local _opid = (_o ~= nil and type(Player_GetID) == "function") and Player_GetID(_o) or nil
+			if _opid ~= nil then owner_pids[_opid] = (owner_pids[_opid] or 0) + 1 end
+		end)
+		local local_player = _devmenu_local_player()
+		local routed = false
+		if #burn_ids > 0 then
+			if _devmenu_mp_net_action(local_player, "DEVMENU_BURN", table.concat(burn_ids, " ")) then
+				routed = true
+			end
+		end
+		if #unburn_ids > 0 then
+			if _devmenu_mp_net_action(local_player, "DEVMENU_UNBURN", table.concat(unburn_ids, " ")) then
+				routed = true
+			end
+		end
+		if routed then
+			-- Toast fires via gate handler result notify (after lockstep dispatch).
+			return
+		end
+		if #burn_ids == 0 and #unburn_ids == 0 then
+			print("[DEVMENU] burn: no eligible buildings in selection")
+			if type(DevMenu_ShowToast) == "function" then
+				DevMenu_ShowToast("No eligible buildings in selection")
+			end
+			return
+		end
+	end
+	-- SP path.
+	local ignited = 0
+	local extinguished = 0
+	EGroup_ForEach(eg, function(_, _, eid)
+		if eid == nil then return end
+		if not (type(Entity_IsBuilding) == "function" and Entity_IsBuilding(eid)) then return end
+		if type(Entity_IsUnderConstruction) == "function" and Entity_IsUnderConstruction(eid) then return end
+		-- Keep guard: never burn a human player's keep or town centre (mirrors gate handler).
+		if type(Entity_IsOfType) == "function" and type(Entity_GetPlayerOwner) == "function" then
+			local _bk_owner = Entity_GetPlayerOwner(eid)
+			local _bk_is_keep = Entity_IsOfType(eid, "castle") or Entity_IsOfType(eid, "scar_keep") or Entity_IsOfType(eid, "town_center")
+			if _bk_is_keep and _bk_owner ~= nil and type(Player_IsHuman) == "function" and Player_IsHuman(_bk_owner) then return end
+		end
+		local entity_id = type(Entity_GetID) == "function" and Entity_GetID(eid) or nil
+		-- Already burning: extinguish.
+		if type(Entity_IsBurning) == "function" and Entity_IsBurning(eid) then
+			-- Remove the threshold modifier we applied (if any).
+			if entity_id ~= nil and _devmenu_burn_modifier_table[entity_id] ~= nil then
+				if type(Modifier_Remove) == "function" then
+					Modifier_Remove(_devmenu_burn_modifier_table[entity_id])
+				end
+				_devmenu_burn_modifier_table[entity_id] = nil
+			end
+			if type(Entity_StopFire) == "function" then
+				Entity_StopFire(eid)
+				extinguished = extinguished + 1
+			else
+				print("[DEVMENU] burn: Entity_StopFire unavailable — cannot extinguish")
+			end
+			return
+		end
+		-- Not burning: lift threshold then ignite.
+		local mod_id = nil
+		if type(Entity_GetOnFireHealthPercentThreshold) == "function" and
+		   type(Modifier_Create) == "function" and
+		   type(Modifier_ApplyToEntity) == "function" then
+			local threshold = Entity_GetOnFireHealthPercentThreshold(eid)
+			if threshold > 0.0 then
+				local increase = math.floor((1.0 / threshold) + 0.5)
+				local mod = Modifier_Create(MAT_Entity, "on_fire_health_percentage_modifier", MUT_Multiplication, false, increase, "")
+				mod_id = Modifier_ApplyToEntity(mod, eid, 0)
+			end
+		end
+		Entity_SetOnFire(eid)
+		if entity_id ~= nil and mod_id ~= nil then
+			_devmenu_burn_modifier_table[entity_id] = mod_id
+		end
+		ignited = ignited + 1
+	end)
+	if ignited > 0 then
+		print("[DEVMENU] set " .. tostring(ignited) .. " building(s) on fire")
+	end
+	if extinguished > 0 then
+		print("[DEVMENU] extinguished " .. tostring(extinguished) .. " building(s)")
+	end
+	if ignited == 0 and extinguished == 0 then
+		print("[DEVMENU] burn: no eligible buildings in selection")
+		if type(DevMenu_ShowToast) == "function" then
+			DevMenu_ShowToast("No eligible buildings in selection")
+		end
+	elseif type(DevMenu_ShowToast) == "function" then
+		local parts = {}
+		if ignited > 0 then parts[#parts + 1] = string.format("%d ignited", ignited) end
+		if extinguished > 0 then parts[#parts + 1] = string.format("%d extinguished", extinguished) end
+		DevMenu_ShowToast(table.concat(parts, ", ") .. " building(s)")
+	end
+end
+
+-----------------------------------------------------------------------
+-- Quick (persistent, non-modal) Cheat Actions panel — toggle + state.
+-- The actual UI is owned by devmenu.scar; these wrappers just resolve
+-- the public functions the data table binds to.
+-----------------------------------------------------------------------
+
+function DevMenu_ToggleQuickPanel()
+	if type(_devmenu_quick_panel_toggle) == "function" then
+		_devmenu_quick_panel_toggle()
+		-- If we just turned the Quick Panel ON, close the modal CHEAT panel
+		-- so the contextual cheats (Teleport / Convert / etc.) become usable
+		-- without the user having to dismiss the blocking dialog manually.
+		if type(_devmenu_quick_panel_is_enabled) == "function" and _devmenu_quick_panel_is_enabled() then
+			if type(DevMenu_CloseCHEATPanel) == "function" then
+				DevMenu_CloseCHEATPanel()
+			end
+		end
+		if type(DevMenu_ShowToast) == "function" then
+			local on = (type(_devmenu_quick_panel_is_enabled) == "function") and _devmenu_quick_panel_is_enabled() or false
+			DevMenu_ShowToast({ prefix = "Quick Panel: ", state_word = on and "SHOWN" or "HIDDEN", state_on = on })
+		end
+	else
+		print("[DEVMENU] quick panel runtime not initialised")
+	end
+end
+
+function DevMenu_GetQuickPanelEnabled()
+	if type(_devmenu_quick_panel_is_enabled) == "function" then
+		return _devmenu_quick_panel_is_enabled()
+	end
+	return false
+end
+
+function DevMenu_ToggleSpawnPanel()
+	if type(_devmenu_spawn_panel_toggle) == "function" then
+		_devmenu_spawn_panel_toggle()
+		if type(DevMenu_ShowToast) == "function" then
+			local on = (type(_devmenu_spawn_panel_is_enabled) == "function") and _devmenu_spawn_panel_is_enabled() or false
+			DevMenu_ShowToast({ prefix = "Spawn Panel: ", state_word = on and "SHOWN" or "HIDDEN", state_on = on })
+		end
+	else
+		print("[DEVMENU] spawn panel runtime not initialised")
+	end
+end
+
+function DevMenu_GetSpawnPanelEnabled()
+	if type(_devmenu_spawn_panel_is_enabled) == "function" then
+		return _devmenu_spawn_panel_is_enabled()
+	end
+	return false
+end
+
+-----------------------------------------------------------------------
+-- Diagnostics
+-----------------------------------------------------------------------
+
+function DevMenu_DiagRun()
+	if type(DevMenu_DiagRunAll) == "function" then
+		DevMenu_DiagRunAll()
+	else
+		print("[DEVMENU] DiagRunAll not available — devmenu_diag.scar may not be imported")
+	end
+end

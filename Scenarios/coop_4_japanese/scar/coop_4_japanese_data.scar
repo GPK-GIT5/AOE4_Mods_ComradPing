@@ -1,0 +1,1840 @@
+-- Used in Mission_SetRestrictions / AGS_ENTITY_TABLE
+AGS_BP_STONEWALL = "stone_wall"
+AGS_BP_PALISADE = "palisade_wall"
+AGS_BP_KEEP = "castle"
+AGS_BP_WORKSHOP = "siege_workshop"
+AGS_BP_DOCK = "scar_dock"
+AGS_BP_CAPITAL = "town_center_capital"
+AGS_BP_LUMBER = "lumber_camp"
+-- Used in Mission_SetRestrictions / CBA_SIEGE_TABLE
+BP_SIEGE_MANGONEL = "mangonel"
+BP_SIEGE_RIBAULDEQUIN = "ribauldequin"
+BP_SIEGE_NESTOFBEES = "nest_of_bees" -- Shared 4x (byz/mon/chi/chi_ha_01)
+-- Faction specific
+BP_SIEGE_MANGONEL_BUILDABLE = "mangonel_buildable"
+BP_SIEGE_SPRINGALD_BUILDABLE = "springald_buildable"
+BP_SIEGE_TREBUCHET_BUILDABLE = "trebuchet_buildable"
+--BP_SIEGE_MANGONEL_ABB_HA_01 = "unit_mangonel_3_buildable_abb_ha_01"
+--BP_SIEGE_MANGONEL_MON = "unit_mangonel_3_field_construct_mon"
+BP_SIEGE_MANGONEL_DOUBLE  = "mangonel_double"
+BP_SIEGE_RIBAULDEQUIN_DOUBLE  = "ribauldequin_double"
+BP_SIEGE_ROYAL_RIBAULDEQUIN = "royal_ribauldequin"
+BP_SIEGE_NESTOFBEES_CLOCKTOWER_CHI   = "nestofbees_clocktower_chi"
+
+-- TC vision suppression tracking (pre-objective lock phase).
+g_tc_vision_mods = {}
+g_tc_vision_applied = {}
+
+local function _GetPlayerTCEGroup(player_id)
+	if player_id == player1 then return eg_player1_tc end
+	if player_id == player2 then return eg_player2_tc end
+	if player_id == player3 then return eg_player3_tc end
+	if player_id == player4 then return eg_player4_tc end
+	return nil
+end
+
+function _ApplyTC_VisionSuppression(player_id, sight_multiplier)
+	if g_tc_vision_applied[player_id] then
+		return
+	end
+
+	local tc_group = _GetPlayerTCEGroup(player_id)
+	if tc_group == nil or EGroup_Count(tc_group) == 0 then
+		return
+	end
+
+	local multiplier = sight_multiplier
+	if multiplier == nil then
+		multiplier = 0
+	end
+
+	local modSight = Modifier_Create(MAT_Entity, "sight_radius_modifier", MUT_Multiplication, false, multiplier, "")
+	g_tc_vision_mods[player_id] = {}
+
+	for i = 1, EGroup_Count(tc_group) do
+		local eid = EGroup_GetEntityAt(tc_group, i)
+		if Entity_IsValid(Entity_GetID(eid)) then
+			table.insert(g_tc_vision_mods[player_id], Modifier_ApplyToEntity(modSight, eid, 0))
+		end
+	end
+
+	g_tc_vision_applied[player_id] = true
+end
+
+function _RemoveTC_VisionSuppression(player_id)
+	local mods = g_tc_vision_mods[player_id]
+	if scartype(mods) == ST_TABLE then
+		for _, modifier in pairs(mods) do
+			Modifier_Remove(modifier)
+		end
+	end
+
+	g_tc_vision_mods[player_id] = {}
+	g_tc_vision_applied[player_id] = false
+end
+
+-- Spawn Compositions: Maps DC tier strings to Unit_Types keys
+-- See difficulty.scar for tier values, Unit_Types below for unit lists
+Spawn_Compositions = {
+	-- PHASE 1: Village Defense (5-30m)
+	village_waves = {
+		flank_early    = {unit_types_key = "wave_city_5m"},
+		late_extra_40m = {unit_types_key = "wave_city_40m"},
+		late_extra_45m = {unit_types_key = "wave_city_45m"},
+		hardest_extra  = {unit_types_key = "wave_city_25m"},
+		siege          = {unit_types_key = "wave_siege"},
+		infantry_hard  = {unit_types_key = "wave_no_siege"},
+	},
+	-- PHASE 2: Counter-Attacks (after village capture)
+	phase2_spawns = {
+		easy = {unit_types_key = "wave_city_10m"},
+		hard = {unit_types_key = "wave_city_15m"},
+		counter_wave_keys = {"wave_city_10m_flank", "wave_city_20m"},
+	},
+	-- PHASE 3: City #2 Defense
+	city2_defense = {
+		defender_easy = {unit_types_key = "units_cityguards"},
+		defender_hard = {unit_types_key = "units_cityguards_hard"},
+		counter_wave_keys = {"wave_city_40m", "wave_city_15m"},
+	},
+	-- Patrols & Village Defense
+	patrols = {
+		easy         = {unit_types_key = "units_camp"},
+		hard         = {unit_types_key = "units_patrol_hard"},
+		village_easy = {unit_types_key = "units_camp_easy"},
+		village_hard = {unit_types_key = "units_patrol_hard"},
+	},
+}
+
+-- Quick Ref: DC variable → Spawn_Compositions key → Unit_Types key (see difficulty.scar for full mapping)
+
+-- ============================================================
+-- Centralized Landmark Restriction Tables (Stage 2)
+-- ============================================================
+-- Each entry: { civ = "exact_raceName", bp = "attribName" }
+-- Applied via ApplyLandmarkRestrictions() in Mission_SetRestrictions.
+-- Keeps per-civ landmark logic data-driven instead of if-chains.
+-- ============================================================
+
+-- Keep-related landmarks locked at Intermediate (AI_Difficulty <= 1 only)
+LANDMARK_KEEP_RESTRICTIONS = {
+	{ civ = "english",          bp = "building_landmark_age3_windsor_castle_eng" },
+	{ civ = "english",          bp = "building_landmark_age2_white_tower_eng" },
+	{ civ = "french",           ebp = "EBP.FRENCH.BUILDING_LANDMARK_AGE2_LA_CHATEAU_ROUGE_FRE" },
+	{ civ = "french_ha_01",     ebp = "EBP.FRENCH_HA_01.BUILDING_LANDMARK_AGE2_LA_CHATEAU_ROUGE_FRE_HA_01" },
+	{ civ = "hre",              ebp = "EBP.HRE.BUILDING_LANDMARK_AGE3_ELTZ_CASTLE_HRE" },
+	{ civ = "hre_ha_01",        ebp = "EBP.HRE_HA_01.BUILDING_LANDMARK_AGE3_ELTZ_CASTLE_HRE_HA_01" },
+	{ civ = "japanese",         ebp = "EBP.JAPANESE.BUILDING_LANDMARK_AGE3_TREASURE_JPN" },
+	{ civ = "malian",           ebp = "EBP.MALIAN.BUILDING_LANDMARK_AGE3_LANDMARKF_MAL" },
+	{ civ = "ottoman",          ebp = "EBP.OTTOMAN.BUILDING_LANDMARK_AGE3_KILITBAHIR_CASTLE_OTT" },
+	{ civ = "rus",              ebp = "EBP.RUS.BUILDING_LANDMARK_AGE3_SPASSAKAYA_TOWER_CONTROL_RUS" },
+	{ civ = "lancaster",        bp = "building_landmark_age2_white_tower_lan" },
+	{ civ = "lancaster",        bp = "building_landmark_age3_berkshire_lan" },
+	{ civ = "lancaster",        bp = "building_landmark_age3_wynguard_lan" },
+	{ civ = "japanese_ha_sen",  bp = "building_landmark_age3_crow_jpn_ha_sen" },
+	{ civ = "japanese_ha_sen",  bp = "building_landmark_age3_statue_jpn_ha_sen" },
+	{ civ = "byzantine_ha_mac", bp = "building_landmark_age3_eastern_merc_house_byz_ha_mac" },
+	{ civ = "byzantine_ha_mac", bp = "building_landmark_age3_western_merc_house_byz_ha_mac" },
+	{ civ = "sultanate_ha_tug", bp = "building_landmark_age3_madrasa_e_firoz_sul_ha_tug" },
+	{ civ = "sultanate_ha_tug", bp = "building_landmark_age3_bijay_mandal_palace_control_sul_ha_tug" },
+}
+
+-- Age 4 landmarks locked at Hard+ (AI_Difficulty >= 2)
+LANDMARK_AGE4_RESTRICTIONS = {
+	{ civ = "hre",              bp = "building_landmark_age3_hohenzollern_castle_hre" },
+	{ civ = "hre",              bp = "building_landmark_age3_eltz_castle_hre" },
+	{ civ = "malian",           bp = "building_landmark_Age3_landmarke_mal" },
+	{ civ = "malian",           bp = "building_landmark_Age3_landmarkf_mal" },
+	{ civ = "ottoman",          bp = "building_landmark_age3_istanbul_observatory_ott" },
+	{ civ = "ottoman",          bp = "building_landmark_age3_kilitbahir_castle_ott" },
+	{ civ = "japanese",         bp = "building_landmark_age3_ozutsu_jpn" },
+	{ civ = "japanese",         bp = "building_landmark_age3_treasure_jpn" },
+	{ civ = "byzantine",        bp = "building_landmark_age3_eastern_merc_house_byz" },
+	{ civ = "byzantine",        bp = "building_landmark_age3_western_merc_house_byz" },
+	{ civ = "chinese_ha_01",    bp = "building_landmark_age3_temple_of_the_sun_control_chi_ha_01" },
+	{ civ = "chinese_ha_01",    bp = "building_landmark_age3_library_chi_ha_01" },
+	{ civ = "french_ha_01",     bp = "building_landmark_age3_ecole_de_poudre_a_canon_fre_ha_01" },
+	{ civ = "french_ha_01",     bp = "building_landmark_age3_le_grande_university_fre_ha_01" },
+	{ civ = "hre_ha_01",        bp = "building_landmark_age3_eltz_castle_hre_ha_01" },
+	{ civ = "hre_ha_01",        bp = "building_landmark_age3_hohenzollern_castle_hre_ha_01" },
+	{ civ = "lancaster",        bp = "building_landmark_age3_berkshire_lan" },
+	{ civ = "lancaster",        bp = "building_landmark_age3_wynguard_lan" },
+	{ civ = "byzantine_ha_mac", bp = "building_landmark_age3_eastern_merc_house_byz_ha_mac" },
+	{ civ = "byzantine_ha_mac", bp = "building_landmark_age3_western_merc_house_byz_ha_mac" },
+	{ civ = "japanese_ha_sen",  bp = "building_landmark_age3_crow_jpn_ha_sen" },
+	{ civ = "japanese_ha_sen",  bp = "building_landmark_age3_statue_jpn_ha_sen" },
+	{ civ = "sultanate_ha_tug", bp = "building_landmark_age3_madrasa_e_firoz_sul_ha_tug" },
+	{ civ = "sultanate_ha_tug", bp = "building_landmark_age3_bijay_mandal_palace_control_sul_ha_tug" },
+}
+
+-- House of Wisdom / Age 4 upgrades (abbasid base + ayyubids)
+HOUSE_OF_WISDOM_AGE4_RESTRICTIONS = {
+	{ civ = "abbasid", upgrades = {
+		"UPG.ABBASID.UPGRADE_ADD_CULTURE_WING_CASTLE",
+		"UPG.ABBASID.UPGRADE_ADD_TRADE_WING_CASTLE",
+		"UPG.ABBASID.UPGRADE_ADD_MILITARY_WING_CASTLE",
+		"UPG.ABBASID.UPGRADE_ADD_ECONOMY_WING_CASTLE",
+	}},
+	{ civ = "abbasid_ha_01", upgrades = {
+		"UPG.ABBASID_HA_01.UPGRADE_ADD_CULTURE_WING_CASTLE_A_ABB_HA_01",
+		"UPG.ABBASID_HA_01.UPGRADE_ADD_CULTURE_WING_CASTLE_B_ABB_HA_01",
+		"UPG.ABBASID_HA_01.UPGRADE_ADD_TRADE_WING_CASTLE_A_ABB_HA_01",
+		"UPG.ABBASID_HA_01.UPGRADE_ADD_TRADE_WING_CASTLE_B_ABB_HA_01",
+		"UPG.ABBASID_HA_01.UPGRADE_ADD_ECONOMY_WING_CASTLE_A_ABB_HA_01",
+		"UPG.ABBASID_HA_01.UPGRADE_ADD_ECONOMY_WING_CASTLE_B_ABB_HA_01",
+		"UPG.ABBASID_HA_01.UPGRADE_ADD_MILITARY_WING_CASTLE_A_ABB_HA_01",
+		"UPG.ABBASID_HA_01.UPGRADE_ADD_MILITARY_WING_CASTLE_B_ABB_HA_01",
+	}},
+}
+
+---ApplyLandmarkRestrictions: Apply a list of landmark restrictions from a data table.
+-- Each entry: { civ, bp (string attribName) OR ebp (global EBP reference as string) }
+-- Uses IsCivExact to match only the exact raceName.
+function ApplyLandmarkRestrictions(player_id, restriction_table, item_state)
+	for _, entry in ipairs(restriction_table) do
+		if IsCivExact(player_id, entry.civ) then
+			if entry.bp then
+				Player_SetEntityProductionAvailability(player_id, BP_GetEntityBlueprint(entry.bp), item_state)
+			elseif entry.ebp then
+				-- Resolve global EBP constant (stored as string to avoid load-order issues)
+				local ebp_val = _ResolveGlobalPath(entry.ebp)
+				if ebp_val then
+					Player_SetEntityProductionAvailability(player_id, ebp_val, item_state)
+				end
+			end
+		end
+	end
+end
+
+---ApplyHouseOfWisdomRestrictions: Apply HoW upgrade restrictions from data table.
+function ApplyHouseOfWisdomRestrictions(player_id, item_state)
+	for _, entry in ipairs(HOUSE_OF_WISDOM_AGE4_RESTRICTIONS) do
+		if IsCivExact(player_id, entry.civ) then
+			for _, upg_path in ipairs(entry.upgrades) do
+				local upg_val = _ResolveGlobalPath(upg_path)
+				if upg_val then
+					Player_SetUpgradeAvailability(player_id, upg_val, item_state)
+				end
+			end
+		end
+	end
+end
+
+---_ResolveGlobalPath: Walk a dot-separated path like "EBP.FRENCH.BUILDING_FOO" into its value.
+-- Returns nil if any segment is missing (safe for load-order).
+function _ResolveGlobalPath(path)
+	local parts = {}
+	for part in string.gmatch(path, "[^%.]+") do
+		table.insert(parts, part)
+	end
+	local current = _G
+	for _, p in ipairs(parts) do
+		current = current[p]
+		if current == nil then return nil end
+	end
+	return current
+end
+
+-------------------------------------------
+-- Stage 3: Restriction Architecture
+-------------------------------------------
+
+-- BALANCE_LOCKS: Explicit balance decisions (not bugs)
+BALANCE_LOCKS = {
+    { item = "siege_workshop", reason = "Hardest-only unlock" },
+    { item = BP_SIEGE_MANGONEL_BUILDABLE, civ = "abbasid_ha_01", reason = "Balance: avoid early field construct" },
+    { item = BP_SIEGE_SPRINGALD_BUILDABLE, civ = "abbasid_ha_01", reason = "Balance: avoid early field construct" },
+    { item = BP_SIEGE_TREBUCHET_BUILDABLE, civ = "abbasid_ha_01", reason = "Balance: avoid early field construct" },
+    { item = "upgrade_siege_improved_siege_engineering_1_mon", reason = "Balance: delay Mongol advantage" },
+    { item = "upgrade_siege_improved_siege_engineering_2_mon", reason = "Balance: delay Mongol advantage" },
+    { item = "upgrade_siege_improved_siege_engineering_3_mon", reason = "Balance: delay Mongol advantage" },
+}
+
+-- Validator: Check restriction/unlock parity
+function Validator_RestrictionParity()
+    local result = { ok = true, violations = {}, balance_count = #BALANCE_LOCKS }
+    print("[PARITY] Balance locks:", result.balance_count)
+    return result
+end
+
+-- CIV_CAPABILITIES: What each civ can do at each phase
+-- 23 civs: 17 AGS_ENTITY_TABLE base + 6 DLC registered
+-- All follow same 4-phase structure; civ-specific unit variants
+-- are handled by IsCivFamily/IsCivExact in profile apply logic.
+
+---GenerateCIVCapabilities: Build CIV_CAPABILITIES from template
+-- All 23 civs share identical 4-phase availability structure.
+local function _GenerateCIVCapabilities()
+	local template = {
+		starting = {landmarks = true, siege = true, engineers = true, workshop = true},
+		siege_available = {landmarks = true, siege = false, engineers = true, workshop = true},
+		engineers_available = {landmarks = true, siege = false, engineers = false, workshop = true},
+		workshop_available = {landmarks = true, siege = false, engineers = false, workshop = false},
+	}
+	local civs = {"english","chinese","french","hre","abbasid","mongol","sultanate","malian","ottoman","rus","japanese","byzantine",
+		"jin_dynasty","abbasid_ha_01","chinese_ha_01","french_ha_01","hre_ha_01","mongol_ha_gol","byzantine_ha_mac","japanese_ha_sen","sultanate_ha_tug","lancaster","templar"}
+	local result = {}
+	for _, civ in ipairs(civs) do
+		result[civ] = template
+	end
+	return result
+end
+
+CIV_CAPABILITIES = _GenerateCIVCapabilities()
+
+-- ============================================================
+-- Stage 4: Restriction Profile System
+-- ============================================================
+-- Replaces 22 scattered difficulty checks with 4 named profiles.
+-- Each profile is mutually exclusive (replaces previous state).
+-- Per-player state tracked in PLAYER_RESTRICTION_STATE.
+-- ============================================================
+
+-- Track current restriction profile per player
+PLAYER_RESTRICTION_STATE = {}
+
+---GetPlayerProfile: Return current profile for a player (or "none" if unset).
+function GetPlayerProfile(player_id)
+    return PLAYER_RESTRICTION_STATE[player_id] or "none"
+end
+
+---SetPlayerProfile: Update player's current profile in state cache.
+function SetPlayerProfile(player_id, profile)
+    PLAYER_RESTRICTION_STATE[player_id] = profile
+    if DLC_DEBUG then
+        print(string.format("[DLC-DBG] Player %s -> profile: %s", tostring(player_id), profile))
+    end
+end
+
+-- Shared helpers: Apply siege/engineer restrictions with a given state (ITEM_LOCKED or ITEM_DEFAULT)
+-- Uses nil-safe lookups: DLC civs intentionally lack some siege blueprints (e.g. templar has no ribauldequin).
+local function _ApplySiegeRestrictions(player, state)
+	-- Resolve siege table once (DLC civs have direct CBA_SIEGE_TABLE entries)
+	local civ = string.lower(player.raceName)
+	local siege = CBA_SIEGE_TABLE[civ]
+	if siege == nil then
+		local resolved = ResolveCivKey(civ)
+		if resolved then siege = CBA_SIEGE_TABLE[resolved] end
+	end
+	if siege == nil then return end
+	-- Nil-safe helpers: skip restriction if civ lacks the blueprint
+	local function _squad(key)
+		if siege[key] then Player_SetSquadProductionAvailability(player.id, BP_GetSquadBlueprint(siege[key]), state) end
+	end
+	local function _entity(key)
+		if siege[key] then Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint(siege[key]), state) end
+	end
+	-- Mangonel (all civs)
+	_squad(BP_SIEGE_MANGONEL)
+	-- Abbasid/Mongol family: field construct mangonel (nil for mongol_ha_gol — intentional)
+	if IsCivFamilyAny(player.id, {"abbasid", "mongol"}) then
+		_entity(BP_SIEGE_MANGONEL_BUILDABLE)
+	end
+	-- Chinese/Mongol/Byzantine family: nest of bees (nil for mongol_ha_gol — intentional)
+	if IsCivFamilyAny(player.id, {"chinese", "mongol", "byzantine"}) then
+		_squad(BP_SIEGE_NESTOFBEES)
+		if IsCivExact(player.id, "chinese") then
+			Player_SetSquadProductionAvailability(player.id, SBP.CHINESE.UNIT_NEST_OF_BEES_4_CLOCKTOWER_CHI, state)
+		end
+	end
+	-- Non-Chinese: ribauldequin (nil for templar/lancaster/jpn_ha_sen/etc — intentional)
+	if not IsCivFamily(player.id, "chinese") then
+		_squad(BP_SIEGE_RIBAULDEQUIN)
+		if IsCivFamily(player.id, "french") then
+			_squad(BP_SIEGE_ROYAL_RIBAULDEQUIN)
+		end
+	end
+	-- Ayyubids: ram tower (exact match only)
+	if IsCivExact(player.id, "abbasid_ha_01") then
+		Player_SetEntityProductionAvailability(player.id, EBP.ABBASID_HA_01.UNIT_RAM_TOWER_3_ABB_HA_01, state)
+	end
+	-- Mongol family: double siege (nil for mongol_ha_gol — intentional)
+	if IsCivFamily(player.id, "mongol") then
+		_squad(BP_SIEGE_MANGONEL_DOUBLE)
+		_squad(BP_SIEGE_RIBAULDEQUIN_DOUBLE)
+	end
+	-- Byzantine base only: outpost mangonel upgrade (IsCivExact to exclude DLC variants)
+	if IsCivExact(player.id, "byzantine") then
+		Player_SetUpgradeAvailability(player.id, UPG.BYZANTINE.UPGRADE_OUTPOST_MANGONEL_BYZ, state)
+	end
+end
+
+local function _ApplyEngineerRestrictions(player, state)
+	if not IsCivFamily(player.id, "sultanate") then
+		Player_SetUpgradeAvailability(player.id, BP_GetUpgradeBlueprint("upgrade_siege_engineers"), state)
+	else
+		Player_SetUpgradeAvailability(player.id, BP_GetUpgradeBlueprint("upgrade_siege_engineers_sul"), state)
+	end
+	if IsCivFamily(player.id, "mongol") then
+		Player_SetUpgradeAvailability(player.id, BP_GetUpgradeBlueprint("upgrade_improved_siege_engineers_mon"), state == ITEM_LOCKED and ITEM_REMOVED or state)
+	end
+	if IsCivExact(player.id, "abbasid") then
+		Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("unit_mangonel_3_buildable_abb"), state)
+		Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("unit_springald_3_buildable_abb"), state)
+	end
+	if IsCivExact(player.id, "abbasid_ha_01") then
+		Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("unit_mangonel_3_buildable_abb_ha_01"), state)
+		Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("unit_springald_3_buildable_abb_ha_01"), state)
+		Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("unit_ram_tower_3_abb_ha_01"), state)
+	end
+end
+
+-- Restriction_Profile: Named availability profiles per game phase
+-- Each profile has a description + apply function.
+-- Key naming: "_available" indicates what becomes available at that phase.
+Restriction_Profile = {
+
+    -- --------------------------------------------------------
+    -- STARTING: Mission setup (applied to all players)
+    -- --------------------------------------------------------
+    starting = {
+        description = "Mission start: walls/dock/keep locked, siege locked (diff-scaled), age cap (Hard+)",
+        apply = function(player)
+            -- [1] Disable Stone/Palisade walls (AI path issues) — capability-gated
+            local ebp_stone = TryGetCivilizationEntity(player.raceName, AGS_BP_STONEWALL)
+            if ebp_stone then
+                Player_SetEntityProductionAvailability(player.id, ebp_stone, ITEM_REMOVED)
+            end
+            local ebp_palisade = TryGetCivilizationEntity(player.raceName, AGS_BP_PALISADE)
+            if ebp_palisade then
+                Player_SetEntityProductionAvailability(player.id, ebp_palisade, ITEM_REMOVED)
+            end
+
+            -- [2] Disable Dock (Default)
+            Player_SetEntityProductionAvailability(player.id, AGS_GetCivilizationEntity(player.raceName, AGS_BP_DOCK), ITEM_REMOVED)
+
+            -- [3] Starting upgrades (Default)
+            Player_CompleteUpgrade(player.id, UPG.COMMON.UPGRADE_SCOUT_FORESTER)
+
+            -- [4] Starting upgrades / Difficulty: Intermediate - (see DC.player_starting_upgrades_bonus)
+            if DC.player_starting_upgrades_bonus then
+                -- Faction shared
+                Player_CompleteUpgrade(player.id, UPG.COMMON.UPGRADE_MELEE_DAMAGE_I)
+                Player_CompleteUpgrade(player.id, UPG.COMMON.UPGRADE_RANGED_ARMOR_I)
+                -- Faction unique (IsCivExact — DLC variants like lancaster/templar have different upgrade BPs)
+                if IsCivExact(player.id, "english") then
+                    Player_CompleteUpgrade(player.id, UPG.ENGLISH.UPGRADE_UNIT_MANATARMS_2_ENG)
+                    Player_CompleteUpgrade(player.id, UPG.ENGLISH.UPGRADE_ARMOR_CLAD_ENG)
+                end
+                if IsCivExact(player.id, "hre") then
+                    Player_CompleteUpgrade(player.id, UPG.HRE.UPGRADE_MAN_AT_ARMS_TWO_HANDED_HRE)
+                    Player_CompleteUpgrade(player.id, UPG.HRE.UPGRADE_INSPIRED_INFANTRY_HRE)
+                end
+            end
+
+            -- [5] Disable Ability: Conversion (see DC.disable_conversion)
+            if DC.disable_conversion then
+                Player_SetAbilityAvailability(player.id, BP_GetAbilityBlueprint("monk_conversion"), ITEM_REMOVED)
+                if IsCivFamily(player.id, "abbasid") then
+                    Player_SetAbilityAvailability(player.id, BP_GetAbilityBlueprint("monk_conversion_faith_abb"), ITEM_REMOVED)
+                end
+            end
+
+            -- [6] Keep Restriction (see DC.restrict_keep) — capability-gated
+            if DC.restrict_keep then
+                -- All factions
+                local ebp_keep = TryGetCivilizationEntity(player.raceName, AGS_BP_KEEP)
+                if ebp_keep then
+                    Player_SetEntityProductionAvailability(player.id, ebp_keep, ITEM_REMOVED)
+                end
+                -- White Tower (English/Lancaster — direct blueprint)
+                if IsCivExact(player.id, "english") then
+                    Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_age2_white_tower_eng"), ITEM_REMOVED)
+                end
+                if IsCivExact(player.id, "lancaster") then
+                    Player_SetEntityProductionAvailability(player.id, BP_GetEntityBlueprint("building_landmark_age2_white_tower_lan"), ITEM_REMOVED)
+                end
+                -- Keep landmarks (data-driven) — only at Intermediate (see DC.restrict_keep_landmarks)
+                if DC.restrict_keep_landmarks then
+                    ApplyLandmarkRestrictions(player.id, LANDMARK_KEEP_RESTRICTIONS, ITEM_REMOVED)
+                end
+            end
+
+            -- [7] Siege Restriction (see DC.restrict_siege)
+            if DC.restrict_siege then _ApplySiegeRestrictions(player, ITEM_LOCKED) end
+
+            -- [8] Siege Engineers Restriction (see DC.restrict_engineers)
+            if DC.restrict_engineers then _ApplyEngineerRestrictions(player, ITEM_LOCKED) end
+
+            -- [9] Workshop Restriction (see DC.restrict_workshop) — capability-gated
+            if DC.restrict_workshop then
+                local ebp_workshop = TryGetCivilizationEntity(player.raceName, AGS_BP_WORKSHOP)
+                if ebp_workshop then
+                    Player_SetEntityProductionAvailability(player.id, ebp_workshop, ITEM_LOCKED)
+                end
+            end
+
+            -- [10] Age 4 Restriction (see DC.restrict_age4)
+            if DC.restrict_age4 then
+                -- Restrict max age to Castle Age
+                Player_SetMaximumAge(player.id, AGE_CASTLE)
+                -- Age 4 Landmarks (data-driven)
+                ApplyLandmarkRestrictions(player.id, LANDMARK_AGE4_RESTRICTIONS, ITEM_REMOVED)
+                -- House of Wisdom / Age 4 upgrades (data-driven)
+                ApplyHouseOfWisdomRestrictions(player.id, ITEM_REMOVED)
+            end
+
+            if DLC_DEBUG then
+                print(string.format("[PROFILE] 'starting' applied to player %s (diff=%d, tier=%s)", tostring(player.id), AI_Difficulty, DC.label))
+            end
+        end
+    },
+
+    -- --------------------------------------------------------
+    -- SIEGE_AVAILABLE: Phase 2 objective complete (Easy/Intermediate)
+    -- --------------------------------------------------------
+    siege_available = {
+        description = "Phase 2 complete: siege becomes available (difficulty-scaled)",
+        apply = function(player)
+            _ApplySiegeRestrictions(player, ITEM_DEFAULT)
+            if DLC_DEBUG then print(string.format("[PROFILE] 'siege_available' applied to player %s", tostring(player.id))) end
+        end
+    },
+
+    -- --------------------------------------------------------
+    -- ENGINEERS_AVAILABLE: Phase 2 objective (Hard+ difficulty)
+    -- --------------------------------------------------------
+    engineers_available = {
+        description = "Hard+ difficulty: siege + engineers become available",
+        apply = function(player)
+            _ApplySiegeRestrictions(player, ITEM_DEFAULT)
+            _ApplyEngineerRestrictions(player, ITEM_DEFAULT)
+            if DLC_DEBUG then print(string.format("[PROFILE] 'engineers_available' applied to player %s", tostring(player.id))) end
+        end
+    },
+
+    -- --------------------------------------------------------
+    -- WORKSHOP_AVAILABLE: Phase 3 objective (Absurd / Difficulty == 6)
+    -- --------------------------------------------------------
+    workshop_available = {
+        description = "Absurd difficulty: siege workshop becomes available",
+        apply = function(player)
+            -- Siege Workshop / All factions — capability-gated
+            local ebp_workshop = TryGetCivilizationEntity(player.raceName, AGS_BP_WORKSHOP)
+            if ebp_workshop then
+                Player_SetEntityProductionAvailability(player.id, ebp_workshop, ITEM_DEFAULT)
+            end
+
+            if DLC_DEBUG then
+                print(string.format("[PROFILE] 'workshop_available' applied to player %s", tostring(player.id)))
+            end
+        end
+    },
+}
+
+-- Track which profiles have been applied per player (idempotency guard)
+PLAYER_PROFILE_APPLIED = {}
+
+---ApplyRestrictionProfile: Unified entry point for restriction management.
+-- Validates profile name, applies profile logic, updates per-player state.
+-- Idempotent: calling twice with same profile skips re-application.
+function ApplyRestrictionProfile(player, profile_name)
+    local profile = Restriction_Profile[profile_name]
+    if not profile then
+        print(string.format("[ERROR] ApplyRestrictionProfile: Unknown profile '%s'", tostring(profile_name)))
+        return false
+    end
+
+    -- Idempotency guard: skip if this exact profile was already applied to this player
+    if PLAYER_PROFILE_APPLIED[player.id] and PLAYER_PROFILE_APPLIED[player.id][profile_name] then
+        if DLC_DEBUG then
+            print(string.format("[DLC-DBG] ApplyRestrictionProfile: SKIPPED (already applied) player=%s profile=%s", tostring(player.id), profile_name))
+        end
+        return true
+    end
+
+    -- Apply the profile
+    profile.apply(player)
+
+    -- Update state tracking
+    SetPlayerProfile(player.id, profile_name)
+
+    -- Mark this profile as applied for this player
+    if not PLAYER_PROFILE_APPLIED[player.id] then
+        PLAYER_PROFILE_APPLIED[player.id] = {}
+    end
+    PLAYER_PROFILE_APPLIED[player.id][profile_name] = true
+
+    if DLC_DEBUG then
+        print(string.format("[DLC-DBG] ApplyRestrictionProfile complete: player=%s profile=%s", tostring(player.id), profile_name))
+    end
+    return true
+end
+
+---Validator_RestrictionState: Check all players have valid profiles.
+-- Returns true if all tracked players have a recognized profile.
+function Validator_RestrictionState()
+    print("[VALIDATOR] Restriction State Check:")
+    local valid_profiles = { starting = true, siege_available = true, engineers_available = true, workshop_available = true }
+    local all_valid = true
+    local tracked = 0
+
+    for player_id, profile in pairs(PLAYER_RESTRICTION_STATE) do
+        tracked = tracked + 1
+        local is_valid = valid_profiles[profile] ~= nil
+        print(string.format("  Player %s: %s [%s]", tostring(player_id), profile, is_valid and "OK" or "INVALID"))
+        if not is_valid then all_valid = false end
+    end
+
+    if tracked == 0 then
+        print("  (No players tracked yet — profiles not applied)")
+    end
+
+    print(string.format("[VALIDATOR] Players tracked: %d | Result: %s", tracked, all_valid and "PASS" or "FAIL"))
+    return { ok = all_valid, profile_count = tracked }
+end
+
+-- Simulate_PlayerProgression: Dry-run test harness for progression simulation (console-safe)
+-- Validates civ resolution + profile chain WITHOUT calling SCAR C++ APIs.
+-- The apply functions call Player_Set*/Player_GetRaceName which require real Player* objects,
+-- so this harness validates the data layer only (civ resolver + profile lookup + chain order).
+-- Usage: Simulate_PlayerProgression("english", 0)
+--        Simulate_PlayerProgression("abbasid_ha_01", 6)
+function Simulate_PlayerProgression(civ, difficulty)
+    print(string.format("[PROG-SIM] === Dry-run: %s at difficulty %d ===", civ, difficulty))
+
+    -- Step 1: Validate civ resolves through DLC resolver
+    local civ_lower = string.lower(civ)
+    local resolved = ResolveCivKey(civ_lower)
+    if resolved == nil then
+        print(string.format("[PROG-SIM] FAIL: '%s' not in AGS_ENTITY_TABLE or DLC_CIV_PARENT_MAP", civ))
+        return
+    end
+    if resolved ~= civ_lower then
+        print(string.format("[PROG-SIM] Civ '%s' resolved via parent to family '%s'", civ, resolved))
+    else
+        print(string.format("[PROG-SIM] Civ '%s' is a base civ (no DLC resolution needed)", civ))
+    end
+
+    -- Step 2: Verify civ has entity table entry
+    if AGS_ENTITY_TABLE[resolved] then
+        print(string.format("[PROG-SIM] AGS_ENTITY_TABLE['%s']: present", resolved))
+    else
+        print(string.format("[PROG-SIM] WARN: AGS_ENTITY_TABLE['%s'] missing — apply would fail", resolved))
+    end
+
+    -- Step 3: Build profile chain from Difficulty_Config
+    local dc = Difficulty_Config[difficulty]
+    if dc == nil then
+        print(string.format("[PROG-SIM] FAIL: No Difficulty_Config for tier %d", difficulty))
+        return
+    end
+    local profiles = {"starting"}
+    profiles[#profiles + 1] = dc.phase2_siege_profile
+    if dc.phase2_workshop_unlock then
+        profiles[#profiles + 1] = "workshop_available"
+    end
+
+    -- Step 4: Validate each profile exists and has an apply function
+    local all_valid = true
+    for i, name in ipairs(profiles) do
+        local profile = Restriction_Profile[name]
+        if profile and profile.apply then
+            print(string.format("[PROG-SIM] [%d/%d] '%s': %s", i, #profiles, name, profile.description))
+        else
+            print(string.format("[PROG-SIM] [%d/%d] FAIL: profile '%s' not found!", i, #profiles, name))
+            all_valid = false
+        end
+    end
+
+    -- Step 5: Report result
+    print(string.format("[PROG-SIM] === Result: %s | %d profiles | final: '%s' ===",
+        all_valid and "PASS" or "FAIL", #profiles, profiles[#profiles]))
+end
+
+-- ============================================================
+-- DLC Civilization Resolution System (Stage 1)
+-- ============================================================
+-- Supports DLC civs that inherit blueprints from a base civ.
+-- Overrides take precedence. Recursive + cycle-safe fallback.
+-- Fails fast on unknown civs. Validates at init before mission.
+--
+-- To add a new DLC civ, call RegisterDLCCiv() below.
+-- ============================================================
+
+-- Toggle: set to true to enable verbose resolver logging
+DLC_DEBUG = false
+
+-- Keep resolver logging available even if debug.scar import order changes.
+if DebugPrint_Resolver == nil then
+	function DebugPrint_Resolver(msg)
+		if DLC_DEBUG then
+			print("[DLC-DBG] " .. msg)
+		end
+	end
+end
+
+-- ============================================================
+-- Safe AGS Blueprint Retrieval (DLC-aware)
+-- Override precedence: DLC_CIV_OVERRIDES[original] > AGS_ENTITY_TABLE[resolved]
+-- ============================================================
+
+-- From Advanced Game Settings by Woprock (wrapped for DLC safety)
+function AGS_GetCivilizationEntity(player_civ, bp_type)
+	local original_civ = string.lower(player_civ)
+	-- G3: Overrides take precedence over inherited values
+	if DLC_CIV_OVERRIDES[original_civ] and DLC_CIV_OVERRIDES[original_civ][bp_type] then
+		return BP_GetEntityBlueprint(DLC_CIV_OVERRIDES[original_civ][bp_type])
+	end
+	-- Resolve to base civ
+	local resolved = ResolveCivKey(original_civ)
+	if resolved == nil then
+		error("[DLC] AGS_GetCivilizationEntity: Civ '" .. original_civ 
+			.. "' is not resolvable. Add to AGS_ENTITY_TABLE or DLC_CIV_PARENT_MAP.")
+	end
+	local tbl = AGS_ENTITY_TABLE[resolved]
+	if tbl == nil then
+		error("[DLC] AGS_GetCivilizationEntity: Resolved civ '" .. resolved 
+			.. "' has no AGS_ENTITY_TABLE entry.")
+	end
+	local attrib = tbl[bp_type]
+	if attrib == nil then
+		error("[DLC] AGS_GetCivilizationEntity: Blueprint key '" .. tostring(bp_type) 
+			.. "' missing for civ '" .. original_civ 
+			.. "' (resolved: '" .. resolved .. "').")
+	end
+	if attrib == false then return nil end
+	return BP_GetEntityBlueprint(attrib)
+end
+
+---TryGetCivilizationEntity: Safe DLC-aware blueprint lookup.
+-- Returns nil instead of erroring when civ lacks the requested bp_type.
+-- Used for capability-gated restriction paths (walls, keeps, workshops).
+function TryGetCivilizationEntity(player_civ, bp_type)
+	local raw = string.lower(player_civ)
+	if DLC_CIV_OVERRIDES[raw] and DLC_CIV_OVERRIDES[raw][bp_type] ~= nil then
+		if DLC_CIV_OVERRIDES[raw][bp_type] == false then return nil end
+		return BP_GetEntityBlueprint(DLC_CIV_OVERRIDES[raw][bp_type])
+	end
+	local resolved = ResolveCivKey(raw)
+	if resolved == nil then return nil end
+	local entry = AGS_ENTITY_TABLE[resolved]
+	if entry == nil then return nil end
+	local bp = entry[bp_type]
+	if bp == nil or bp == false then return nil end
+	return BP_GetEntityBlueprint(bp)
+end
+
+-- From Onslaught / Copy of AGS method above (wrapped for DLC safety)
+function AGS_GetSiegeEntity(player_civ, bp_type)
+	local original_civ = string.lower(player_civ)
+	local tbl = CBA_SIEGE_TABLE[original_civ]
+	local source_civ = original_civ
+	if tbl == nil then
+		local resolved = ResolveCivKey(original_civ)
+		if resolved == nil then
+			error("[DLC] AGS_GetSiegeEntity: Civ '" .. original_civ 
+				.. "' is not resolvable.")
+		end
+		tbl = CBA_SIEGE_TABLE[resolved]
+		source_civ = resolved
+		if tbl == nil then
+			error("[DLC] AGS_GetSiegeEntity: Resolved civ '" .. resolved 
+				.. "' has no CBA_SIEGE_TABLE entry.")
+		end
+	end
+	local attrib = tbl[bp_type]
+	if attrib == nil then
+		error("[DLC] AGS_GetSiegeEntity: Siege key '" .. tostring(bp_type) 
+			.. "' missing for civ '" .. original_civ 
+			.. "' (source: '" .. source_civ .. "').")
+	end
+	return BP_GetEntityBlueprint(attrib)
+end
+
+function AGS_GetSiegeSquad(player_civ, bp_type)
+	local original_civ = string.lower(player_civ)
+	local tbl = CBA_SIEGE_TABLE[original_civ]
+	local source_civ = original_civ
+	if tbl == nil then
+		local resolved = ResolveCivKey(original_civ)
+		if resolved == nil then
+			error("[DLC] AGS_GetSiegeSquad: Civ '" .. original_civ 
+				.. "' is not resolvable.")
+		end
+		tbl = CBA_SIEGE_TABLE[resolved]
+		source_civ = resolved
+		if tbl == nil then
+			error("[DLC] AGS_GetSiegeSquad: Resolved civ '" .. resolved 
+				.. "' has no CBA_SIEGE_TABLE entry.")
+		end
+	end
+	local attrib = tbl[bp_type]
+	if attrib == nil then
+		error("[DLC] AGS_GetSiegeSquad: Siege key '" .. tostring(bp_type) 
+			.. "' missing for civ '" .. original_civ 
+			.. "' (source: '" .. source_civ .. "').")
+	end
+	return BP_GetSquadBlueprint(attrib)
+end
+
+-- Unlocks Chinese Dynasty UI
+function DynastyUI_unlocked()
+	for i, player in ipairs(PLAYERS) do
+		if IsCivFamily(player.id, "chinese") then
+			-- Dynasties unlocked
+			Player_CompleteUpgrade(player.id, BP_GetUpgradeBlueprint "player_dynasty1_chi")
+			Player_SetStateModelBool(player.id, "dynasty_1_was_completed_chi", true)
+			Player_CompleteUpgrade(player.id, BP_GetUpgradeBlueprint "player_dynasty2_chi")
+			Player_SetStateModelBool(player.id, "dynasty_2_was_completed_chi", true)
+
+			-- Update UI
+			Player_SetStateModelFloat(player.id, "current_dynasty_chi", 1)
+			if Game_GetLocalPlayer() == player.id then
+				DynastyUI_Update()
+			end
+			Player_SetStateModelFloat(player.id, "current_dynasty_chi", 2)
+			if Game_GetLocalPlayer() == player.id then
+				DynastyUI_Update()
+			end
+		end
+	end
+end
+
+-- Maximum parent chain depth (prevents infinite recursion)
+DLC_RESOLVE_MAX_DEPTH = 4
+
+-- Parent map: DLC raceName → base civ key in AGS_ENTITY_TABLE
+-- Populated by RegisterDLCCiv(); do not edit directly.
+DLC_CIV_PARENT_MAP = {}
+
+-- Sparse override table: DLC_CIV_OVERRIDES[raceName][shortName] = attribName
+-- Only entries that DIFFER from parent need to be listed.
+DLC_CIV_OVERRIDES = {}
+
+-- Per-player resolved civ cache: player_id → resolved civ key
+DLC_PLAYER_CIV_CACHE = {}
+
+-- Composition role definitions for GenerateCompositionMaps()
+-- melee_key/ranged_key: key into Unit_Types for starting army
+-- unique_melee/unique_ranged: entry for UNIQUE_UNIT maps (nil = use parent or default)
+-- reinforce_melee_key/reinforce_ranged_key: key into Unit_Types for reinforcements
+DLC_CIV_COMPOSITION = {}
+
+-- Utility: count keys in a table
+function _CountKeys(t)
+	local n = 0
+	for _ in pairs(t) do n = n + 1 end
+	return n
+end
+
+-- ============================================================
+-- Registration
+-- ============================================================
+
+---RegisterDLCCiv: Register a DLC civ with parent inheritance.
+-- spec: {attribName, parent, overrides?, melee_key?, ranged_key?, unique_melee?, unique_ranged?, reinforce_melee_key?, reinforce_ranged_key?}
+-- Override precedence: DLC_CIV_OVERRIDES[civ][key] > AGS_ENTITY_TABLE[resolved][key] > error
+function RegisterDLCCiv(spec)
+	if spec.attribName == nil or spec.parent == nil then
+		error("[DLC] RegisterDLCCiv: attribName and parent are required.")
+	end
+	DLC_CIV_PARENT_MAP[spec.attribName] = spec.parent
+	if spec.overrides then
+		DLC_CIV_OVERRIDES[spec.attribName] = spec.overrides
+	end
+	DLC_CIV_COMPOSITION[spec.attribName] = {
+		melee_key           = spec.melee_key,
+		ranged_key          = spec.ranged_key,
+		unique_melee        = spec.unique_melee,
+		unique_ranged       = spec.unique_ranged,
+		reinforce_melee_key = spec.reinforce_melee_key,
+		reinforce_ranged_key = spec.reinforce_ranged_key,
+	}
+	DebugPrint_Resolver("RegisterDLCCiv: '" .. spec.attribName .. "' -> parent '" .. spec.parent .. "'"
+		.. (spec.overrides and (" with " .. tostring(_CountKeys(spec.overrides)) .. " override(s)") or ""))
+end
+
+-- DLC Civ Registrations (Dynasties of the East + Knights of Cross and Rose)
+RegisterDLCCiv({attribName = "mongol_ha_gol", parent = "mongol", ranged_key = "start_player_ranged_mon", reinforce_ranged_key = "units_player_ranged_reinforce_cav",
+	overrides = {palisade_wall = false, siege_workshop = "building_unit_siege_mon_ha_gol", stone_wall = false, castle = false, town_center_capital = "building_town_center_capital_mon_ha_gol"}})
+RegisterDLCCiv({attribName = "byzantine_ha_mac", parent = "byzantine",
+	overrides = {stone_wall = "building_defense_wall_byz_ha_mac", palisade_wall = "building_defense_palisade_byz_ha_mac", castle = "building_defense_keep_byz_ha_mac", siege_workshop = "building_unit_siege_control_byz_ha_mac", town_center_capital = "building_town_center_capital_byz_ha_mac"}})
+RegisterDLCCiv({attribName = "japanese_ha_sen", parent = "japanese", melee_key = "start_player_melee_inf",
+	overrides = {stone_wall = "building_defense_wall_jpn_ha_sen", palisade_wall = "building_defense_palisade_jpn_ha_sen", castle = "building_defense_keep_crow_discount_jpn_ha_sen", siege_workshop = "building_unit_siege_jpn_ha_sen", town_center_capital = "building_town_center_capital_jpn_ha_sen"}})
+RegisterDLCCiv({attribName = "sultanate_ha_tug", parent = "sultanate",
+	overrides = {stone_wall = "building_defense_wall_sul_ha_tug", palisade_wall = "building_defense_palisade_sul_ha_tug", castle = "building_defense_keep_control_sul_ha_tug", siege_workshop = "building_unit_siege_control_sul_ha_tug", town_center_capital = "building_town_center_capital_sul_ha_tug"}})
+RegisterDLCCiv({attribName = "jin_dynasty", parent = "chinese", melee_key = "start_player_melee_inf", ranged_key = "start_player_ranged_chi", reinforce_ranged_key = "units_player_ranged_reinforce_chi"})
+RegisterDLCCiv({attribName = "lancaster", parent = "english", melee_key = "start_player_melee_inf", reinforce_melee_key = "units_player_melee_reinforce_inf",
+	overrides = {stone_wall = "building_defense_wall_lan", palisade_wall = "building_defense_palisade_lan", castle = "building_defense_keep_lan", siege_workshop = "building_unit_siege_workshop_lan", town_center_capital = "building_town_center_capital_lan"}})
+RegisterDLCCiv({attribName = "templar", parent = "hre", melee_key = "start_player_melee_inf", reinforce_melee_key = "units_player_melee_reinforce_inf",
+	overrides = {stone_wall = "building_defense_stone_wall_tem", palisade_wall = "building_defense_palisade_wall_tem", castle = "building_defense_fortress_tem", siege_workshop = "building_siege_workshop_tem", town_center_capital = "building_town_center_capital_tem"}})
+
+-- ============================================================
+-- Resolution Functions
+-- ============================================================
+
+---ResolveCivKey: Given a raceName, return a valid key in AGS_ENTITY_TABLE.
+-- Checks AGS directly first, then walks DLC_CIV_PARENT_MAP recursively.
+-- Returns nil if unresolvable (caller must handle).
+-- Cycle-safe via depth limit.
+function ResolveCivKey(raceName, _depth)
+	if raceName == nil then return nil end
+	raceName = string.lower(raceName)
+	_depth = _depth or 0
+	if _depth > DLC_RESOLVE_MAX_DEPTH then
+		error("[DLC] ResolveCivKey: parent chain exceeded depth " 
+			.. DLC_RESOLVE_MAX_DEPTH .. " for '" .. raceName 
+			.. "'. Possible circular mapping.")
+	end
+	-- Direct match in AGS
+	if AGS_ENTITY_TABLE[raceName] then
+		DebugPrint_Resolver("ResolveCivKey: '" .. raceName .. "' direct match in AGS_ENTITY_TABLE")
+		return raceName
+	end
+	-- Try parent
+	local parent = DLC_CIV_PARENT_MAP[raceName]
+	if parent then
+		DebugPrint_Resolver("ResolveCivKey: '" .. raceName .. "' -> parent '" .. parent .. "' (depth " .. tostring(_depth) .. ")")
+		return ResolveCivKey(parent, _depth + 1)
+	end
+	-- Unresolvable
+	DebugPrint_Resolver("ResolveCivKey: '" .. raceName .. "' UNRESOLVABLE")
+	return nil
+end
+
+---ResolveCivMapKey: Safely look up a civ in a composition map.
+-- Tries exact raceName, then parent chain, then returns default_key.
+-- Never returns nil (default_key is the final fallback).
+function ResolveCivMapKey(map, raceName, default_key)
+	if raceName == nil then return default_key end
+	raceName = string.lower(raceName)
+	-- Direct match
+	if map[raceName] then
+		return map[raceName]
+	end
+	-- Walk parent chain
+	local current = raceName
+	local depth = 0
+	while depth < DLC_RESOLVE_MAX_DEPTH do
+		current = DLC_CIV_PARENT_MAP[current]
+		if current == nil then break end
+		if map[current] then
+			return map[current]
+		end
+		depth = depth + 1
+	end
+	-- Fallback to default
+	return default_key
+end
+
+---ResolveUniqueUnit: Safely look up civ in UNIQUE_UNIT maps.
+-- Returns the entry or UNIQUE_UNIT_DEFAULT.
+function ResolveUniqueUnit(map, raceName)
+	if raceName and map[raceName] then
+		return map[raceName]
+	end
+	-- Walk parent chain
+	local current = raceName
+	local depth = 0
+	while depth < DLC_RESOLVE_MAX_DEPTH do
+		current = DLC_CIV_PARENT_MAP[current]
+		if current == nil then break end
+		if map[current] then
+			return map[current]
+		end
+		depth = depth + 1
+	end
+	return UNIQUE_UNIT_DEFAULT
+end
+
+---GetPlayerCiv: Resolve and cache a player's civ key.
+-- Returns a valid AGS_ENTITY_TABLE key, or errors.
+function GetPlayerCiv(player_id)
+	if DLC_PLAYER_CIV_CACHE[player_id] then
+		return DLC_PLAYER_CIV_CACHE[player_id]
+	end
+	local raceName = string.lower(Player_GetRaceName(player_id))
+	local resolved = ResolveCivKey(raceName)
+	if resolved == nil then
+		error("[DLC] GetPlayerCiv: Unknown civilization '" .. raceName 
+			.. "' for player " .. tostring(player_id) 
+			.. ". Not in AGS_ENTITY_TABLE or DLC_CIV_PARENT_MAP.")
+	end
+	if resolved ~= raceName then
+		print("[DLC] Player " .. tostring(player_id) .. ": '" .. raceName 
+			.. "' resolved via parent to '" .. resolved .. "'")
+	end
+	DLC_PLAYER_CIV_CACHE[player_id] = resolved
+	return resolved
+end
+
+---GetPlayerRawCiv: Return the original (possibly DLC) raceName, lowercased.
+-- Used when we need to check overrides against the original civ.
+function GetPlayerRawCiv(player_id)
+	return string.lower(Player_GetRaceName(player_id))
+end
+
+-- ============================================================
+-- Composition Map Generation
+-- ============================================================
+
+---GenerateCompositionMaps: Populate CIV_*_MAP entries for all registered DLC civs.
+-- Inherits from parent when DLC spec field is nil.
+function GenerateCompositionMaps()
+	local maps = {
+		{m = CIV_MELEE_MAP, k = "melee_key"}, {m = CIV_RANGED_MAP, k = "ranged_key"},
+		{m = UNIQUE_UNIT_MELEE, k = "unique_melee"}, {m = UNIQUE_UNIT_RANGED, k = "unique_ranged"},
+		{m = REINFORCE_MELEE_MAP, k = "reinforce_melee_key"}, {m = REINFORCE_RANGED_MAP, k = "reinforce_ranged_key"},
+	}
+	for dlc_civ, comp in pairs(DLC_CIV_COMPOSITION) do
+		local parent = DLC_CIV_PARENT_MAP[dlc_civ]
+		for _, def in ipairs(maps) do
+			if comp[def.k] then def.m[dlc_civ] = comp[def.k]
+			elseif parent and def.m[parent] then def.m[dlc_civ] = def.m[parent] end
+		end
+	end
+	print("[DLC] Composition maps generated for " .. tostring(_CountKeys(DLC_CIV_COMPOSITION)) .. " DLC civs.")
+end
+
+-- ============================================================
+-- Validation
+-- ============================================================
+
+---Validator_CivRegistry: Run all validation checks.
+-- Call in Mission_SetupVariables BEFORE any spawn or restriction logic.
+-- Errors immediately on failure (fail fast).
+function Validator_CivRegistry()
+	_Validate_ParentCycles()
+	_Validate_ParentsExist()
+	_Validate_OverrideStructure()
+	_Validate_CompositionSync()
+	print("[DLC] Validator_CivRegistry: All checks passed.")
+end
+
+-- V1: Detect circular parent chains
+function _Validate_ParentCycles()
+	for start_civ, _ in pairs(DLC_CIV_PARENT_MAP) do
+		local visited = {}
+		local current = start_civ
+		while current do
+			if visited[current] then
+				error("[DLC] VALIDATION FAILED — Circular parent chain detected: '"
+					.. start_civ .. "' loops back to '" .. current .. "'.")
+			end
+			visited[current] = true
+			current = DLC_CIV_PARENT_MAP[current]
+		end
+	end
+end
+
+-- V2: Ensure all referenced parents resolve to AGS_ENTITY_TABLE
+function _Validate_ParentsExist()
+	for dlc_civ, parent in pairs(DLC_CIV_PARENT_MAP) do
+		local resolved = ResolveCivKey(parent)
+		if resolved == nil then
+			error("[DLC] VALIDATION FAILED — Parent '" .. parent 
+				.. "' for DLC civ '" .. dlc_civ 
+				.. "' does not resolve to AGS_ENTITY_TABLE.")
+		end
+	end
+end
+
+-- V3: Validate override table structure (no nil subtables, valid keys)
+function _Validate_OverrideStructure()
+	for dlc_civ, overrides in pairs(DLC_CIV_OVERRIDES) do
+		if type(overrides) ~= "table" then
+			error("[DLC] VALIDATION FAILED — DLC_CIV_OVERRIDES['" .. dlc_civ 
+				.. "'] is not a table.")
+		end
+		-- Verify each override key exists in the parent's table
+		local parent_key = ResolveCivKey(dlc_civ)
+		if parent_key then
+			for bp_type, attrib in pairs(overrides) do
+				if attrib ~= false and type(attrib) ~= "string" then
+					error("[DLC] VALIDATION FAILED — Override '" .. tostring(bp_type) 
+						.. "' for '" .. dlc_civ .. "' is not a string/false sentinel.")
+				end
+				if attrib == false then
+					-- false sentinel means civ intentionally lacks this blueprint.
+					goto continue_override
+				end
+				-- Warn if override key doesn't exist in parent (typo detection)
+				if AGS_ENTITY_TABLE[parent_key][bp_type] == nil then
+					print("[DLC] WARNING: Override key '" .. bp_type 
+						.. "' for '" .. dlc_civ 
+						.. "' does not exist in parent '" .. parent_key .. "' table.")
+				end
+				::continue_override::
+			end
+		end
+	end
+end
+
+-- V4: Ensure all base civs in AGS_ENTITY_TABLE that are also in 
+-- composition maps are synchronized (no orphan entries)
+function _Validate_CompositionSync()
+	-- Check all DLC civs have been generated into composition maps
+	for dlc_civ, _ in pairs(DLC_CIV_PARENT_MAP) do
+		-- Not an error if missing from composition maps (defaults apply),
+		-- but warn if parent has a specific entry and DLC doesn't
+		local parent = DLC_CIV_PARENT_MAP[dlc_civ]
+		if parent then
+			if CIV_MELEE_MAP[parent] and not CIV_MELEE_MAP[dlc_civ] then
+				print("[DLC] WARNING: '" .. dlc_civ 
+					.. "' missing from CIV_MELEE_MAP (parent '" .. parent .. "' has entry)."
+					.. " Will use default fallback.")
+			end
+			if CIV_RANGED_MAP[parent] and not CIV_RANGED_MAP[dlc_civ] then
+				print("[DLC] WARNING: '" .. dlc_civ 
+					.. "' missing from CIV_RANGED_MAP (parent '" .. parent .. "' has entry)."
+					.. " Will use default fallback.")
+			end
+		end
+	end
+end
+
+-- ============================================================
+-- Family & Civ Helper Functions (Stage 2)
+-- ============================================================
+-- Use these instead of ad-hoc resolved_civ == "english" checks.
+-- IsCivFamily uses the resolver so DLC variants are covered.
+-- IsCivExact checks the raw (unresolved) Player_GetRaceName value.
+-- ============================================================
+
+---IsCivFamily: Returns true if the player's resolved civ matches family.
+-- Example: IsCivFamily(player.id, "english") → true for lancaster too.
+function IsCivFamily(player_id, family)
+	return GetPlayerCiv(player_id) == family
+end
+
+---IsCivExact: Returns true if the player's raw raceName matches exactly.
+-- Example: IsCivExact(player.id, "abbasid_ha_01") → true only for Ayyubids.
+function IsCivExact(player_id, civ_name)
+	return string.lower(Player_GetRaceName(player_id)) == civ_name
+end
+
+---IsCivFamilyAny: Returns true if resolved civ matches any of the listed families.
+-- Example: IsCivFamilyAny(player.id, {"chinese", "mongol", "byzantine"})
+function IsCivFamilyAny(player_id, families)
+	local resolved = GetPlayerCiv(player_id)
+	for _, fam in ipairs(families) do
+		if resolved == fam then return true end
+	end
+	return false
+end
+
+-- Civ suffix map (shared by AGS_ENTITY_TABLE + CBA_SIEGE_TABLE generators)
+local CIV_SUFFIX = {
+	english = "eng", chinese = "chi", french = "fre", hre = "hre", rus = "rus",
+	abbasid = "abb", mongol = "mon", sultanate = "sul", malian = "mal",
+	ottoman = "ott", japanese = "jpn", byzantine = "byz",
+}
+
+-- AGS_ENTITY_TABLE — Generated from template + per-civ overrides
+-- Universal keys: always pattern_{suffix}
+local AGS_UNIVERSAL = {
+	{k="town_center_capital", f="building_town_center_capital_%s"},
+	{k="town_center",         f="building_town_center_%s"},
+	{k="castle",              f="building_defense_keep_%s"},
+	{k="villager",            f="unit_villager_1_%s"},
+	{k="scout",               f="unit_scout_1_%s"},
+	{k="king",                f="unit_king_1_%s"},
+	{k="scar_dock",           f="building_unit_naval_%s"},
+	{k="palisade_wall",       f="building_defense_palisade_%s"},
+	{k="palisade_gate",       f="building_defense_palisade_gate_%s"},
+	{k="monk",                f="unit_monk_3_%s"},
+	{k="crossbow",            f="unit_crossbowman_3_%s"},
+	{k="stone_wall",          f="building_defense_wall_%s"},
+}
+-- Variant keys: "control" civs get ctrl format, others get base format
+local AGS_VARIANT = {
+	{k="market",        ctrl="building_econ_market_control_%s",        base="building_econ_market_%s"},
+	{k="monastery",     ctrl="building_unit_religious_control_%s",     base="building_unit_religious_%s"},
+	{k="barracks",      ctrl="building_unit_infantry_control_%s",      base="building_unit_infantry_%s"},
+	{k="stable",        ctrl="building_unit_cavalry_control_%s",       base="building_unit_cavalry_%s"},
+	{k="archery_range", ctrl="building_unit_ranged_control_%s",        base="building_unit_ranged_%s"},
+	{k="siege_workshop",ctrl="building_unit_siege_control_%s",         base="building_unit_siege_%s"},
+	{k="house",         ctrl="building_house_control_%s",              base="building_house_%s"},
+	{k="blacksmith",    ctrl="building_tech_unit_infantry_control_%s", base="building_tech_unit_infantry_%s"},
+	{k="mining_camp",   ctrl="building_econ_mining_camp_control_%s",   base="building_econ_mining_camp_%s"},
+	{k="lumber_camp",   ctrl="building_econ_wood_control_%s",          base="building_econ_wood_%s"},
+	{k="mill",          ctrl="building_econ_food_control_%s",          base="building_econ_food_%s"},
+	{k="arsenal",       ctrl="building_tech_unit_ranged_control_%s",   base="building_tech_unit_ranged_%s"},
+}
+local AGS_IS_CTRL = {eng=true, chi=true, fre=true, hre=true, rus=true, sul=true, byz=true, abb=true}
+-- Per-civ overrides (wonder + entries that differ from template)
+local AGS_OVERRIDES = {
+	english = {town_center_landmark = "building_landmark_age2_westminster_palace_eng", wonder_imperial_age = "building_wonder_age4_canterbury_cathedral_eng"},
+	chinese = {wonder_imperial_age = "building_wonder_age4_forbidden_control_chi"},
+	french = {wonder_imperial_age = "building_wonder_age4_la_grande_cathedral_fre"},
+	hre = {town_center_landmark = "building_landmark_age3_hohenzollern_castle_hre", monk = "unit_monk_1_hre", wonder_imperial_age = "building_wonder_age4_glucksburg_castle_hre"},
+	rus = {castle = "building_defense_keep_control_rus", wonder_imperial_age = "building_wonder_age4_saint_basils_cathedral_control_rus"},
+	abbasid = {
+		castle = "building_defense_keep_control_abb", springald_buildable = "unit_springald_3_buildable_abb",
+		mangonel_buildable = "unit_mangonel_3_buildable_abb", house_of_wisdom = "building_house_of_wisdom_control_abb",
+		wonder_imperial_age = "building_wonder_age4_great_mosque_control_abb",
+	},
+	mongol = {
+		castle = false, -- Mongols have no keep
+		town_center_capital_moving = "building_town_center_capital_moving_mon",
+		scout = "unit_khan_1_mon", house_moving = "building_house_moving_mon",
+		wonder_imperial_age = "building_wonder_age4_final_wonder_mon",
+		mining_camp = false, -- Mongols have no mining camp
+		lumber_camp = false, -- Mongols have no lumber camp
+		mill = false, -- Mongols have no mill
+	},
+	sultanate = {castle = "building_defense_keep_control_sul", monk = "unit_monk_2_sul", wonder_imperial_age = "building_wonder_age4_agra_fort_control_sul"},
+	malian = {wonder_imperial_age = "building_wonder_age4_great_mosque_control_mal", arsenal = "building_tech_unit_ranged_control_nrm"},
+	ottoman = {wonder_imperial_age = "building_wonder_age4_blue_mosque_ott", arsenal = "building_tech_unit_ranged_control_lith"},
+	japanese = {wonder_imperial_age = "building_wonder_age4_nikko_toshogu_jpn", monastery = "building_unit_religious_buddhist_jpn", blacksmith = "building_tech_university_jpn", mill = "building_house_jpn", arsenal = "building_tech_unit_ranged_control_nrm"},
+	byzantine = {wonder_imperial_age = "building_wonder_age4_hagia_sophia_byz", arsenal = "building_tech_unit_ranged_control_abb"},
+}
+local AGS_REMOVE = {
+	mongol = {palisade_wall=true, palisade_gate=true, stone_wall=true},
+	malian = {crossbow=true}, ottoman = {crossbow=true}, japanese = {crossbow=true},
+}
+-- Expansion civs (all use _control_ variant)
+local DLC_AGS = {
+	abbasid_ha_01 = {sfx = "abb_ha_01", over = {
+		castle = "building_defense_keep_control_abb_ha_01", springald_buildable = "unit_springald_3_buildable_abb_ha_01",
+		mangonel_buildable = "unit_mangonel_3_buildable_abb_ha_01", house_of_wisdom = "building_house_of_wisdom_control_abb_ha_01",
+		wonder_imperial_age = "building_wonder_age4_great_mosque_control_abb_ha_01",
+	}},
+	chinese_ha_01 = {sfx = "chi_ha_01", over = {wonder_imperial_age = "building_wonder_age4_forbidden_control_chi_ha_01"}},
+	french_ha_01 = {sfx = "fre_ha_01", over = {wonder_imperial_age = "building_wonder_age4_la_grande_cathedral_fre_ha_01"}},
+	hre_ha_01 = {sfx = "hre_ha_01", over = {
+		town_center_landmark = "building_landmark_age3_hohenzollern_castle_hre_ha_01",
+		monk = "unit_monk_1_hre_ha_01", wonder_imperial_age = "building_wonder_age4_glucksburg_castle_hre_ha_01",
+	}},
+}
+function _BuildEntityTable()
+	AGS_ENTITY_TABLE = {}
+	for civ, sfx in pairs(CIV_SUFFIX) do
+		local entry = {}
+		local is_ctrl = AGS_IS_CTRL[sfx]
+		for _, t in ipairs(AGS_UNIVERSAL) do entry[t.k] = string.format(t.f, sfx) end
+		for _, t in ipairs(AGS_VARIANT) do entry[t.k] = string.format(is_ctrl and t.ctrl or t.base, sfx) end
+		if AGS_OVERRIDES[civ] then for k, v in pairs(AGS_OVERRIDES[civ]) do entry[k] = v end end
+		if AGS_REMOVE[civ] then for k, _ in pairs(AGS_REMOVE[civ]) do entry[k] = nil end end
+		AGS_ENTITY_TABLE[civ] = entry
+	end
+	for dlc, spec in pairs(DLC_AGS) do
+		local entry = {}
+		for _, t in ipairs(AGS_UNIVERSAL) do entry[t.k] = string.format(t.f, spec.sfx) end
+		for _, t in ipairs(AGS_VARIANT) do entry[t.k] = string.format(t.ctrl, spec.sfx) end
+		if spec.over then for k, v in pairs(spec.over) do entry[k] = v end end
+		AGS_ENTITY_TABLE[dlc] = entry
+	end
+end
+_BuildEntityTable()
+
+-- ============================================================
+-- Reverse Blueprint Lookup + Civ Suffix Map
+-- ============================================================
+-- BLUEPRINT_REVERSE_MAP: attribName → AGS key (e.g., "building_unit_infantry_control_eng" → "barracks")
+-- DC_CIV_SUFFIX_MAP: civKey → unit suffix (e.g., "english" → "eng", "lancaster" → "lan")
+-- Used by the player disconnect system for faction-safe asset conversion.
+
+function _BuildReverseLookups()
+	BLUEPRINT_REVERSE_MAP = {}
+	for _, tbl in pairs(AGS_ENTITY_TABLE) do
+		for key, attrib in pairs(tbl) do
+			if type(attrib) == "string" then
+				BLUEPRINT_REVERSE_MAP[attrib] = key
+			end
+		end
+	end
+	-- Also index DLC override attribNames
+	for _, overrides in pairs(DLC_CIV_OVERRIDES) do
+		for key, attrib in pairs(overrides) do
+			if type(attrib) == "string" then
+				BLUEPRINT_REVERSE_MAP[attrib] = key
+			end
+		end
+	end
+	-- Build civ suffix map from CIV_SUFFIX + DLC registrations
+	DC_CIV_SUFFIX_MAP = {}
+	for civ, sfx in pairs(CIV_SUFFIX) do
+		DC_CIV_SUFFIX_MAP[civ] = sfx
+	end
+	for dlc, spec in pairs(DLC_AGS) do
+		DC_CIV_SUFFIX_MAP[dlc] = spec.sfx
+	end
+	if type(DLC_SIEGE) == "table" then
+		for dlc, spec in pairs(DLC_SIEGE) do
+			if not DC_CIV_SUFFIX_MAP[dlc] then
+				DC_CIV_SUFFIX_MAP[dlc] = spec.sfx
+			end
+		end
+	end
+end
+_BuildReverseLookups()
+
+-- SIEGE BLUEPRINT TABLE — Generated from template + per-civ overrides
+local SIEGE_TEMPLATE = {
+	{k = "ram",            f = "unit_ram_3_%s"},
+	{k = "workshop_ram",   f = "unit_workshop_ram_3_%s"},
+	{k = "springald",      f = "unit_springald_3_%s"},
+	{k = "mangonel",       f = "unit_mangonel_3_%s"},
+	{k = "ribauldequin",   f = "unit_ribauldequin_4_%s"},
+	{k = "culverin",       f = "unit_culverin_4_%s"},
+	{k = "cannon",         f = "unit_cannon_4_%s"},
+	{k = "bombard",        f = "unit_bombard_4_%s"},
+	{k = "trebuchet_cw",   f = "unit_trebuchet_4_cw_%s"},
+	{k = "scar_siegeworkshop", f = "building_unit_siege_control_%s"},
+}
+local SIEGE_OVERRIDES = {
+	chinese = {nest_of_bees = "unit_nest_of_bees_4_chi", nestofbees_clocktower_chi = "unit_nest_of_bees_4_clocktower_chi", mangonel_clocktower_chi = "unit_mangonel_3_clocktower_chi", springald_clocktower_chi = "unit_springald_3_clocktower_chi", trebuchet_clocktower_chi = "unit_trebuchet_4_cw_clocktower_chi", bombard_clocktower_chi = "unit_bombard_4_clocktower_chi", ribauldequin = "unit_ribauldequin_4_nrm"},
+	french = {royal_cannon = "unit_cannon_4_royal_fre", royal_culverin = "unit_culverin_4_royal_fre", royal_ribauldequin = "unit_ribauldequin_4_royal_fre"},
+	abbasid = {mangonel_buildable = "unit_mangonel_3_buildable_abb"},
+	mongol = {
+		mangonel_buildable = "unit_mangonel_3_field_construct_mon", scar_siegeworkshop = "building_unit_siege_mon",
+		trebuchet_tr_buildable = "unit_trebuchet_4_tr_field_construct_mon", trebuchet_cw_buildable = "unit_trebuchet_4_cw_field_construct_mon",
+		trebuchet_cw_double = "unit_trebuchet_4_cw_double_mon", trebuchet_tr_double = "unit_trebuchet_4_tr_double_mon",
+		springald_double = "unit_springald_3_double_mon", mangonel_double = "unit_mangonel_3_double_mon",
+		ribauldequin_double = "unit_ribauldequin_4_double_mon", culverin_double = "unit_culverin_4_double_mon",
+		cannon_double = "unit_cannon_4_double_mon", bombard_double = "unit_bombard_4_double_mon",
+		nest_of_bees = "unit_khaganate_nest_of_bees_4_mon",
+	},
+	malian = {scar_siegeworkshop = "building_unit_siege_mal"},
+	ottoman = {bombard = "unit_great_bombard_4_ott", scar_siegeworkshop = "building_unit_siege_ott"},
+	japanese = {scar_siegeworkshop = "building_unit_siege_jpn"},
+	byzantine = {workshop_ram = "unit_workshop_fire_ram_3_byz", nest_of_bees = "unit_nest_of_bees_4_merc_byz"},
+}
+local DLC_SIEGE = {
+	abbasid_ha_01 = {sfx = "abb_ha_01", over = {mangonel_buildable = "unit_mangonel_3_buildable_abb_ha_01", scar_siegeworkshop = "building_unit_siege_control_abb_ha_01"}},
+	chinese_ha_01 = {sfx = "chi_ha_01", over = {ram = "unit_ram_3_chi", nest_of_bees = "unit_nest_of_bees_4_chi_ha_01", ribauldequin = "unit_ribauldequin_4_nrm", scar_siegeworkshop = "building_unit_siege_control_chi_ha_01"}},
+	french_ha_01 = {sfx = "fre_ha_01", over = {
+		springald = "unit_springald_3_fre", mangonel = "unit_mangonel_3_fre", ribauldequin = "unit_ribauldequin_4_fre",
+		culverin = "unit_culverin_4_fre", cannon = "unit_cannon_4_fre", bombard = "unit_bombard_4_fre",
+		trebuchet_cw = "unit_trebuchet_4_cw_fre", scar_siegeworkshop = "building_unit_siege_control_fre_ha_01",
+		royal_cannon = "unit_cannon_4_royal_fre_ha_01", royal_culverin = "unit_culverin_4_royal_fre_ha_01",
+		royal_ribauldequin = "unit_ribauldequin_4_royal_fre_ha_01",
+	}},
+	hre_ha_01 = {sfx = "hre_ha_01", over = {scar_siegeworkshop = "building_unit_siege_control_hre_ha_01"}},
+	lancaster = {sfx = "lan", over = {
+		ram = false, workshop_ram = "unit_siege_workshop_ram_3_lan",
+		springald = "unit_siege_springald_3_lan", mangonel = "unit_siege_mangonel_3_lan",
+		ribauldequin = false, culverin = "unit_siege_culverin_4_lan",
+		cannon = false, bombard = false,
+		trebuchet_cw = "unit_siege_trebuchet_4_cw_lan",
+		scar_siegeworkshop = "building_unit_siege_workshop_lan",
+	}},
+	templar = {sfx = "tem", over = {
+		ram = false, ribauldequin = false, culverin = false,
+		cannon = false, bombard = false,
+		scar_siegeworkshop = "building_siege_workshop_tem",
+	}},
+	mongol_ha_gol = {sfx = "mon_ha_gol", over = {
+		ram = false, ribauldequin = false, culverin = false,
+		cannon = false, trebuchet_cw = false,
+		scar_siegeworkshop = "building_unit_siege_mon_ha_gol",
+		trebuchet_tr = "unit_trebuchet_4_tr_mon_ha_gol",
+	}},
+	byzantine_ha_mac = {sfx = "byz_ha_mac", over = {
+		ram = false, ribauldequin = false, culverin = false, cannon = false,
+		workshop_ram = "unit_workshop_fire_ram_3_byz_ha_mac",
+		nest_of_bees = "unit_nest_of_bees_4_merc_byz_ha_mac",
+		royal_cannon = "unit_cannon_4_royal_merc_byz_ha_mac",
+		khaganate_great_trebuchet = "unit_khaganate_great_trebuchet_merc_byz_ha_mac",
+	}},
+	japanese_ha_sen = {sfx = "jpn_ha_sen", over = {
+		ram = false, ribauldequin = false, culverin = false, cannon = false,
+		scar_siegeworkshop = "building_unit_siege_jpn_ha_sen",
+		ozutsu = "unit_ozutsu_4_jpn_ha_sen",
+	}},
+	sultanate_ha_tug = {sfx = "sul_ha_tug", over = {
+		ram = false, springald = false, ribauldequin = false,
+		culverin = false, cannon = false,
+		war_elephant_ballista = "unit_war_elephant_ballista_4_sul_ha_tug",
+	}},
+}
+function _BuildSiegeTable()
+	CBA_SIEGE_TABLE = {}
+	for civ, sfx in pairs(CIV_SUFFIX) do
+		local entry = {trebuchet_tr = "unit_trebuchet_4_tr_mon"}
+		for _, t in ipairs(SIEGE_TEMPLATE) do entry[t.k] = string.format(t.f, sfx) end
+		if SIEGE_OVERRIDES[civ] then for k, v in pairs(SIEGE_OVERRIDES[civ]) do entry[k] = v end end
+		CBA_SIEGE_TABLE[civ] = entry
+	end
+	for dlc, spec in pairs(DLC_SIEGE) do
+		local entry = {trebuchet_tr = "unit_trebuchet_4_tr_mon"}
+		for _, t in ipairs(SIEGE_TEMPLATE) do entry[t.k] = string.format(t.f, spec.sfx) end
+		if spec.over then
+			for k, v in pairs(spec.over) do
+				if v == false then
+					entry[k] = nil
+				else
+					entry[k] = v
+				end
+			end
+		end
+		CBA_SIEGE_TABLE[dlc] = entry
+	end
+end
+_BuildSiegeTable()
+
+-- Unit composition helper: U(type, count) / S(sbp, count)
+local function U(t, n) return {type = t, numSquads = n} end
+local function S(bp, n) return {sbp = bp, numSquads = n} end
+
+Unit_Types = {
+	-- Player starting units: Melee role
+	start_player_melee     = {U("scar_horseman", 7), U("scar_spearman", 20), U("scar_scout", 3)},
+	start_player_melee_inf = {U("scar_manatarms", 20), U("scar_scout", 3)},
+	start_player_melee_cav = {U("scar_knight", 15), U("scar_horseman", 5), U("scar_scout", 3)},
+	start_player_melee_mal = {U("scar_horseman", 7), U("scar_manatarms", 20), U("scar_scout", 3)},
+	start_player_melee_abb = {U("scar_horseman", 20), U("scar_spearman", 10), U("scar_scout", 3)},
+	-- Player starting units: Ranged role
+	start_player_ranged     = {U("scar_archer", 15), U("scar_scout", 3)},
+	start_player_ranged_mon = {U("scar_horsearcher", 15), U("scar_scout", 3)},
+	start_player_ranged_rus = {U("scar_horsearcher", 15), U("scar_scout", 3)},
+	start_player_ranged_abb = {U("scar_camel_rider", 5), U("scar_camel_archer", 10), U("scar_scout", 3)},
+	start_player_ranged_mal = {U("scar_javelin", 20), U("scar_scout", 3)},
+	start_player_ranged_chi = {U("scar_repeater_crossbow", 15), U("scar_scout", 3)},
+	-- Reinforcements: Melee
+	units_player_melee_reinforce     = {U("scar_horseman", 5), U("scar_spearman", 15)},
+	units_player_melee_reinforce_inf = {U("scar_manatarms", 4), U("scar_spearman", 6)},
+	units_player_melee_reinforce_cav = {U("scar_horseman", 7), U("scar_knight", 3)},
+	units_player_melee_reinforce_mal = {U("scar_horseman", 3), U("scar_manatarms", 7)},
+	-- Reinforcements: Ranged
+	units_player_ranged_reinforce     = {U("scar_spearman", 10), U("scar_archer", 10)},
+	units_player_ranged_reinforce_cav = {U("scar_horseman", 5), U("scar_horsearcher", 5)},
+	units_player_ranged_reinforce_mal = {U("scar_manatarms", 5), U("scar_javelin", 5)},
+	units_player_ranged_reinforce_chi = {U("scar_spearman", 6), U("scar_repeater_crossbow", 4)},
+	units_player_ranged_reinforce_abb = {U("scar_camel_archer", 5), U("scar_camel_rider", 3)},
+	-- Villager groups (faction-based)
+	units_player_melee     = {U("scar_villager", 10), U("scar_spearman", 20)},
+	units_player_ranged    = {U("scar_villager", 10), U("scar_archer", 15)},
+	units_player_melee_mal = {U("scar_villager", 10), U("scar_manatarms", 20)},
+	units_player_ranged_mal = {U("scar_villager", 10), U("scar_javelin", 15)},
+	units_player_ranged_chi = {U("scar_villager", 10), U("scar_repeater_crossbow", 10)},
+	-- Hostile: Static defenders & patrols
+	units_camp          = {U("scar_spearman", 10), U("scar_archer", 5)},
+	units_camp_hard     = {U("scar_manatarms", 5), U("scar_spearman", 10), U("scar_archer", 8)},
+	units_camp_easy     = {U("scar_spearman", 7), U("scar_archer", 3)},
+	units_patrol        = {U("scar_spearman", 10), U("scar_archer", 10)},
+	units_patrol_hard   = {U("scar_manatarms", 10), U("scar_archer", 10)},
+	units_cityguards      = {U("scar_manatarms", 20), U("scar_spearman", 20), U("scar_crossbowman", 15)},
+	units_cityguards_hard = {U("scar_manatarms", 20), U("scar_spearman", 20), U("scar_knight", 15), U("scar_handcannon", 15)},
+	units_cityguards_final = {U("scar_manatarms", 20), U("scar_spearman", 10), U("scar_knight", 10)},
+	units_river_guards  = {U("scar_horseman", 10), U("scar_spearman", 20), U("scar_repeater_crossbow", 10), U("scar_archer", 10), S(SBP.CHINESE.UNIT_MANGONEL_3_CHI, 2)},
+	units_cavalry_chi   = {U("scar_horseman", 5), U("scar_firelancer", 5)},
+	-- Hostile: Ranged defenders
+	units_ranged       = {U("scar_handcannon", 10), S(SBP.CHINESE.UNIT_MANGONEL_3_CHI, 1)},
+	units_ranged_light = {U("scar_archer", 10), U("scar_springald", 1)},
+	units_ranged_hard  = {U("scar_handcannon", 20), S(SBP.CHINESE.UNIT_MANGONEL_3_CHI, 2), U("scar_bombard", 1)},
+	-- Hostile: Attack waves
+	wave_city_5m       = {U("scar_horseman", 5), U("scar_archer", 5), U("scar_spearman", 10)},
+	wave_city_10m_flank = {U("scar_knight", 5), U("scar_horseman", 10), U("scar_firelancer", 5)},
+	wave_city_10m      = {U("scar_firelancer", 5), U("scar_repeater_crossbow", 10), U("scar_manatarms", 10), U("scar_spearman", 10)},
+	wave_city_15m      = {U("scar_crossbowman", 10), U("scar_knight", 5), U("scar_manatarms", 15), U("scar_spearman", 5), U("scar_ram", 3), S(SBP.CHINESE.UNIT_NEST_OF_BEES_4_CHI, 1)},
+	wave_city_20m      = {U("scar_knight", 15), U("scar_horseman", 15), U("scar_firelancer", 10)},
+	wave_city_25m      = {U("scar_manatarms", 20), U("scar_knight", 10), U("scar_spearman", 10), U("scar_crossbowman", 10), U("scar_repeater_crossbow", 10), S(SBP.CHINESE.UNIT_NEST_OF_BEES_4_CHI, 2)},
+	wave_city_30m      = {U("scar_manatarms", 20), U("scar_knight", 20), U("scar_crossbowman", 10), U("scar_handcannon", 10), U("scar_bombard", 2)},
+	wave_city_40m      = {U("scar_spearman", 20), U("scar_manatarms", 25), U("scar_knight", 20), U("scar_handcannon", 15), S(SBP.CHINESE.UNIT_NEST_OF_BEES_4_CHI, 2), U("scar_bombard", 1), U("scar_ram", 3)},
+	wave_city_45m      = {U("scar_knight", 20), U("scar_horseman", 20), U("scar_firelancer", 10)},
+	wave_siege         = {S(SBP.CHINESE.UNIT_NEST_OF_BEES_4_CHI, 2), U("scar_bombard", 1), U("scar_manatarms", 10), U("scar_spearman", 20)},
+	wave_no_siege      = {U("scar_spearman", 20), U("scar_repeater_crossbow", 10)},
+	-- Allied units
+	units_ally_infantry = {U("scar_manatarms", 25), U("scar_archer", 15)},
+	wave_allied_siege   = {U("scar_manatarms", 20), U("scar_knight", 5), U("scar_bombard", 2)},
+	wave_villageCaptured = {U("scar_archer", 10), U("scar_manatarms", 10), U("scar_spearman", 15)},
+	guards_cliff        = {U("scar_archer", 20), S(SBP.CHINESE.UNIT_NEST_OF_BEES_4_CHI, 2)},
+	-- Misc
+	wave_light      = {U("scar_spearman", 10), U("scar_archer", 5), U("scar_horseman", 5)},
+	wave_checkpoint = {U("scar_spearman", 10), U("scar_archer", 10), U("scar_manatarms", 5)},
+}
+
+-- Civ → Unit_Types key maps (melee: P1&3, ranged: P2&4)
+CIV_MELEE_MAP = {malian = "start_player_melee_mal", abbasid = "start_player_melee_abb", rus = "start_player_melee_cav", french = "start_player_melee_cav", french_ha_01 = "start_player_melee_cav", english = "start_player_melee_inf", lancaster = "start_player_melee_inf", hre = "start_player_melee_inf", hre_ha_01 = "start_player_melee_inf", templar = "start_player_melee_inf", japanese = "start_player_melee_inf", chinese_ha_01 = "start_player_melee_inf", jin_dynasty = "start_player_melee_inf"}
+CIV_RANGED_MAP = {malian = "start_player_ranged_mal", chinese = "start_player_ranged_chi", chinese_ha_01 = "start_player_ranged_chi", jin_dynasty = "start_player_ranged_chi", abbasid = "start_player_ranged_abb", mongol = "start_player_ranged_mon", mongol_ha_gol = "start_player_ranged_mon", rus = "start_player_ranged_rus"}
+
+UNIQUE_UNIT_MELEE = {mongol = {type = "scar_khan", numSquads = 1}, english = {sbp = SBP.ENGLISH.UNIT_ABBEY_KING_2, numSquads = 1}, french_ha_01 = {sbp = SBP.FRENCH_HA_01.UNIT_JEANNE_D_ARC_2_WOMANATARMS_FRE_HA_01, numSquads = 1}}
+UNIQUE_UNIT_RANGED = {mongol = {type = "scar_khan", numSquads = 1}, english = {sbp = SBP.ENGLISH.UNIT_ABBEY_KING_2, numSquads = 1}, french_ha_01 = {sbp = SBP.FRENCH_HA_01.UNIT_JEANNE_D_ARC_2_ARCHER_FRE_HA_01, numSquads = 1}}
+UNIQUE_UNIT_DEFAULT = {type = "scar_monk", numSquads = 3}
+
+REINFORCE_MELEE_MAP = {malian = "units_player_melee_reinforce_mal", rus = "units_player_melee_reinforce_cav", french = "units_player_melee_reinforce_cav", french_ha_01 = "units_player_melee_reinforce_cav", english = "units_player_melee_reinforce_inf", lancaster = "units_player_melee_reinforce_inf", hre = "units_player_melee_reinforce_inf", hre_ha_01 = "units_player_melee_reinforce_inf", templar = "units_player_melee_reinforce_inf"}
+REINFORCE_RANGED_MAP = {malian = "units_player_ranged_reinforce_mal", chinese = "units_player_ranged_reinforce_chi", chinese_ha_01 = "units_player_ranged_reinforce_chi", jin_dynasty = "units_player_ranged_reinforce_chi", abbasid = "units_player_ranged_reinforce_abb", abbasid_ha_01 = "units_player_ranged_reinforce_abb", rus = "units_player_ranged_reinforce_cav", mongol = "units_player_ranged_reinforce_cav", mongol_ha_gol = "units_player_ranged_reinforce_cav"}
+
+-- Precache age-gated squad blueprints during loading phase (before game world renders).
+-- Uses Scar_AddInit per Rogue campaign pattern: "Precaching resources must be done
+-- before the game loading completes." Called unconditionally for all risky variants
+-- since player civ data is unavailable at this stage.
+local function _PrecacheOnLoading()
+	local targets = {
+		-- DLC-only MAA variants (no _2 tier → red box at Age 2 start)
+		"unit_manatarms_3_tem",
+		"unit_manatarms_3_mon_ha_gol",
+		"unit_manatarms_3_sul_ha_tug",
+		-- Abbasid-family Camel Rider (Age 3 unit used in Age 2 start composition)
+		"unit_camel_rider_3_abb",
+		-- Village/phase hostile compositions
+		"unit_mangonel_3_chi",
+		"unit_springald_3_chi",
+		-- Fortification objective ambush
+		"unit_horsearcher_4_rus",
+		-- Monks: Vanilla civs with _3 tier only (no _2 variant)
+		"unit_monk_3_abb",
+		"unit_monk_3_chi",
+		"unit_monk_3_eng",
+		"unit_monk_3_fre",
+		"unit_monk_3_mal",
+		"unit_monk_3_mon",
+		"unit_monk_3_ott",
+		"unit_monk_3_rus",
+		-- Monks: Japanese variants (both religious paths)
+		"unit_monk_buddhist_3_jpn",
+		"unit_monk_shinto_3_jpn",
+		-- Monks: DLC variants with _3 tier only
+		"unit_monk_3_cambulance_abb_ha_01",
+		"unit_monk_3_mon_ha_gol",
+		"unit_monk_ikko_3_jpn_ha_sen",
+		"unit_monk_3_lan",
+		"unit_monk_3_tem",
+	}
+	local loaded = 0
+	for _, attrib in ipairs(targets) do
+		local sbp = BP_GetSquadBlueprint(attrib)
+		if sbp ~= nil then
+			Scar_PrecachePrematchResource(sbp)
+			loaded = loaded + 1
+		end
+	end
+	print("[PRECACHE] OnLoading: warmed " .. tostring(loaded) .. " age-gated squad blueprints.")
+end
+Scar_AddInit(_PrecacheOnLoading)
+
+-- Batch-create numbered SGroup/EGroup globals
+local function _SGroupBatch(prefix, count)
+	for i = 1, count do _G[prefix..i] = SGroup_CreateIfNotFound(prefix..i) end
+end
+local function _EGroupBatch(prefix, count)
+	for i = 1, count do _G[prefix..i] = EGroup_CreateIfNotFound(prefix..i) end
+end
+
+-- Mission_SetupVariables
+function SetupVariables_data()
+	
+	-- AI Difficulty
+	AI_Difficulty = GetAIDifficulty(player6)
+	
+	-- Initialize centralized difficulty config (sets global DC)
+	Difficulty_Init()
+	
+	-- SGroup Tracker
+	sg_player_team = SGroup_CreateIfNotFound("sg_player_team") 
+	
+	-- Garrison_Building
+	sg_garrison = SGroup_CreateIfNotFound("sg_garrison")
+	
+	
+	-------------
+	-- Phase 1 --
+	-------------
+	
+	-- Allied / Player-indexed SGroups (start, scout, reinforcements, unique, villagers, checkpoint)
+	sg_players_all_start = SGroup_CreateIfNotFound("sg_players_all_start")
+	for i = 1, 4 do
+		_G["sg_player"..i.."_start"] = SGroup_CreateIfNotFound("sg_player"..i.."_start")
+		_G["sg_player"..i.."_scout"] = SGroup_CreateIfNotFound("sg_player"..i.."_scout")
+		_G["sg_player"..i.."_reinforcements"] = SGroup_CreateIfNotFound("sg_player"..i.."_reinforcements")
+		_G["sg_player"..i.."_unique"] = SGroup_CreateIfNotFound("sg_player"..i.."_unique")
+		_G["sg_player"..i.."_villagers"] = SGroup_CreateIfNotFound("sg_player"..i.."_villagers")
+		_G["sg_player"..i.."_reinforcements_cp"] = SGroup_CreateIfNotFound("sg_player"..i.."_reinforcements_cp")
+	end
+	-- Allied / Village / AI Reinforcements
+	_SGroupBatch("sg_allied_reinforcements_", 4)
+	sg_allied_reinforcements_group1 = SGroup_CreateIfNotFound("sg_allied_reinforcements_group1")
+	-- Enemy / Village Side / Guards + Starting Battle
+	_SGroupBatch("sg_village_defender_", 6)
+	_SGroupBatch("sg_cav_start_", 2)
+	-- Enemy / Village Main / Guards
+	_SGroupBatch("sg_village_guards_", 4)
+	-- Enemy / Middle / Guards (1-4 regular, 5-8 choke points) + TC Flanks
+	_SGroupBatch("sg_middle_guards_", 8)
+	_SGroupBatch("sg_middle_flank_", 4)
+	
+	-- Objectives -- 
+	
+	-- Start / EGroups / Spawn_TC
+	eg_player_tc = EGroup_CreateIfNotFound("eg_player_tc")
+	for i = 1, 4 do _G["eg_player"..i.."_tc"] = EGroup_CreateIfNotFound("eg_player"..i.."_tc") end
+	
+	-- Village_Enemey_condition / Side 1
+	guards_moving_1 = false
+	guards_moving_2 = false
+	guards_outpost_1 = false
+	-- Village_Enemey_condition / Side 2
+	guards_moving_3 = false
+	guards_moving_4 = false
+	guards_outpost_2 = false
+	
+	-- Reinforcements (Villager group)
+	group_spawned = false
+	
+	-- Objective / Phase1_Barracks_Side_Outposts_rule
+	outpost_captured_1 = false
+	outpost_captured_2 = false
+	-- Objective / Phase1_Barracks_Side_Rule_Counters
+	rip_side_outposts1 = false
+	rip_side_outposts2 = false
+	-- Objective / Phase1_Barracks_Side_food / DISABLED
+	eg_side1_food = EGroup_CreateIfNotFound("eg_side1_food")
+	eg_side2_food = EGroup_CreateIfNotFound("eg_side2_food")
+	
+	-- Objective / Phase1_Village_Main_Rule_Counters
+	eg_outpost_obj1 = EGroup_GetClosestEntity(eg_objective_village, mkr_objective_tc)
+	eg_outpost_obj2 = EGroup_GetClosestEntity(eg_objective_village, mkr_village_main_2)
+	rip_outpost1 = false
+	rip_outpost2 = false
+	-- Objective / Phase1_Village_Main_OnComplete
+	eg_religious_1 = EGroup_CreateIfNotFound("eg_religious_1")
+	
+	-- Objective / Phase1_Village_Main_Defence_Start
+	eg_tc_main = EGroup_CreateIfNotFound("eg_tc_main")
+
+	-------------
+	-- Phase 2 --
+	-------------
+	
+	-- Side / Top
+	sg_ally_siege_1 = SGroup_CreateIfNotFound("sg_ally_siege_1")
+	sg_city_outer_counter_1a = SGroup_CreateIfNotFound("sg_city_outer_counter_1a")
+	sg_city_outer_counter_1b = SGroup_CreateIfNotFound("sg_city_outer_counter_1b")
+	sg_top_ambush_1 = SGroup_CreateIfNotFound("sg_top_ambush_1")
+	sg_top_ambush_2 = SGroup_CreateIfNotFound("sg_top_ambush_2")
+	sg_top_ambush_3 = SGroup_CreateIfNotFound("sg_top_ambush_3")
+	sg_top_trench_1 = SGroup_CreateIfNotFound("sg_top_trench_1")
+	sg_top_trench_2 = SGroup_CreateIfNotFound("sg_top_trench_2")
+	
+	-- Side / Middle
+	sg_middle_entry_cliff = SGroup_CreateIfNotFound("sg_middle_entry_cliff")
+	sg_middle_entry_cliff_2 = SGroup_CreateIfNotFound("sg_middle_entry_cliff_2")
+	sg_middle_entry_1 = SGroup_CreateIfNotFound("sg_middle_entry_1")
+	sg_middle_entry_2 = SGroup_CreateIfNotFound("sg_middle_entry_2")
+	sg_middle_entry_ambush_1 = SGroup_CreateIfNotFound("sg_middle_entry_ambush_1")
+	sg_middle_entry_ambush_2 = SGroup_CreateIfNotFound("sg_middle_entry_ambush_2")
+	sg_middle_entry_ambush_3 = SGroup_CreateIfNotFound("sg_middle_entry_ambush_3")
+	
+	-- Objective / Phase2_ReinforcementKeep_condition
+	sg_middle_entry_all = SGroup_CreateIfNotFound("sg_middle_entry_all")
+	top_ambush_threshold = 0
+	top_ambush = false
+	top_cleared = false
+	
+	-- Objective / Phase2_CaptureSiege_Attacks
+	sg_workshop_attack_1 = SGroup_CreateIfNotFound("sg_workshop_attack_1")
+	sg_ally_siege_2 = SGroup_CreateIfNotFound("sg_ally_siege_2")
+	middle_fortification_threshold = 0
+	middle_cleared = false
+	-- Objective / Phase2_CaptureSiege_Condition
+	middle_ambush = false
+	workshop_captured = false
+	-- Objective / Phase2_CaptureSiege_OnComplete
+	_EGroupBatch("eg_siege_p", 4)
+	
+	-- Objective / Phase2_CaptureCity_Setup
+	sg_general_1 = SGroup_CreateIfNotFound("sg_general_1")
+	_SGroupBatch("sg_city1_defender_", 9)
+	sg_city1_defender_all = SGroup_CreateIfNotFound("sg_city1_defender_all")
+	-- Objective / Phase2_CaptureCity_Condition
+	wall_breached = false
+	city_ownership_changed = false
+
+	-------------
+	-- Phase 3 --
+	-------------
+	
+	_SGroupBatch("sg_city2_defender_", 6)
+	
+	-- Objective / Phase3_
+	sg_general_2 = SGroup_CreateIfNotFound("sg_general_2")
+	_SGroupBatch("sg_general_security_", 2)
+	general_eliminated = false
+	
+
+
+	-------------
+	--  Waves  --
+	-------------
+	
+	-- Delayed attack waves: Sides 1 (P1&P2) and 2 (P3&P4)
+	-- 01a-01d: Light/flank, 02: Siege, 03: Armored Cav, 04-07: Standard, 08-11: Hardest only
+	local wave_suffixes = {"01a","01b","01c","01d","02","03","04","05","06","07","08","09","10","11"}
+	for _, side in ipairs({"1","2"}) do
+		for _, s in ipairs(wave_suffixes) do
+			local name = "sg_waves_main_"..side.."_"..s
+			_G[name] = SGroup_CreateIfNotFound(name)
+		end
+	end
+	
+	-- Patrols
+	_SGroupBatch("sg_middle_patrol_", 4)
+	
+	-- Extra Waves (01-02: Phase2_CaptureCity_Completed, 03-04: Condition, 05-06: Standard)
+	for i = 1, 6 do
+		local name = string.format("sg_waves_main_3_%02d", i)
+		_G[name] = SGroup_CreateIfNotFound(name)
+	end
+end
+
+-- Marker path compositions (single-line for compactness)
+function Unit_Path_Data()
+	-- Allied Waves (village raids #1-4, city raids #1-3)
+	ally_assault_1 = {mkr_ally_raid1_1, mkr_ally_raid1_2, mkr_ally_raid1_3}
+	ally_assault_2 = {mkr_ally_raid2_1, mkr_ally_raid2_2, mkr_ally_raid2_3, mkr_ally_raid2_4}
+	ally_assault_3 = {mkr_ally_raid3_1, mkr_ally_raid3_2, mkr_ally_raid3_3, mkr_ally_raid3_4}
+	ally_assault_4 = {mkr_ally_raid4_1, mkr_ally_raid4_2, mkr_ally_raid4_3}
+	ally_siege_1 = {mkr_ally_raid1_1, mkr_ally_raid1_2, mkr_ally_raid1_3, mkr_spawn_south_1, mkr_dest_siege_1, mkr_dest_siege_keep1, mkr_dest_gate_1, mkr_dest_siege_keep2}
+	ally_siege_2 = {mkr_ally_raid2_1, mkr_ally_raid2_2, mkr_ally_raid2_3, mkr_ally_raid2_4, mkr_spawn_south_1, mkr_dest_siege_2, mkr_dest_siege_keep1, mkr_dest_gate_1, mkr_dest_siege_keep2}
+	ally_siege_3 = {mkr_ally_raid3_1, mkr_ally_raid3_2, mkr_ally_raid3_3, mkr_ally_raid3_4, mkr_spawn_south_2, mkr_dest_siege_3, mkr_dest_siege_keep2, mkr_dest_gate_2, mkr_dest_siege_keep1}
+	-- Attack Waves (side #1: main, flank, resources; side #2: main, flank, resources)
+	wave_path_1 = {mkr_wave_1_path_1, mkr_wave_1_path_2, mkr_wave_1_path_3, mkr_wave_1_path_4, mkr_wave_path_village, mkr_village_main_2, mkr_objective_tc}
+	wave_path_1_flank = {mkr_wave_1_path_1, mkr_wave_1_path_2, mkr_wave_1_path_3, mkr_wave_1_path_4, mkr_wave_1_flank_1, mkr_wave_1_flank_2, mkr_objective_tc}
+	wave_path_1_resources = {mkr_wave_1_start_flank, mkr_wave_1_path_4, mkr_wave_resources_1, mkr_wave_1_resources_1, mkr_wave_1_resources_2, mkr_wave_1_resources_3, mkr_objective_tc}
+	wave_path_2 = {mkr_wave_mid_path_1, mkr_wave_mid_path_2, mkr_wave_mid_path_3, mkr_wave_mid_path_4, mkr_wave_path_village, mkr_village_main_2, mkr_objective_tc}
+	wave_path_2_flank = {mkr_wave_2_path_1, mkr_wave_2_path_2, mkr_wave_path_village, mkr_wave_resources_1, mkr_wave_2_compound, mkr_wave_2_trade, mkr_wave_2_flank_1, mkr_wave_2_flank_2, mkr_village_main_2, mkr_objective_tc}
+	wave_path_2_resources = {mkr_wave_mid_path_1, mkr_wave_2_path_2, mkr_wave_path_village, mkr_wave_resources_1, mkr_wave_resources_2, mkr_wave_resources_3, mkr_wave_2_trade, mkr_wave_2_compound, mkr_wave_2_flank_1, mkr_wave_2_flank_2, mkr_village_main_2, mkr_objective_tc}
+	-- Patrols
+	patrol_village_main = {mkr_village_main_3, mkr_village_main_2, mkr_village_main_1a, mkr_wave_2_flank_2, mkr_village_main_1a, mkr_wave_1_resources_3, mkr_village_main_1a, mkr_village_main_3}
+	patrol_village_1 = {mkr_wave_2_resources_2, mkr_wave_2_resources_3, mkr_wave_2_trade, mkr_wave_2_compound, mkr_wave_1_resources_1, mkr_side_1_compound, mkr_wave_1_flank_2, mkr_wave_1_resources_3, mkr_wave_2_resources_2, mkr_wave_2_resources_3, mkr_wave_2_trade, mkr_wave_2_compound}
+	patrol_village_2 = {mkr_wave_1_resources_1, mkr_side_1_compound, mkr_wave_1_flank_2, mkr_wave_1_resources_3, mkr_wave_2_resources_2, mkr_wave_2_resources_3, mkr_wave_2_trade, mkr_wave_2_compound, mkr_wave_1_resources_1, mkr_side_1_compound}
+	patrol_city_1 = {mkr_dest_siege_keep1, mkr_dest_siege_keep2, mkr_wave_1_spawn}
+	patrol_city_2 = {mkr_dest_siege_keep2, mkr_dest_siege_keep1, mkr_spawn_wave_4}
+end
+
+-- AI Difficulty selects upgrades for AI (see DC.ai_upgrade_tier)
+function Difficulty_Upgrades_Phase1()
+	
+	-- Add upgrades to AI
+	if DC.ai_upgrade_tier == "ridiculous" then 
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_UNIT_ARCHER_3)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_MELEE_ARMOR_I)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_MELEE_DAMAGE_I)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_RANGED_DAMAGE_I)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_RANGED_ARMOR_I)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_RANGED_ARMOR_I)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_TECH_UNIVERSITY_MURDER_HOLES_4)
+		
+	elseif DC.ai_upgrade_tier == "outrageous_plus" then 
+		-- Faction: CHI
+		Player_CompleteUpgrade(player6, UPG.CHINESE.UPGRADE_UNIT_REPEATER_CROSSBOW_3_CHI)
+		-- Default
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_UNIT_SPEARMAN_3)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_UNIT_ARCHER_3)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_UNIT_HORSEMAN_3)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_MELEE_ARMOR_II)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_MELEE_DAMAGE_II)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_RANGED_DAMAGE_II)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_RANGED_ARMOR_II)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_RANGED_ARMOR_II)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_TECH_UNIVERSITY_MURDER_HOLES_4)
+		
+		
+	else
+		-- Enemy AI
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_UNIT_SPEARMAN_2)
+		-- Allied AI / Difficulty: Easy, Intermediate
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_UNIT_SPEARMAN_3)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_UNIT_ARCHER_3)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_UNIT_HORSEMAN_3)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_MELEE_ARMOR_II)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_MELEE_DAMAGE_II)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_RANGED_DAMAGE_II)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_RANGED_ARMOR_II)
+		Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_RANGED_ARMOR_II)
+		
+	end 
+	
+	-- 10 minute delay
+	Rule_AddOneShot(Difficulty_Upgrades_Phase2, 600)
+												
+end
+														
+-- AI Difficulty selects upgrades for AI (see DC.ai_upgrade_tier)
+function Difficulty_Upgrades_Phase2()
+	
+	if DC.ai_upgrade_tier == "ridiculous" then 
+		-- Faction: CHI
+		Player_CompleteUpgrade(player6, UPG.CHINESE.UPGRADE_UNIT_REPEATER_CROSSBOW_3_CHI)
+		-- Default
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_MELEE_ARMOR_II)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_MELEE_DAMAGE_II)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_RANGED_DAMAGE_II)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_RANGED_ARMOR_II)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_RANGED_ARMOR_II)
+		
+	elseif DC.ai_upgrade_tier == "outrageous_plus" then	
+		-- Faction: CHI
+		Player_CompleteUpgrade(player6, UPG.CHINESE.UPGRADE_UNIT_FIRELANCER_4_CHI)
+		Player_CompleteUpgrade(player6, UPG.CHINESE.UPGRADE_UNIT_REPEATER_CROSSBOW_4_CHI)
+		-- Default
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_UNIT_SPEARMAN_4)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_UNIT_ARCHER_4)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_UNIT_HORSEMAN_4)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_MELEE_ARMOR_III)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_MELEE_DAMAGE_III)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_RANGED_DAMAGE_III)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_RANGED_ARMOR_III)
+	end
+	
+	-- 10 minute delay
+	Rule_AddOneShot(Difficulty_Upgrades_Phase3, 600)
+	
+end
+
+function Difficulty_Upgrades_Phase3()
+
+	if DC.ai_upgrade_tier == "ridiculous" then
+		-- Faction: CHI
+		Player_CompleteUpgrade(player6, UPG.CHINESE.UPGRADE_UNIT_FIRELANCER_4_CHI)
+		Player_CompleteUpgrade(player6, UPG.CHINESE.UPGRADE_UNIT_REPEATER_CROSSBOW_4_CHI)
+		-- Default
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_UNIT_SPEARMAN_4)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_UNIT_ARCHER_4)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_UNIT_HORSEMAN_4)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_UNIT_MANATARMS_4)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_MELEE_ARMOR_III)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_MELEE_DAMAGE_III)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_RANGED_DAMAGE_III)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_RANGED_ARMOR_III)
+		
+	elseif DC.ai_upgrade_tier == "outrageous_plus" then	
+		-- Unit Upgrades
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_UNIT_MANATARMS_4)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_UNIT_KNIGHT_4)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_UNIT_CROSSBOWMAN_4)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_TECH_UNIVERSITY_BIOLOGY)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_RANGED_INCENDIARY)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_MANATARMS_ELITE_ARMY_TACTICS)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_SPEARMAN_ELITE_SPEAR_TACTICS)
+		-- Siege Upgrades
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_SIEGE_CHEMISTRY)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_SIEGE_ADJUSTABLE_CROSSBAR)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_SIEGE_WEAPON_SPEED)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_SIEGE_STEEL_BORE)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_SIEGE_WORKS)
+		
+	elseif DC.schedule_phase4_upgrades then	
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_UNIT_HORSEMAN_3)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_MELEE_ARMOR_I)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_MELEE_DAMAGE_I)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_RANGED_DAMAGE_I)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_RANGED_ARMOR_I)
+		Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_RANGED_ARMOR_I)
+		Rule_AddOneShot(Difficulty_Upgrades_Phase4, 900)
+	end
+	
+	
+end
+
+-- Age 4 delayed upgrades (15m) / Difficulty: Intermediate-Hardest
+function Difficulty_Upgrades_Phase4()
+	-- Units
+	Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_UNIT_KNIGHT_4)
+	Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_UNIT_CROSSBOWMAN_4)
+	Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_RANGED_INCENDIARY)
+	Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_UNIT_SPEARMAN_4)
+	Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_UNIT_ARCHER_4)
+	Player_CompleteUpgrade(player6, UPG.COMMON.UPGRADE_UNIT_HORSEMAN_4)
+	Player_CompleteUpgrade(player6, UPG.CHINESE.UPGRADE_UNIT_REPEATER_CROSSBOW_4_CHI)
+	-- Upgrades
+	Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_MELEE_ARMOR_II)
+	Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_MELEE_DAMAGE_II)
+	Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_RANGED_DAMAGE_II)
+	Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_RANGED_ARMOR_II)
+	Player_CompleteUpgrade(player5, UPG.COMMON.UPGRADE_RANGED_ARMOR_II)
+	
+end

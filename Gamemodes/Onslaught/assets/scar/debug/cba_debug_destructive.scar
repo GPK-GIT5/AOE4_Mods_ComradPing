@@ -1,0 +1,677 @@
+---------------------------------------------------------------------------------------------------
+-- CBA Debug — Destructive Tests
+-- WARNING: These functions MODIFY GAME STATE. Use only in private test lobbies.
+--
+-- Branch: onslaught-v3.3
+-- AUDIT: Entity_SetPlayerOwner transfers don't fire construction events, so building-limit
+--   counters can desync unless explicitly recounted for the recipient.
+-- Console: Debug_ForceKeepDestroy(1), Debug_ForceEliminatePlayer(2), etc.
+---------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------
+-- Keep Destruction
+---------------------------------------------------------------------------------------------------
+
+local function _Debug_Destructive_IsLocalPlayerIndex(player_idx)
+	if player_idx == nil then
+		return false
+	end
+	local okLocal, localPlayer = pcall(Game_GetLocalPlayer)
+	if not okLocal or localPlayer == nil then
+		return false
+	end
+	local okLocalIdx, localIdx = pcall(World_GetPlayerIndex, localPlayer)
+	if not okLocalIdx or localIdx == nil then
+		return false
+	end
+	return localIdx == player_idx
+end
+
+local function _Debug_Destructive_RejectLocalTarget(commandName, player_idx)
+	if _Debug_Destructive_IsLocalPlayerIndex(player_idx) then
+		print(string.format("[DEBUG_DESTRUCTIVE] SAFETY: %s blocked for local human player index=%d", commandName, player_idx))
+		return true
+	end
+	return false
+end
+
+function Debug_ForceKeepDestroy(player_idx)
+	if player_idx == nil then
+		print("[DEBUG_DESTRUCTIVE] Usage: Debug_ForceKeepDestroy(player_index)")
+		return
+	end
+
+	if _Debug_Destructive_RejectLocalTarget("Debug_ForceKeepDestroy", player_idx) then
+		return
+	end
+
+	local player = PLAYERS[player_idx]
+	if player == nil then
+		print(string.format("[DEBUG_DESTRUCTIVE] PLAYERS[%d] is nil", player_idx))
+		return
+	end
+
+	local keep = player.keep
+	if keep == nil then
+		print(string.format("[DEBUG_DESTRUCTIVE] Player %d has no keep data", player_idx))
+		return
+	end
+
+	if keep.entity == nil then
+		print(string.format("[DEBUG_DESTRUCTIVE] Player %d keep.entity is nil", player_idx))
+		return
+	end
+
+	local ok_valid, valid = pcall(Entity_IsValid, keep.entity)
+	if not ok_valid or not valid then
+		print(string.format("[DEBUG_DESTRUCTIVE] Player %d keep entity is invalid", player_idx))
+		return
+	end
+
+	print(string.format("[DEBUG_DESTRUCTIVE] Destroying keep for Player %d", player_idx))
+	local ok_pos, pos = pcall(Entity_GetPosition, keep.entity)
+	if ok_pos then
+		print(string.format("  Position: (%.1f, %.1f, %.1f)", pos.x, pos.y, pos.z))
+	end
+
+	Entity_Kill(keep.entity)
+	print("  Keep destroyed. Monitor GE_EntityKilled handler response.")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Player Elimination
+---------------------------------------------------------------------------------------------------
+
+function Debug_ForceEliminatePlayer(player_idx)
+	if player_idx == nil then
+		print("[DEBUG_DESTRUCTIVE] Usage: Debug_ForceEliminatePlayer(player_index)")
+		return
+	end
+
+	if _Debug_Destructive_RejectLocalTarget("Debug_ForceEliminatePlayer", player_idx) then
+		return
+	end
+
+	local player = PLAYERS[player_idx]
+	if player == nil then
+		print(string.format("[DEBUG_DESTRUCTIVE] PLAYERS[%d] is nil", player_idx))
+		return
+	end
+
+	print(string.format("[DEBUG_DESTRUCTIVE] Eliminating Player %d", player_idx))
+
+	if Core_IsPlayerEliminated(player.id) then
+		print("  Player is already eliminated.")
+		return
+	end
+
+	-- Use the Mod_EliminatePlayerUnits path if available (cba.scar)
+	if type(Mod_EliminatePlayerUnits) == "function" then
+		print("  Calling Mod_EliminatePlayerUnits...")
+		Mod_EliminatePlayerUnits(player, nil, false)
+	else
+		print("  Mod_EliminatePlayerUnits not available — using Core_SetPlayerDefeated")
+		Core_SetPlayerDefeated(player.id, Annihilation_LoserPresentation, WR_ANNIHILATION)
+	end
+
+	print("  Elimination triggered.")
+	print("  AUDIT: Verify building-limit recount for recipients of transferred entities.")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Surrender Simulation
+---------------------------------------------------------------------------------------------------
+
+function Debug_ForceSurrender(player_idx)
+	if player_idx == nil then
+		print("[DEBUG_DESTRUCTIVE] Usage: Debug_ForceSurrender(player_index)")
+		return
+	end
+
+	if _Debug_Destructive_RejectLocalTarget("Debug_ForceSurrender", player_idx) then
+		return
+	end
+
+	local player = PLAYERS[player_idx]
+	if player == nil then
+		print(string.format("[DEBUG_DESTRUCTIVE] PLAYERS[%d] is nil", player_idx))
+		return
+	end
+
+	print(string.format("[DEBUG_DESTRUCTIVE] Forcing surrender for Player %d", player_idx))
+
+	if Core_IsPlayerEliminated(player.id) then
+		print("  Player is already eliminated — cannot surrender.")
+		return
+	end
+
+	Core_SetPlayerDefeated(player.id, Annihilation_LoserPresentation, WR_SURRENDER)
+	print("  Surrender triggered.")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Transfer Test
+-- AUDIT: Entity_SetPlayerOwner does NOT fire GE_ConstructionComplete, so building-limit
+--   and siege-limit counters will desync unless explicitly recounted after transfer.
+---------------------------------------------------------------------------------------------------
+
+function Debug_ForceTransferTest(src_idx, dst_idx)
+	if src_idx == nil or dst_idx == nil then
+		print("[DEBUG_DESTRUCTIVE] Usage: Debug_ForceTransferTest(source_index, dest_index)")
+		return
+	end
+
+	if _Debug_Destructive_RejectLocalTarget("Debug_ForceTransferTest(source)", src_idx)
+		or _Debug_Destructive_RejectLocalTarget("Debug_ForceTransferTest(dest)", dst_idx) then
+		return
+	end
+
+	local src = PLAYERS[src_idx]
+	local dst = PLAYERS[dst_idx]
+	if src == nil or dst == nil then
+		print("[DEBUG_DESTRUCTIVE] Invalid player indices")
+		return
+	end
+
+	print(string.format("[DEBUG_DESTRUCTIVE] Transfer test: Player %d -> Player %d", src_idx, dst_idx))
+
+	-- Snapshot before transfer
+	local src_eg = Player_GetEntities(src.id)
+	local src_count = EGroup_Count(src_eg)
+	local dst_eg = Player_GetEntities(dst.id)
+	local dst_count = EGroup_Count(dst_eg)
+
+	print(string.format("  Before: source=%d entities, dest=%d entities", src_count, dst_count))
+
+	-- Transfer all source buildings to dest
+	local transferred = 0
+	local src_buildings = Player_GetEntities(src.id)
+	EGroup_Filter(src_buildings, "building", FILTER_KEEP)
+	local building_count = EGroup_Count(src_buildings)
+
+	if building_count == 0 then
+		print("  Source has no buildings to transfer.")
+		return
+	end
+
+	for i = building_count, 1, -1 do
+		local eid = EGroup_GetEntityAt(src_buildings, i)
+		if Entity_IsValid(eid) then
+			Entity_SetPlayerOwner(eid, dst.id)
+			transferred = transferred + 1
+		end
+	end
+
+	print(string.format("  Transferred: %d buildings", transferred))
+	print("  WARNING: Building/siege limit counters are now DESYNCED for dest player!")
+	print("  Call CBA_Options_BuildingLimit_RecountPlayer if available, or use Debug_GetBuildingLimitState() to inspect.")
+end
+
+---------------------------------------------------------------------------------------------------
+-- Spawn Anchor Validation
+---------------------------------------------------------------------------------------------------
+
+function Debug_ValidateSpawnAnchors()
+	print("")
+	print("[DEBUG_DESTRUCTIVE] Validating spawn anchors for all players:")
+
+	for i, player in ipairs(PLAYERS) do
+		local anchor = _Debug_GetPlayerSpawnAnchor(player)
+
+		if anchor == nil then
+			print(string.format("  Player %d: NO ANCHOR", i))
+		else
+			if type(anchor) == "userdata" or type(anchor) == "table" then
+				local x = anchor.x or 0
+				local z = anchor.z or 0
+				print(string.format("  Player %d: anchor at (%.1f, %.1f)", i, x, z))
+			else
+				print(string.format("  Player %d: anchor type=%s", i, type(anchor)))
+			end
+		end
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Namespace Registration
+-- Safety: debug.players.destructive() wraps with validate_target.
+-- Direct Debug_Force* globals remain unguarded (expert escape hatch).
+---------------------------------------------------------------------------------------------------
+if debug then
+	debug.players.forceKeepDestroy = function(idx)
+		if not debug._safety.validate_target(idx) then return end
+		Debug_ForceKeepDestroy(idx)
+	end
+	debug.players.forceEliminate = function(idx)
+		if not debug._safety.validate_target(idx) then return end
+		Debug_ForceEliminatePlayer(idx)
+	end
+	debug.players.forceSurrender = function(idx)
+		if not debug._safety.validate_target(idx) then return end
+		Debug_ForceSurrender(idx)
+	end
+	debug.players.forceTransfer = function(src, dst)
+		if not debug._safety.validate_target(src) then return end
+		Debug_ForceTransferTest(src, dst)
+	end
+	debug.players.validateAnchors = Debug_ValidateSpawnAnchors
+	debug._register("anchors", Debug_ValidateSpawnAnchors, "Spawn anchor validation (read-only)", 1)
+	debug._register("destructive", function()
+		print("[DEBUG] Destructive commands are direct-call only (safety-gated):")
+		print("  debug.players.forceKeepDestroy(idx)")
+		print("  debug.players.forceEliminate(idx)")
+		print("  debug.players.forceSurrender(idx)")
+		print("  debug.players.forceTransfer(src, dst)")
+		print("  debug.players.validateAnchors()")
+		print("[DEBUG] Use debug._safety.include_human() to unlock human-player targets.")
+	end, "List destructive commands (direct-call only, safety-gated)", 3)
+end
+
+---------------------------------------------------------------------------------------------------
+-- Elimination-Reason Classification Stress Test
+--
+-- Validates that the playerui correctly distinguishes "eliminated" / "disconnect" /
+-- "surrender" across all defeat paths.  Specifically guards against the
+-- regression where killing a starter Keep was mis-classified as "disconnect"
+-- because the killed entity remained Entity_IsValid for several seconds during
+-- its death/ruin animation.
+--
+-- Console (no arguments needed -- auto-picks first eligible non-local non-eliminated player):
+--   Debug_ClassifyTest_Elimination()   -- kill keep, expect "eliminated"
+--   Debug_ClassifyTest_Surrender()     -- expect "surrender"
+--   Debug_ClassifyTest_Disconnect()    -- AI takeover path, expect "disconnect"
+--   Debug_ClassifyTest_All()           -- run all three sequentially across 3 AI players
+--
+-- Optional player_idx argument still accepted for targeted testing.
+--
+-- IMPORTANT: SCAR's Rule_AddOneShot REJECTS anonymous functions ("Adding unnamed
+-- function as rule. This is not allowed.").  All deferred callbacks below are
+-- NAMED globals; per-callback parameters are passed via the _ClassifyState
+-- queue table that the named callbacks consume in FIFO order.
+---------------------------------------------------------------------------------------------------
+
+_DEBUG_CLASSIFY_RESULTS = nil
+_DEBUG_CLASSIFY_PROBE_QUEUE = nil   -- FIFO of probe param tables for _Debug_Classify_RunNextProbe
+_DEBUG_CLASSIFY_PLAN_QUEUE = nil    -- FIFO of plan steps for _Debug_Classify_RunNextPlanStep
+
+local function _Debug_Classify_GetUiReason(player_idx)
+	local player = PLAYERS[player_idx]
+	if player == nil then return nil, "PLAYERS[idx] is nil" end
+	-- UI reads from data.eliminationReason (mirrored from playersEntry.eliminationReason).
+	-- Source-of-truth is the playersEntry; UI is a downstream mirror.
+	local source_reason = player.eliminationReason
+	local ui_reason = nil
+	if PlayerUIDataContextMappings ~= nil
+			and PlayerUIDataContextMappings.PlayersByIndex ~= nil then
+		-- Find UI index matching this player id (UI iterates _PlayerUI_AllPlayers).
+		if _PlayerUI_AllPlayers ~= nil then
+			for ui_idx, entry in ipairs(_PlayerUI_AllPlayers) do
+				if entry.id == player.id then
+					local data = PlayerUIDataContextMappings.PlayersByIndex[ui_idx]
+					if data ~= nil then
+						ui_reason = data.eliminationReason
+					end
+					break
+				end
+			end
+		end
+	end
+	return source_reason, ui_reason
+end
+
+local function _Debug_Classify_KeepStillValid(player_idx)
+	local player = PLAYERS[player_idx]
+	if player == nil or player.keep == nil or player.keep.entity_id == nil then
+		return false
+	end
+	local ok, valid = pcall(Entity_IsValid, player.keep.entity_id)
+	return ok and valid == true
+end
+
+local function _Debug_Classify_RunCheck(label, player_idx, expected, t_offset)
+	local source_reason, ui_reason = _Debug_Classify_GetUiReason(player_idx)
+	local keep_valid = _Debug_Classify_KeepStillValid(player_idx)
+	local source_ok = (source_reason == expected)
+	local ui_ok = (ui_reason == expected)
+	local verdict
+	if source_ok and ui_ok then
+		verdict = "PASS"
+	elseif source_ok and not ui_ok then
+		verdict = "FAIL_UI"
+	elseif not source_ok and ui_ok then
+		verdict = "FAIL_SOURCE"
+	else
+		verdict = "FAIL"
+	end
+	print(string.format("[CLASSIFY_TEST] %s t+%.1fs P%d expected=%s source=%s ui=%s keep_valid=%s -> %s",
+		tostring(label), t_offset, player_idx,
+		tostring(expected), tostring(source_reason), tostring(ui_reason),
+		tostring(keep_valid), verdict))
+	if _DEBUG_CLASSIFY_RESULTS ~= nil then
+		table.insert(_DEBUG_CLASSIFY_RESULTS, {
+			label = label,
+			player_idx = player_idx,
+			t_offset = t_offset,
+			expected = expected,
+			source = source_reason,
+			ui = ui_reason,
+			keep_valid = keep_valid,
+			verdict = verdict,
+		})
+	end
+	return verdict == "PASS"
+end
+
+-- NAMED callback consumed by Rule_AddOneShot — pulls one probe spec off the
+-- FIFO queue and runs it.  Multiple Rule_AddOneShot registrations of this
+-- same function are fine; SCAR allows the same NAMED rule to be re-registered.
+function _Debug_Classify_RunNextProbe()
+	if _DEBUG_CLASSIFY_PROBE_QUEUE == nil or #_DEBUG_CLASSIFY_PROBE_QUEUE == 0 then
+		return
+	end
+	local spec = table.remove(_DEBUG_CLASSIFY_PROBE_QUEUE, 1)
+	if spec ~= nil then
+		_Debug_Classify_RunCheck(spec.label, spec.player_idx, spec.expected, spec.t_offset)
+	end
+end
+
+local function _Debug_Classify_ScheduleChecks(label, player_idx, expected)
+	-- Probe the classification at multiple timestamps.  Crucial sample at
+	-- t+1.5s catches the "killed keep still Entity_IsValid" regression
+	-- window; the t+10s sample confirms the classification is stable
+	-- after the keep ruin/death animation has fully completed.
+	local checks = { 0.5, 1.5, 4.0, 10.0 }
+	if _DEBUG_CLASSIFY_PROBE_QUEUE == nil then
+		_DEBUG_CLASSIFY_PROBE_QUEUE = {}
+	end
+	for _, dt in ipairs(checks) do
+		table.insert(_DEBUG_CLASSIFY_PROBE_QUEUE, {
+			label = label,
+			player_idx = player_idx,
+			expected = expected,
+			t_offset = dt,
+		})
+		Rule_AddOneShot(_Debug_Classify_RunNextProbe, dt)
+	end
+end
+
+-- Auto-target picker: returns first non-local, non-eliminated player index.
+-- Prefers AI; falls back to non-local humans only if no AI exists.
+local function _Debug_Classify_AutoPickTarget()
+	local localPid = nil
+	local okLocal, lp = pcall(Game_GetLocalPlayer)
+	if okLocal and lp ~= nil then
+		local okIdx, lidx = pcall(World_GetPlayerIndex, lp)
+		if okIdx then localPid = lidx end
+	end
+	-- Pass 1: prefer AI players
+	for i, p in ipairs(PLAYERS) do
+		if i ~= localPid and not Core_IsPlayerEliminated(p.id) then
+			local isHuman = false
+			if p.isHuman ~= nil then
+				isHuman = p.isHuman
+			else
+				local okH, h = pcall(Player_IsHuman, p.id)
+				if okH then isHuman = h end
+			end
+			if not isHuman then
+				return i
+			end
+		end
+	end
+	-- Pass 2: any non-local non-eliminated player
+	for i, p in ipairs(PLAYERS) do
+		if i ~= localPid and not Core_IsPlayerEliminated(p.id) then
+			return i
+		end
+	end
+	return nil
+end
+
+local function _Debug_Classify_ResolveTarget(commandName, player_idx)
+	if player_idx == nil then
+		player_idx = _Debug_Classify_AutoPickTarget()
+		if player_idx == nil then
+			print(string.format("[CLASSIFY_TEST] %s: no eligible non-local non-eliminated player found", commandName))
+			return nil
+		end
+		print(string.format("[CLASSIFY_TEST] %s: auto-selected P%d", commandName, player_idx))
+	end
+	if _Debug_Destructive_RejectLocalTarget(commandName, player_idx) then
+		return nil
+	end
+	local player = PLAYERS[player_idx]
+	if player == nil or Core_IsPlayerEliminated(player.id) then
+		print(string.format("[CLASSIFY_TEST] P%d invalid or already eliminated", player_idx))
+		return nil
+	end
+	return player_idx
+end
+
+-- NAMED callback for the deferred WR_ANNIHILATION fallback in the elim test.
+_DEBUG_CLASSIFY_ELIM_PENDING_PID = nil
+function _Debug_Classify_ElimFallback()
+	local pid = _DEBUG_CLASSIFY_ELIM_PENDING_PID
+	_DEBUG_CLASSIFY_ELIM_PENDING_PID = nil
+	if pid == nil then return end
+	local player = PLAYERS[pid]
+	if player == nil then return end
+	if not Core_IsPlayerEliminated(player.id) then
+		pcall(Core_SetPlayerDefeated, player.id, Annihilation_LoserPresentation, WR_ANNIHILATION)
+	end
+end
+
+function Debug_ClassifyTest_Elimination(player_idx)
+	player_idx = _Debug_Classify_ResolveTarget("Debug_ClassifyTest_Elimination", player_idx)
+	if player_idx == nil then return end
+	local player = PLAYERS[player_idx]
+	print(string.format("[CLASSIFY_TEST] === ELIMINATION P%d (kill keep) ===", player_idx))
+	-- Use the canonical Onslaught annihilation path: kill keep + force annihilation
+	-- so Annihilation_OnPlayerDefeated stamps "eliminated".  We ALSO destroy all
+	-- squads/economy first to guarantee Annihilation_OnEntityKilled triggers
+	-- defeat (otherwise the player might survive with non-keep buildings).
+	local sg = Player_GetSquads(player.id)
+	for i = SGroup_Count(sg), 1, -1 do
+		local sq = SGroup_GetSquadAt(sg, i)
+		if sq ~= nil then pcall(Squad_Kill, sq) end
+	end
+	if player.keep ~= nil and player.keep.entity ~= nil then
+		pcall(Entity_Kill, player.keep.entity)
+	end
+	-- Belt-and-braces: trigger annihilation explicitly in case OnEntityKilled
+	-- cascade does not run (e.g. dummy AI player with stale state).
+	_DEBUG_CLASSIFY_ELIM_PENDING_PID = player_idx
+	Rule_AddOneShot(_Debug_Classify_ElimFallback, 0.2)
+	_Debug_Classify_ScheduleChecks("ELIM", player_idx, "eliminated")
+end
+
+function Debug_ClassifyTest_Surrender(player_idx)
+	player_idx = _Debug_Classify_ResolveTarget("Debug_ClassifyTest_Surrender", player_idx)
+	if player_idx == nil then return end
+	local player = PLAYERS[player_idx]
+	print(string.format("[CLASSIFY_TEST] === SURRENDER P%d ===", player_idx))
+	pcall(Core_SetPlayerDefeated, player.id, Annihilation_LoserPresentation, WR_SURRENDER)
+	_Debug_Classify_ScheduleChecks("SURR", player_idx, "surrender")
+end
+
+function Debug_ClassifyTest_Disconnect(player_idx)
+	player_idx = _Debug_Classify_ResolveTarget("Debug_ClassifyTest_Disconnect", player_idx)
+	if player_idx == nil then return end
+	local player = PLAYERS[player_idx]
+	print(string.format("[CLASSIFY_TEST] === DISCONNECT P%d (AI takeover) ===", player_idx))
+	-- Mirror AGS_Elimination_OnPlayerAITakeover: stamp reason FIRST so the
+	-- WR_ELIMINATION dispatch sees "disconnect" already set and skips its
+	-- starter-keep probe.  This is the only path that legitimately produces
+	-- "disconnect" in MP.
+	player.eliminationReason = "disconnect"
+	pcall(Mod_EliminatePlayerUnits, player, nil, false)
+	pcall(Core_SetPlayerDefeated, player.id, Annihilation_LoserPresentation, WR_ELIMINATION)
+	_Debug_Classify_ScheduleChecks("DISC", player_idx, "disconnect")
+end
+
+local function _Debug_Classify_FindAITargets(needed)
+	local out = {}
+	local localPid = nil
+	local okLocal, lp = pcall(Game_GetLocalPlayer)
+	if okLocal and lp ~= nil then
+		local okIdx, lidx = pcall(World_GetPlayerIndex, lp)
+		if okIdx then localPid = lidx end
+	end
+	for i, p in ipairs(PLAYERS) do
+		if i ~= localPid and not Core_IsPlayerEliminated(p.id) then
+			local isHuman = false
+			if p.isHuman ~= nil then
+				isHuman = p.isHuman
+			else
+				local okH, h = pcall(Player_IsHuman, p.id)
+				if okH then isHuman = h end
+			end
+			if not isHuman then
+				table.insert(out, i)
+				if #out >= needed then break end
+			end
+		end
+	end
+	-- Fallback: include non-local humans if not enough AI
+	if #out < needed then
+		for i, p in ipairs(PLAYERS) do
+			if i ~= localPid and not Core_IsPlayerEliminated(p.id) then
+				local already = false
+				for _, ex in ipairs(out) do if ex == i then already = true break end end
+				if not already then
+					table.insert(out, i)
+					if #out >= needed then break end
+				end
+			end
+		end
+	end
+	return out
+end
+
+-- NAMED callback consumed by Rule_AddOneShot — pulls one plan step off the
+-- FIFO queue and dispatches the matching test.
+function _Debug_Classify_RunNextPlanStep()
+	if _DEBUG_CLASSIFY_PLAN_QUEUE == nil or #_DEBUG_CLASSIFY_PLAN_QUEUE == 0 then
+		return
+	end
+	local step = table.remove(_DEBUG_CLASSIFY_PLAN_QUEUE, 1)
+	if step == nil then return end
+	if step.kind == "ELIM" then
+		Debug_ClassifyTest_Elimination(step.player_idx)
+	elseif step.kind == "SURR" then
+		Debug_ClassifyTest_Surrender(step.player_idx)
+	elseif step.kind == "DISC" then
+		Debug_ClassifyTest_Disconnect(step.player_idx)
+	end
+end
+
+-- NAMED callback for the final summary report.
+function _Debug_Classify_FinalReport()
+	print("[CLASSIFY_TEST] ============================================================")
+	print("[CLASSIFY_TEST] FINAL REPORT")
+	print("[CLASSIFY_TEST] ============================================================")
+	local pass = 0
+	local fail = 0
+	local fail_ui = 0
+	local fail_source = 0
+	if _DEBUG_CLASSIFY_RESULTS ~= nil then
+		for _, r in ipairs(_DEBUG_CLASSIFY_RESULTS) do
+			if r.verdict == "PASS" then
+				pass = pass + 1
+			else
+				fail = fail + 1
+				if r.verdict == "FAIL_UI" then fail_ui = fail_ui + 1 end
+				if r.verdict == "FAIL_SOURCE" then fail_source = fail_source + 1 end
+				print(string.format("[CLASSIFY_TEST]   %s P%d t+%.1fs expected=%s source=%s ui=%s keep_valid=%s",
+					r.verdict, r.player_idx, r.t_offset, tostring(r.expected),
+					tostring(r.source), tostring(r.ui), tostring(r.keep_valid)))
+			end
+		end
+	end
+	print(string.format("[CLASSIFY_TEST] PASS=%d FAIL=%d (ui=%d source=%d)",
+		pass, fail, fail_ui, fail_source))
+	print("[CLASSIFY_TEST] ============================================================")
+	_DEBUG_CLASSIFY_RESULTS = nil
+end
+
+local function _Debug_Classify_HumanPlayerCount()
+	local n = 0
+	for _, p in ipairs(PLAYERS) do
+		local isHuman = p.isHuman
+		if isHuman == nil then
+			local ok, h = pcall(Player_IsHuman, p.id)
+			if ok then isHuman = h end
+		end
+		if isHuman == true then n = n + 1 end
+	end
+	return n
+end
+
+function Debug_ClassifyTest_All()
+	print("[CLASSIFY_TEST] ============================================================")
+	print("[CLASSIFY_TEST] FULL CLASSIFICATION STRESS TEST")
+	print("[CLASSIFY_TEST] Validates eliminated/disconnect/surrender via UI mirror")
+	print("[CLASSIFY_TEST] ============================================================")
+
+	local human_count = _Debug_Classify_HumanPlayerCount()
+	if human_count > 1 then
+		print(string.format("[CLASSIFY_TEST] BLOCKED: destructive tests are not MP-safe (%d human players). Run in a solo lobby only.", human_count))
+		_Debug_EndMarker("ClassifyTest", 0, 0, 0)
+		return
+	end
+
+	local targets = _Debug_Classify_FindAITargets(3)
+	if #targets < 3 then
+		print(string.format("[CLASSIFY_TEST] WARN: only %d eligible AI/non-local targets (need 3)", #targets))
+		print("[CLASSIFY_TEST] Test will run on available targets only.")
+	end
+	if #targets == 0 then
+		print("[CLASSIFY_TEST] FATAL: no eligible targets")
+		return
+	end
+
+	_DEBUG_CLASSIFY_RESULTS = {}
+	_DEBUG_CLASSIFY_PLAN_QUEUE = {}
+
+	-- Stagger the three trigger types across players, spaced 12s apart so each
+	-- test's full check window (last sample @ t+10s) completes before the next
+	-- starts.  Final summary at end.
+	local plan = {
+		{ kind = "ELIM", target_slot = 1 },
+		{ kind = "SURR", target_slot = 2 },
+		{ kind = "DISC", target_slot = 3 },
+	}
+	local stagger = 0.0
+	for _, step in ipairs(plan) do
+		local idx = targets[step.target_slot]
+		if idx ~= nil then
+			table.insert(_DEBUG_CLASSIFY_PLAN_QUEUE, {
+				kind = step.kind,
+				player_idx = idx,
+			})
+			Rule_AddOneShot(_Debug_Classify_RunNextPlanStep, stagger)
+			stagger = stagger + 12.0
+		end
+	end
+
+	-- Final summary report (named callback)
+	Rule_AddOneShot(_Debug_Classify_FinalReport, stagger + 2.0)
+end
+
+if debug then
+	debug.players.classifyTestElim = function(idx)
+		if idx ~= nil and not debug._safety.validate_target(idx) then return end
+		Debug_ClassifyTest_Elimination(idx)
+	end
+	debug.players.classifyTestSurrender = function(idx)
+		if idx ~= nil and not debug._safety.validate_target(idx) then return end
+		Debug_ClassifyTest_Surrender(idx)
+	end
+	debug.players.classifyTestDisconnect = function(idx)
+		if idx ~= nil and not debug._safety.validate_target(idx) then return end
+		Debug_ClassifyTest_Disconnect(idx)
+	end
+	debug.players.classifyTestAll = Debug_ClassifyTest_All
+	debug._register("classifyTest", Debug_ClassifyTest_All,
+		"Stress test elim/disconnect/surrender classification (auto-picks 3 AI players)", 3)
+end

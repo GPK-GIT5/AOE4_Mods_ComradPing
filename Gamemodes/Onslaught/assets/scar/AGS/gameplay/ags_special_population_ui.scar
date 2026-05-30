@@ -1,0 +1,237 @@
+---------------------------------------------------------------------------------------------------
+-- Authors:
+-- Relic
+-- Woprock
+--
+-- Description:
+-- Provides box for ship population.
+---------------------------------------------------------------------------------------------------
+
+AGS_SPECIALPOPULATION_UI_MODULE = "AGS_SpecialPopulationUI"
+AGS_SPECIALPOPULATION_UI_CONTEXT = {
+	ui = "AGS_SpecialPopulationUI",
+	is_ui_created = false,
+	data_context = {
+		is_ui_visible = true,
+		ship_icon = "pack://application:,,,/WPFGUI;component/icons/caster_ui/medium/siege_population.png",
+		info = {
+			used_margin = "-10,0,0,164",
+			current = 0,
+			max = 0,
+		},
+	},
+	margin_ott_spec = "-10,0,0,310",
+	margin_std_spec = "-10,0,0,296",
+	margin_no_spec = "-10,0,0,241",
+}
+
+---------------------------------------------------------------------------------------------------
+-- Delegates:
+---------------------------------------------------------------------------------------------------
+
+Core_RegisterModule(AGS_SPECIALPOPULATION_UI_MODULE)
+
+function AGS_SpecialPopulationUI_UpdateModuleSettings()	
+	AGS_Print("AGS_SpecialPopulationUI_UpdateModuleSettings")
+	if not AGS_GLOBAL_SETTINGS.SpecialPopulationUI or UI_IsReplay() then
+		Core_UnregisterModule(AGS_SPECIALPOPULATION_UI_MODULE)
+	end
+end
+
+function AGS_SpecialPopulationUI_EarlyInitializations()
+	AGS_Print("AGS_SpecialPopulationUI_EarlyInitializations")
+	AGS_SpecialPopulationUI_CreateDataContext()
+end
+
+function AGS_SpecialPopulationUI_OnPlay()	
+	AGS_Print("AGS_SpecialPopulationUI_OnPlay")
+	AGS_GET_LOCAL_PLAYER = Game_GetLocalPlayer()
+	AGS_SpecialPopulationUI_CreateAndUpdateUI()
+	Rule_AddGlobalEvent(AGS_SpecialPopulationUI_OnConstructionComplete, GE_ConstructionComplete)
+	CBA_BuildItemBatch_SetHandler("special_pop_ui", true)
+	CBA_EntityKillBatch_SetHandler("special_pop_ui", true)
+	CBA_SquadKillBatch_SetHandler("special_pop_ui", true)
+end
+
+function AGS_SpecialPopulationUI_OnGameRestore()
+	AGS_Print("AGS_SpecialPopulationUI_OnGameRestore")
+	AGS_SPECIALPOPULATION_UI_CONTEXT.is_ui_created = false	
+	AGS_SpecialPopulationUI_CreateAndUpdateUI()
+end
+
+function AGS_SpecialPopulationUI_OnGameOver()	
+	AGS_Print("AGS_SpecialPopulationUI_OnGameOver")
+	AGS_SpecialPopulationUI_Show(false)
+	Rule_RemoveGlobalEvent(AGS_SpecialPopulationUI_OnConstructionComplete)
+	CBA_BuildItemBatch_SetHandler("special_pop_ui", false)
+	CBA_EntityKillBatch_SetHandler("special_pop_ui", false)
+	CBA_SquadKillBatch_SetHandler("special_pop_ui", false)
+end
+
+function AGS_SpecialPopulationUI_OnPlayerDefeated(player, reason)
+	AGS_Print("AGS_SpecialPopulationUI_OnPlayerDefeated")
+	if player.isLocal then 
+		AGS_SpecialPopulationUI_Show(false)
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- Delegates:
+---------------------------------------------------------------------------------------------------
+
+-- PERF: Deferred coalesced pattern — coalesce rapid events into a single UI push.
+-- During mass elimination (400+ kills), this reduces hundreds of UI_SetDataContext calls to 1.
+function AGS_SpecialPopulationUI_DeferUpdate()
+	if not AGS_SPECIALPOPULATION_UI_CONTEXT._update_pending then
+		AGS_SPECIALPOPULATION_UI_CONTEXT._update_pending = true
+		Rule_AddOneShot(AGS_SpecialPopulationUI_DeferredFlush, 0.5)
+	end
+end
+
+function AGS_SpecialPopulationUI_DeferredFlush()
+	AGS_SPECIALPOPULATION_UI_CONTEXT._update_pending = false
+	AGS_SpecialPopulationUI_Update()
+end
+
+function AGS_SpecialPopulationUI_OnConstructionComplete(context)
+	AGS_SpecialPopulationUI_DeferUpdate()
+end
+function AGS_SpecialPopulationUI_OnBuildItemComplete(context)
+	AGS_SpecialPopulationUI_DeferUpdate()
+end
+function AGS_SpecialPopulationUI_OnEntityKilled(context)
+	AGS_SpecialPopulationUI_DeferUpdate()
+end
+function AGS_SpecialPopulationUI_OnSquadKilled(context)
+	AGS_SpecialPopulationUI_DeferUpdate()
+end
+	
+---------------------------------------------------------------------------------------------------
+-- Functions:
+---------------------------------------------------------------------------------------------------
+
+function AGS_SpecialPopulationUI_CreateDataContext()		
+	-- AGS_SPECIALPOPULATION_UI_CONTEXT.data_context.info.version = AGS_GLOBAL_SETTINGS_BUILD
+	-- doing this is time consuming and it cant be one long string as game will crash...
+end
+
+---------------------------------------------------------------------------------------------------
+-- Update Functions:
+---------------------------------------------------------------------------------------------------
+
+function AGS_SpecialPopulationUI_Update()
+	if AGS_SPECIALPOPULATION_UI_CONTEXT ~= nil and 
+		AGS_SPECIALPOPULATION_UI_CONTEXT.data_context ~= nil and 
+		AGS_SPECIALPOPULATION_UI_CONTEXT.is_ui_created then 
+		
+		AGS_SpecialPopulationUI_MarginError()
+--		local cur = math.floor(Player_GetCurrentPopulation(AGS_GET_LOCAL_PLAYER, CT_Medic)) -- Current population
+		local cur = math.floor(localPlayer.siegeLimit_count or 0) 
+		
+		local max = math.floor(AGS_GLOBAL_SETTINGS.MaximumMedicPopulation or 0) -- Siege limit from settings
+--		local totalMax = math.floor(Player_GetMaxPopulationCapOverride(AGS_GET_LOCAL_PLAYER, CT_Medic))
+		AGS_SPECIALPOPULATION_UI_CONTEXT.data_context.info.current = cur
+		AGS_SPECIALPOPULATION_UI_CONTEXT.data_context.info.max = max
+		UI_SetDataContext(AGS_SPECIALPOPULATION_UI_CONTEXT.ui, AGS_SPECIALPOPULATION_UI_CONTEXT.data_context)	
+	end
+end
+
+---------------------------------------------------------------------------------------------------
+-- UI Functions:
+---------------------------------------------------------------------------------------------------
+
+function AGS_SpecialPopulationUI_MarginError() 
+	local race = Player_GetRaceName(AGS_GET_LOCAL_PLAYER)
+	local branch_civ = AGS_CIV_FACTION_MAP[race] or race
+	if branch_civ == AGS_CIV_OTTOMAN then
+		AGS_SPECIALPOPULATION_UI_CONTEXT.data_context.info.used_margin = AGS_SPECIALPOPULATION_UI_CONTEXT.margin_ott_spec
+	elseif branch_civ == AGS_CIV_CHINESE
+		or branch_civ == AGS_CIV_HRE
+		or branch_civ == AGS_CIV_RUS
+		or branch_civ == AGS_CIV_SULTANATE then
+		AGS_SPECIALPOPULATION_UI_CONTEXT.data_context.info.used_margin = AGS_SPECIALPOPULATION_UI_CONTEXT.margin_std_spec
+	else
+		AGS_SPECIALPOPULATION_UI_CONTEXT.data_context.info.used_margin = AGS_SPECIALPOPULATION_UI_CONTEXT.margin_no_spec
+	end
+end
+
+function AGS_SpecialPopulationUI_Show(show_ui)
+	if AGS_SPECIALPOPULATION_UI_CONTEXT.is_ui_created then 
+		AGS_SPECIALPOPULATION_UI_CONTEXT.data_context.is_ui_visible = show_ui		
+		UI_SetDataContext(AGS_SPECIALPOPULATION_UI_CONTEXT.ui, AGS_SPECIALPOPULATION_UI_CONTEXT.data_context)		
+	end
+end
+
+function AGS_SpecialPopulationUI_CreateAndUpdateUI()	
+	AGS_SpecialPopulationUI_CreateUI()
+	AGS_SpecialPopulationUI_Update()
+end
+
+function AGS_SpecialPopulationUI_CreateUI()	
+	if not AGS_SPECIALPOPULATION_UI_CONTEXT.is_ui_created then
+		
+		local xaml = 
+[[<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" 
+		xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+		xmlns:esControls="clr-namespace:WPFGUI.Shared.Controls;assembly=EngineUI"
+		xmlns:esUtility="clr-namespace:WPFGUI.Shared.Utility;assembly=EngineUI"
+		xmlns:wm="clr-namespace:WPFGUI.Shared.MarkupExtensions;assembly=EngineUI"
+		HorizontalAlignment="Left" 
+		VerticalAlignment="Bottom" 
+		SnapsToDevicePixels="True"
+		Margin="{Binding [info][used_margin]}"
+		Visibility="{Binding [is_ui_visible], Converter={StaticResource BoolToVis}}"
+		IsHitTestVisible="False">
+		<Grid.Resources>
+			<ResourceDictionary.MergedDictionaries>
+				<ResourceDictionary Source="pack://application:,,,ui/Resources/HUDResources.xaml" />
+			</ResourceDictionary.MergedDictionaries>
+		</Grid.Resources>
+	<Grid.RowDefinitions>
+	    <RowDefinition Height="Auto"/>
+	</Grid.RowDefinitions>
+	<!--  PopulationData Image Origin Width&Height 26,30  -->
+	<Canvas Grid.Row="0" Visibility="Collapsed">
+        <Image Canvas.Right="0" Canvas.Bottom="0"
+			   Width="130"
+               Stretch="UniformToFill"
+               Style="{DynamicResource HUDCivSpecific2BackgroundImage}"/>
+	</Canvas>
+	<Grid Grid.Row="0" Margin="0,0,0,0"
+		  Width="130" Height="63"
+		  HorizontalAlignment="Left" 
+		  VerticalAlignment="Center"
+          Background="Transparent" 
+		  ToolTipService.InitialShowDelay="0"
+          ToolTipService.ShowDuration="86400000" 
+		  ToolTipService.ShowOnDisabled="True">>
+		<Grid.ColumnDefinitions>
+			<ColumnDefinition Width="Auto"/>
+			<ColumnDefinition Width="*"/>
+		</Grid.ColumnDefinitions>
+        <Image Grid.Column="0"
+               Width="18" Height="18"
+               Margin="18,0,0,3" 
+			   HorizontalAlignment="Left"
+               VerticalAlignment="Center"
+			   Source="{Binding [ship_icon]}">
+        </Image>
+        <TextBlock Grid.Column="1"
+                   Margin="9,0,0,0" 
+		   		   HorizontalAlignment="Left"
+				   VerticalAlignment="Center"
+                   Style="{StaticResource nHUDBaseHeavyTextBlockStyle}">
+            <TextBlock.Text>
+                <MultiBinding Converter="{StaticResource LocalizedStringMultiConverter}" ConverterParameter="$11168437">
+                    <Binding Path="[info][current]" />
+                    <Binding Path="[info][max]" />
+                </MultiBinding>
+            </TextBlock.Text>
+        </TextBlock>
+	</Grid>
+  </Grid>
+]]		
+		UI_AddChild("ScarDefault", "XamlPresenter", AGS_SPECIALPOPULATION_UI_CONTEXT.ui, { IsHitTestVisible = true, Xaml = xaml, DataContext = UI_CreateDataContext(AGS_SPECIALPOPULATION_UI_CONTEXT.data_context) })
+		AGS_SPECIALPOPULATION_UI_CONTEXT.is_ui_created = true
+	end
+end

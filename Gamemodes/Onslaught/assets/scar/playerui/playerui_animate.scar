@@ -1,0 +1,2053 @@
+-----------------------------------------------------------------------
+-- PlayerUI: Animated Number Transitions
+-- Smoothly increments/decrements displayed numeric values toward their
+-- true target, avoiding abrupt jumps on the 1.0s data-refresh cycle.
+--
+-- Design:
+--   • 0.1s tick rule that self-pauses when all displays match targets.
+--   • Adaptive step size: max(1, ceil(|delta| / 15))  →  ~3s convergence.
+--   • First SetTarget call for a key snaps display instantly (no animation
+--     from zero on game start).
+--   • Integrates non-invasively: callers do SetTarget then GetDisplay in
+--     the existing 1.0s update; the 0.2s tick interpolates between updates.
+-----------------------------------------------------------------------
+
+_PlayerUI_Anim = {}           -- keyed by string id → { target = N, display = N }
+_PlayerUI_AnimDirty = false   -- true while any display ≠ target
+_PlayerUI_AnimMaxStepTicks = 15   -- ticks to converge (15 × 0.1s = 1.5s)
+
+-- Easing transition constants (slow-to-fast ease-in quadratic)
+_PLAYERUI_ANIM_EASE_BASE_DURATION = 1.0   -- seconds at delta=1
+_PLAYERUI_ANIM_EASE_MIN_DURATION = 0.5    -- minimum seconds
+_PLAYERUI_ANIM_EASE_MAX_DURATION = 3.0    -- maximum seconds
+_PLAYERUI_ANIM_TICK_INTERVAL = 0.1        -- seconds per tick
+
+-- Position animation: ease-out lerp entries for FLIP-style rank transitions
+-- Keyed by string id → { target = N, display = N, type = "position" }
+_PlayerUI_AnimPositions = {}
+_PlayerUI_AnimPositionsDirty = false
+_PLAYERUI_ANIM_EASEOUT_FACTOR = 0.25   -- lerp factor per 0.1s tick (~400ms convergence)
+_PLAYERUI_ANIM_POSITION_EPSILON = 0.5  -- px threshold to snap to target
+
+local _playerui_animate_print = print
+local function print(...)
+	local message = tostring(select(1, ...))
+	if type(PlayerUI_ShouldPrintMessage) ~= "function" or PlayerUI_ShouldPrintMessage(message) then
+		_playerui_animate_print(...)
+	end
+end
+
+-- Generic decay animations: keyed by string id -> { value, decayRate }
+_PlayerUI_AnimDecay = {}
+
+-- Score pulse primitives (trigger/read infrastructure only in Phase A)
+_PlayerUI_ScorePulse = {}
+_PLAYERUI_PULSE_DECAY = 0.30
+_PLAYERUI_PULSE_SCALE_PEAK = 0.12
+_PLAYERUI_PULSE_EPSILON = 0.01
+_PLAYERUI_HIGHLIGHT_DECAY_RATE = 0.12
+_PLAYERUI_SCALE_POP_PEAK = 0.08
+_PLAYERUI_SCALE_POP_DECAY_RATE = 0.20
+
+-- Elimination transition diagnostics (temporary during scale-only rollout)
+_PlayerUI_ElimDiag = {
+	frames = 0,
+	changedFrames = 0,
+	pushFrames = 0,
+	completions = 0,
+	activeRows = 0,
+	lastIndex = 0,
+	lastScale = 1.0,
+	lastElapsed = 0.0,
+}
+
+-----------------------------------------------------------------------
+-- Reward icon per-slot smoothing state (presentation only).
+-- Tracks threshold identity per slot so icons can fade in and borders
+-- can crossfade instead of snapping on slot content changes.
+-- Never reads or writes gameplay state, kill scores, or queue logic.
+-----------------------------------------------------------------------
+
+_PlayerUI_RewardIconSlotState = {}      -- array of { threshold, opacity, borderColor, targetBorderColor, offsetX, targetOffsetX, scale, targetScale }
+_PlayerUI_RewardIconSmoothingActive = false
+_PlayerUI_RewardIconSmoothingInitialized = false
+
+-- Strip-level offset for container pan (presentation only)
+_PlayerUI_RewardStripOffsetX = 0
+_PlayerUI_RewardStripTargetOffsetX = 0
+
+-- Guard counters for motion diagnostic telemetry
+_PlayerUI_MotionGuards = {
+	phaseStart_healed = 0,
+	queue_entry_fallback = 0,
+	color_normalized = 0,
+	rewards_ctx_healed = 0,
+	center_timeout_used = 0,
+}
+
+-----------------------------------------------------------------------
+-- Safety helpers (Phase A guards — used by all playback phases)
+-----------------------------------------------------------------------
+
+-- Safe phaseStart: returns gameTime if phaseStart is nil or zero,
+-- preventing large elapsed-time snaps after debug skip/reset.
+function _PlayerUI_SafeElapsed(pb, gameTime)
+	local ps = pb.phaseStart
+	if ps == nil or ps <= 0 then
+		_PlayerUI_MotionGuards.phaseStart_healed = _PlayerUI_MotionGuards.phaseStart_healed + 1
+		pb.phaseStart = gameTime
+		return 0
+	end
+	return gameTime - ps
+end
+
+-----------------------------------------------------------------------
+-- Easing functions (pure, stateless) — applied per-phase for fluid motion
+-----------------------------------------------------------------------
+
+-- Ease-out quadratic: fast start, gentle deceleration to rest.
+-- Used by completion_center and reshuffle.
+function _PlayerUI_EaseOut(t)
+	return 1.0 - (1.0 - t) * (1.0 - t)
+end
+
+-- Ease-in quadratic: slow start, accelerating departure.
+-- Used by shuffle (exit portion).
+function _PlayerUI_EaseIn(t)
+	return t * t
+end
+
+-- Ease-in-out quadratic: smooth start and stop.
+-- Available for future use; not assigned to a default phase.
+function _PlayerUI_EaseInOut(t)
+	if t < 0.5 then
+		return 2.0 * t * t
+	else
+		return 1.0 - ((-2.0 * t + 2.0) * (-2.0 * t + 2.0)) / 2.0
+	end
+end
+
+-- Tiered fill step: +1 point per tick initially, then escalating %
+-- based on milestones played in the current batch (playedCount).
+function _PlayerUI_GetFillStep(playedCount, interval)
+	if playedCount <= 2 then
+		return 1                                                     -- +1 point per tick
+	elseif playedCount <= 3 then
+		return math.max(1, math.floor(interval * 0.01 + 0.5))       -- +1%
+	elseif playedCount <= 4 then
+		return math.max(1, math.floor(interval * 0.05 + 0.5))       -- +5%
+	elseif playedCount <= 5 then
+		return math.max(1, math.floor(interval * 0.10 + 0.5))       -- +10%
+	else
+		return math.max(1, math.floor(interval * 0.15 + 0.5))       -- +15%
+	end
+end
+
+-- Format threshold text as "+N" increment (interval between consecutive thresholds).
+function _PlayerUI_FormatThresholdIncrement(entry)
+	local interval = entry.interval
+	if interval ~= nil and interval > 0 then
+		return "+" .. tostring(interval)
+	end
+	return "+" .. tostring(entry.threshold or 0)
+end
+
+-- Safe queue entry accessor: returns a valid icon-compatible table
+-- even when queue is nil, short, or sparse.
+function _PlayerUI_SafeQueueEntry(queue, index)
+	if queue == nil or index > #queue or queue[index] == nil then
+		_PlayerUI_MotionGuards.queue_entry_fallback = _PlayerUI_MotionGuards.queue_entry_fallback + 1
+		return {
+			icon = _PlayerUI_RewardIconFallback,
+			borderColor = "#555555",
+			thresholdText = "?",
+			threshold = 0,
+			interval = 1,
+			title = "",
+		}
+	end
+	return queue[index]
+end
+
+-- Validate hex color string (#AARRGGBB). Returns input if valid,
+-- otherwise returns fallback and increments guard counter.
+function _PlayerUI_ValidateHexColor(colorStr)
+	if type(colorStr) == "string" and #colorStr == 9 and string.sub(colorStr, 1, 1) == "#" then
+		-- Quick check: all hex digits
+		if string.find(colorStr, "^#%x%x%x%x%x%x%x%x$") then
+			return colorStr
+		end
+	end
+	_PlayerUI_MotionGuards.color_normalized = _PlayerUI_MotionGuards.color_normalized + 1
+	return "#00FFD700"
+end
+
+-- Ensure rewards context exists before playback writes.
+function _PlayerUI_EnsureRewardsContext()
+	if PlayerUiDataContext.rewards == nil then
+		_PlayerUI_MotionGuards.rewards_ctx_healed = _PlayerUI_MotionGuards.rewards_ctx_healed + 1
+		PlayerUiDataContext.rewards = {
+			progress_text = "0 / 0",
+			progress_current = 0,
+			progress_max = 1,
+			icons = {},
+		}
+	end
+	return PlayerUiDataContext.rewards
+end
+
+function _PlayerUI_SetIfChanged(t, k, v)
+	if t == nil then
+		return false
+	end
+	if t[k] ~= v then
+		t[k] = v
+		return true
+	end
+	return false
+end
+
+-----------------------------------------------------------------------
+-- Margin-based position helpers (crash-safe Strategy A).
+-- Mirrors _Ranking_GetOffsetMargin pattern from playerui_ranking.scar.
+-- Returns WPF Margin strings "left,top,right,bottom" to be bound in
+-- XAML via Margin="{Binding [fieldName]}".  Avoids RenderTransform
+-- DataContext bindings which crash D3D on Toggle UI.
+-----------------------------------------------------------------------
+
+-- Per-icon horizontal offset → Margin string "<px>,0,<-px>,0".
+function _PlayerUI_GetOffsetXMargin(offsetX)
+	if offsetX == nil or math.abs(offsetX) < 0.5 then
+		return "0,0,0,0"
+	end
+	local rounded
+	if offsetX > 0 then
+		rounded = math.floor(offsetX + 0.5)
+	else
+		rounded = math.ceil(offsetX - 0.5)
+	end
+	if rounded == 0 then
+		return "0,0,0,0"
+	end
+	return string.format("%d,0,%d,0", rounded, -rounded)
+end
+
+-- Strip-level horizontal offset → Margin string preserving 2px vertical padding.
+function _PlayerUI_GetStripOffsetMargin(offsetX)
+	if offsetX == nil or math.abs(offsetX) < 0.5 then
+		return "0,2,0,2"
+	end
+	local rounded
+	if offsetX > 0 then
+		rounded = math.floor(offsetX + 0.5)
+	else
+		rounded = math.ceil(offsetX - 0.5)
+	end
+	if rounded == 0 then
+		return "0,2,0,2"
+	end
+	return string.format("%d,2,%d,2", rounded, -rounded)
+end
+
+-----------------------------------------------------------------------
+-- Hex colour lerp: interpolate between two #AARRGGBB colour strings.
+-- t=0 → colorA, t=1 → colorB. Returns #AARRGGBB hex string.
+-----------------------------------------------------------------------
+
+function _PlayerUI_LerpHexColor(colorA, colorB, t)
+	local aA = tonumber(string.sub(colorA, 2, 3), 16)
+	local rA = tonumber(string.sub(colorA, 4, 5), 16)
+	local gA = tonumber(string.sub(colorA, 6, 7), 16)
+	local bA = tonumber(string.sub(colorA, 8, 9), 16)
+	local aB = tonumber(string.sub(colorB, 2, 3), 16)
+	local rB = tonumber(string.sub(colorB, 4, 5), 16)
+	local gB = tonumber(string.sub(colorB, 6, 7), 16)
+	local bB = tonumber(string.sub(colorB, 8, 9), 16)
+	local a = math.floor(aA + (aB - aA) * t + 0.5)
+	local r = math.floor(rA + (rB - rA) * t + 0.5)
+	local g = math.floor(gA + (gB - gA) * t + 0.5)
+	local b = math.floor(bA + (bB - bA) * t + 0.5)
+	return string.format("#%02X%02X%02X%02X", a, r, g, b)
+end
+
+function PlayerUI_Animate_Debug_ResetEliminationDiag()
+	_PlayerUI_ElimDiag.frames = 0
+	_PlayerUI_ElimDiag.changedFrames = 0
+	_PlayerUI_ElimDiag.pushFrames = 0
+	_PlayerUI_ElimDiag.completions = 0
+	_PlayerUI_ElimDiag.activeRows = 0
+	_PlayerUI_ElimDiag.lastIndex = 0
+	_PlayerUI_ElimDiag.lastScale = 1.0
+	_PlayerUI_ElimDiag.lastElapsed = 0.0
+	print("[PLAYERUI_ELIM_DIAG] reset")
+end
+
+function PlayerUI_Animate_Debug_PrintEliminationDiag()
+	print("[PLAYERUI_ELIM_DIAG] frames=" .. tostring(_PlayerUI_ElimDiag.frames)
+		.. " changed=" .. tostring(_PlayerUI_ElimDiag.changedFrames)
+		.. " pushes=" .. tostring(_PlayerUI_ElimDiag.pushFrames)
+		.. " completions=" .. tostring(_PlayerUI_ElimDiag.completions)
+		.. " activeRows=" .. tostring(_PlayerUI_ElimDiag.activeRows)
+		.. " lastIndex=" .. tostring(_PlayerUI_ElimDiag.lastIndex)
+		.. " lastScale=" .. tostring(_PlayerUI_ElimDiag.lastScale)
+		.. " lastElapsed=" .. tostring(_PlayerUI_ElimDiag.lastElapsed))
+end
+
+function PlayerUI_Animate_GetEliminationLastProgress(playerIndex)
+	local entry = _PlayerUI_EliminationAnims[playerIndex]
+	if entry == nil then
+		return 0.0
+	end
+	return entry.lastProgress or 0.0
+end
+
+function PlayerUI_Animate_Debug_RetriggerElimFade(index)
+	local playerIndex = tonumber(index)
+	if playerIndex == nil then
+		print("[PLAYERUI_ELIM_ANIM] retrigger failed: invalid index")
+		return false
+	end
+
+	local playersByIndex = PlayerUIDataContextMappings and PlayerUIDataContextMappings.PlayersByIndex
+	local data = playersByIndex and playersByIndex[playerIndex]
+	if data == nil then
+		print("[PLAYERUI_ELIM_ANIM] retrigger failed: missing data for index=" .. tostring(playerIndex))
+		return false
+	end
+	if data.IsEliminated ~= true then
+		print("[PLAYERUI_ELIM_ANIM] retrigger skipped: player not eliminated for index=" .. tostring(playerIndex))
+		return false
+	end
+
+	PlayerUI_Animate_ClearEliminationAnim(playerIndex)
+	PlayerUI_Animate_ClearEliminationReveal(playerIndex)
+	PlayerUI_Animate_ClearEliminationGlow(playerIndex)
+	if _PlayerUI_EliminationAnimTriggered ~= nil then
+		_PlayerUI_EliminationAnimTriggered[playerIndex] = false
+	end
+	data._elimRevealCompleted = false
+	data._elimPresentationKeyApplied = nil
+	data._elimSteadyVisualKeyApplied = nil
+	data._elimPresentationRevealed = false
+	data._elimSteadyDeferFrame = false
+
+	local started = PlayerUI_Animate_EliminationTransition(playerIndex, _PLAYERUI_ELIM_ANIM_DURATION, data)
+	if started and _PlayerUI_EliminationAnimTriggered ~= nil then
+		_PlayerUI_EliminationAnimTriggered[playerIndex] = true
+	end
+
+	if started then
+		print("[PLAYERUI_ELIM_ANIM] retriggered for index=" .. tostring(playerIndex))
+	else
+		print("[PLAYERUI_ELIM_ANIM] retrigger failed: transition already active for index=" .. tostring(playerIndex))
+	end
+
+	return started
+end
+
+-----------------------------------------------------------------------
+-- Init: create the 0.2s rule (starts paused — nothing to animate yet)
+-----------------------------------------------------------------------
+
+function PlayerUI_Animate_Init()
+	_PlayerUI_Anim = {}
+	_PlayerUI_AnimDirty = false
+	_PlayerUI_AnimPositions = {}
+	_PlayerUI_AnimPositionsDirty = false
+	_PlayerUI_AnimDecay = {}
+	_PlayerUI_ScorePulse = {}
+	_PlayerUI_RewardIconSlotState = {}
+	_PlayerUI_RewardIconSmoothingActive = false
+	_PlayerUI_RewardIconSmoothingInitialized = false
+	Rule_AddInterval(_PlayerUI_Animate_Tick, 0.1)
+	Rule_Pause(_PlayerUI_Animate_Tick)
+end
+
+-----------------------------------------------------------------------
+-- SetTarget: record the true game value for a keyed field.
+-- On first call for a key the display snaps to the value (no animation
+-- from zero / nil). Subsequent calls mark dirty so the tick rule wakes.
+-----------------------------------------------------------------------
+
+function PlayerUI_Animate_SetTarget(key, value, easing)
+	local entry = _PlayerUI_Anim[key]
+	if entry == nil then
+		-- First time: snap display to value (avoid animating from 0 on load)
+		_PlayerUI_Anim[key] = {
+			target = value,
+			display = value,
+			easing = easing or "linear",
+			arrived = false,
+		}
+		return
+	end
+	if entry.target ~= value then
+		local delta = math.abs(value - entry.display)
+		entry.target = value
+		entry.arrived = false
+		entry.easing = easing or entry.easing or "linear"
+		if entry.easing == "ease_in" and delta > 0 then
+			entry.startValue = entry.display
+			entry.startTime = World_GetGameTime()
+			local logDelta = math.log(1 + delta) / math.log(2)
+			entry.duration = math.max(_PLAYERUI_ANIM_EASE_MIN_DURATION,
+				math.min(_PLAYERUI_ANIM_EASE_MAX_DURATION, _PLAYERUI_ANIM_EASE_BASE_DURATION * logDelta))
+		end
+		if entry.display ~= value then
+			_PlayerUI_AnimDirty = true
+			if Rule_Exists(_PlayerUI_Animate_Tick) then
+				Rule_Unpause(_PlayerUI_Animate_Tick)
+			end
+		end
+	end
+end
+
+-----------------------------------------------------------------------
+-- GetDisplay: return the current animated display value for a key.
+-- Falls back to target (or 0) if the key hasn't been registered yet.
+-----------------------------------------------------------------------
+
+function PlayerUI_Animate_GetDisplay(key)
+	local entry = _PlayerUI_Anim[key]
+	if entry == nil then
+		return 0
+	end
+	return entry.display
+end
+
+-----------------------------------------------------------------------
+-- Tick (0.1s interval): step every tracked display toward its target.
+-- Uses adaptive step size so small deltas move ±1 per tick while large
+-- deltas converge in ~3 seconds.  Pauses itself when fully converged.
+-- Also ticks position-type entries using ease-out lerp.
+-----------------------------------------------------------------------
+
+function _PlayerUI_Animate_Tick()
+	local anyChanged = false
+	local maxTicks = _PlayerUI_AnimMaxStepTicks
+	local eliminationChangedFrame = false
+
+	if _PLAYERUI_ELIM_ANIM_DEBUG then
+		_PlayerUI_ElimDiag.frames = _PlayerUI_ElimDiag.frames + 1
+		_PlayerUI_ElimDiag.activeRows = 0
+	end
+
+	-- Number animations
+	local gameTime = World_GetGameTime()
+	for _, entry in pairs(_PlayerUI_Anim) do
+		local delta = entry.target - entry.display
+		if delta ~= 0 then
+			if entry.easing == "ease_in" and entry.startValue ~= nil and entry.startTime ~= nil then
+				-- Ease-in quadratic: accelerates from slow to fast (t²)
+				local elapsed = gameTime - entry.startTime
+				local t = math.min(1.0, elapsed / entry.duration)
+				local eased = t * t  -- quadratic ease-in
+				local totalDelta = entry.target - entry.startValue
+				local newDisplay = entry.startValue + totalDelta * eased
+				entry.display = math.floor(newDisplay + 0.5)
+				-- Snap to target at completion
+				if t >= 1.0 then
+					entry.display = entry.target
+					entry.startValue = nil
+					entry.startTime = nil
+					if not entry.arrived then
+						entry.arrived = true
+					end
+				end
+			else
+				-- Linear adaptive step (original behavior)
+				local step = math.max(1, math.ceil(math.abs(delta) / maxTicks))
+				if delta > 0 then
+					entry.display = math.min(entry.display + step, entry.target)
+				else
+					entry.display = math.max(entry.display - step, entry.target)
+				end
+				if entry.display == entry.target and not entry.arrived then
+					entry.arrived = true
+				end
+			end
+			anyChanged = true
+		end
+	end
+
+	-- Position animations (ease-out lerp)
+	local factor = _PLAYERUI_ANIM_EASEOUT_FACTOR
+	local epsilon = _PLAYERUI_ANIM_POSITION_EPSILON
+	for _, entry in pairs(_PlayerUI_AnimPositions) do
+		local delta = entry.target - entry.display
+		if math.abs(delta) > epsilon then
+			entry.display = entry.display + delta * factor
+			anyChanged = true
+		elseif delta ~= 0 then
+			-- Snap to target when close enough
+			entry.display = entry.target
+			anyChanged = true
+		end
+	end
+
+	-- Generic decays: move value toward 0 at decayRate each tick
+	-- Collect expired keys separately to avoid nil-assignment during pairs() traversal
+	local decayRemove = nil
+	for key, entry in pairs(_PlayerUI_AnimDecay) do
+		entry.value = entry.value - entry.decayRate
+		if entry.value <= 0 then
+			if decayRemove == nil then decayRemove = {} end
+			decayRemove[#decayRemove + 1] = key
+		else
+			anyChanged = true
+		end
+	end
+	if decayRemove ~= nil then
+		for i = 1, #decayRemove do
+			_PlayerUI_AnimDecay[decayRemove[i]] = nil
+		end
+	end
+
+	-- Score pulse decay toward 0
+	for _, pulse in pairs(_PlayerUI_ScorePulse) do
+		if pulse.value > 0 then
+			pulse.value = pulse.value - _PLAYERUI_PULSE_DECAY
+			if pulse.value < _PLAYERUI_PULSE_EPSILON then
+				pulse.value = 0
+			end
+			if pulse.value > 0 then
+				anyChanged = true
+			end
+		end
+	end
+
+	-- Reward icon smoothing: advance per-slot fade-in and border crossfade
+	if _PlayerUI_RewardIconSmoothingActive then
+		if _PlayerUI_TickRewardIconSmoothing() then
+			anyChanged = true
+		end
+	end
+
+	-- Elimination transition: animation tick is the sole writer for transition fields.
+	-- Opacity is now XAML-bound for visible fade easing; dirty row changes during active
+	-- elimination frames drive anyChanged and trigger DataContext pushes.
+	-- Scale binding reverted (eliminationScaleFactor still computed but unbound in XAML).
+	local eliminationTickNeeded = false
+	if _PlayerUI_AllPlayers ~= nil then
+		for index = 1, #_PlayerUI_AllPlayers do
+			local entry = _PlayerUI_EliminationAnims[index]
+			if entry ~= nil and entry.active then
+				if _PLAYERUI_ELIM_ANIM_DEBUG then
+					_PlayerUI_ElimDiag.activeRows = _PlayerUI_ElimDiag.activeRows + 1
+				end
+				local state = PlayerUI_Animate_GetEliminationState(index)
+				local data = PlayerUIDataContextMappings.PlayersByIndex[index]
+				local rowChanged = false
+				rowChanged = _PlayerUI_SetIfChanged(data, "eliminationAnimActive", true) or rowChanged
+				local elapsed = World_GetGameTime() - entry.startTime
+				rowChanged = _PlayerUI_SetIfChanged(data, "eliminationAnimElapsed", elapsed) or rowChanged
+				if _PLAYERUI_ELIM_ANIM_DEBUG then
+					_PlayerUI_ElimDiag.lastIndex = index
+					_PlayerUI_ElimDiag.lastElapsed = elapsed
+				end
+				if PlayerUI_Settings.EnableEliminationDim ~= false then
+					rowChanged = _PlayerUI_SetIfChanged(data, "rowOpacity", state.opacityMultiplier) or rowChanged
+					data.rowDimFill = _PlayerUI_RowDimFill(state.opacityMultiplier)
+				else
+					rowChanged = _PlayerUI_SetIfChanged(data, "rowOpacity", 1.0) or rowChanged
+					data.rowDimFill = _PlayerUI_RowDimFill(1.0)
+				end
+				rowChanged = _PlayerUI_SetIfChanged(data, "eliminationScaleFactor", state.scaleFactor) or rowChanged
+				if _PLAYERUI_ELIM_ANIM_DEBUG then
+					_PlayerUI_ElimDiag.lastScale = state.scaleFactor
+				end
+				if rowChanged then
+					anyChanged = true
+					eliminationChangedFrame = true
+				end
+				if state.isComplete then
+					PlayerUI_Animate_ClearEliminationAnim(index)
+					PlayerUI_Animate_ApplyEliminationTransitionFinalVisual(data)
+					-- Fast reveal: skip fence/defer-cycle waits (which previously
+					-- delayed the eliminated/disconnect/surrender label by up to
+					-- ~24s -- 2 RingRule fence cycles + 1 defer cycle at 8s each).
+					-- Apply steady visual + presentation update + reveal/glow
+					-- inline so the label appears within 0.1s of the dim anim
+					-- finishing.
+					_PlayerUI_SetIfChanged(data, "_elimCompletionFenceCycles", 0)
+					data._elimSteadyDeferFrame = false
+					data._elimPresentationReady = true
+					if _PlayerUI_ApplyEliminationSteadyVisualIfChanged ~= nil
+							and _PlayerUI_GetEliminationSteadyVisualKey ~= nil then
+						local playerEntry = _PlayerUI_AllPlayers and _PlayerUI_AllPlayers[index]
+						local isEliminated = (playerEntry ~= nil) and playerEntry.isEliminated or false
+						local dimEnabled = (PlayerUI_Settings.EnableEliminationDim ~= false)
+						local steadyVisualKey = _PlayerUI_GetEliminationSteadyVisualKey(isEliminated, dimEnabled)
+						_PlayerUI_ApplyEliminationSteadyVisualIfChanged(data, steadyVisualKey)
+					end
+					if PlayerUI_UpdateEliminationPresentationForIndex ~= nil then
+						PlayerUI_UpdateEliminationPresentationForIndex(index, nil)
+					end
+					if data.showEliminationPresentation
+							and not data._elimRevealCompleted
+							and PlayerUI_Animate_EliminationReveal ~= nil then
+						PlayerUI_Animate_EliminationReveal(index, _PLAYERUI_ELIM_REVEAL_DURATION, data)
+						if PlayerUI_Animate_EliminationGlow ~= nil then
+							data.elimGlowColor = data.eliminationLabelColor
+							PlayerUI_Animate_EliminationGlow(index, _PLAYERUI_ELIM_GLOW_DURATION, data)
+						end
+					end
+					if _PLAYERUI_ELIM_ANIM_DEBUG then
+						_PlayerUI_ElimDiag.completions = _PlayerUI_ElimDiag.completions + 1
+					end
+					anyChanged = true
+				else
+					eliminationTickNeeded = true
+				end
+			end
+		end
+	end
+
+	-- Elimination reveal: fade-in for label/icon/overlay after dim settles.
+	-- Runs as a separate pass so it doesn't interfere with dim animation state.
+	-- Phase 3A: also drives score foreground lerp, margin slide, and crossfade hide.
+	local revealTickNeeded = false
+	if _PlayerUI_AllPlayers ~= nil then
+		for index = 1, #_PlayerUI_AllPlayers do
+			local revealEntry = _PlayerUI_EliminationRevealAnims[index]
+			if revealEntry ~= nil and revealEntry.active then
+				local revealState = PlayerUI_Animate_GetEliminationRevealState(index)
+				local data = PlayerUIDataContextMappings.PlayersByIndex[index]
+				local rowChanged = _PlayerUI_SetIfChanged(data, "elimRevealOpacity", revealState.opacity)
+				-- Phase 3A: Score foreground lerp (white → grey over reveal)
+				local scoreFg = _PlayerUI_LerpHexColor(
+					_PLAYERUI_ELIM_SCORE_COLOR_ALIVE, _PLAYERUI_ELIM_SCORE_COLOR_FINAL, revealState.opacity)
+				rowChanged = _PlayerUI_SetIfChanged(data, "elimScoreForeground", scoreFg) or rowChanged
+				-- Phase 3A: Margin slide-in (offset → zero over reveal)
+				local slideTop = math.floor((1.0 - revealState.opacity) * _PLAYERUI_ELIM_MARGIN_SLIDE_PX + 0.5)
+				rowChanged = _PlayerUI_SetIfChanged(data, "elimRevealMargin", "0," .. tostring(slideTop) .. ",0,0") or rowChanged
+				-- Phase B: Status label foreground lerp (grey → reason colour over reveal)
+				local statusColor = data._elimStatusTargetColor
+				if statusColor ~= nil then
+					local statusFg = _PlayerUI_LerpHexColor(_PLAYERUI_ELIM_STATUS_COLOR_START, statusColor, revealState.opacity)
+					rowChanged = _PlayerUI_SetIfChanged(data, "elimStatusForeground", statusFg) or rowChanged
+				end
+				if rowChanged then
+					anyChanged = true
+				end
+				if revealState.isComplete then
+					PlayerUI_Animate_ClearEliminationReveal(index)
+					_PlayerUI_SetIfChanged(data, "elimRevealOpacity", 1.0)
+					-- Phase 3A: finalize crossfade + interpolated fields
+					_PlayerUI_SetIfChanged(data, "hideAliveStats", true)
+					_PlayerUI_SetIfChanged(data, "elimScoreForeground", _PLAYERUI_ELIM_SCORE_COLOR_FINAL)
+					_PlayerUI_SetIfChanged(data, "elimRevealMargin", "0,0,0,0")
+					-- Phase B: snap status foreground to final reason colour
+					if data._elimStatusTargetColor ~= nil then
+						_PlayerUI_SetIfChanged(data, "elimStatusForeground", data._elimStatusTargetColor)
+					end
+					_PlayerUI_SetIfChanged(data, "_elimRevealCompleted", true)
+					anyChanged = true
+				else
+					revealTickNeeded = true
+				end
+				_PlayerUI_UpdateElimFills(data)
+			end
+		end
+	end
+
+	-- Elimination glow pulse: brief colour flash decaying from peak → 0.
+	-- Runs concurrently with reveal pass.
+	local glowTickNeeded = false
+	if _PlayerUI_AllPlayers ~= nil then
+		for index = 1, #_PlayerUI_AllPlayers do
+			local glowEntry = _PlayerUI_EliminationGlowAnims[index]
+			if glowEntry ~= nil and glowEntry.active then
+				local glowState = PlayerUI_Animate_GetEliminationGlowState(index)
+				local data = PlayerUIDataContextMappings.PlayersByIndex[index]
+				local rowChanged = _PlayerUI_SetIfChanged(data, "elimGlowOpacity", glowState.opacity)
+				if rowChanged then
+					anyChanged = true
+				end
+				if glowState.isComplete then
+					PlayerUI_Animate_ClearEliminationGlow(index)
+					_PlayerUI_SetIfChanged(data, "elimGlowOpacity", 0.0)
+					anyChanged = true
+				else
+					glowTickNeeded = true
+				end
+				_PlayerUI_UpdateElimFills(data)
+			end
+		end
+	end
+
+	if _PLAYERUI_ELIM_ANIM_DEBUG and eliminationChangedFrame then
+		_PlayerUI_ElimDiag.changedFrames = _PlayerUI_ElimDiag.changedFrames + 1
+	end
+
+	if anyChanged then
+		if _PLAYERUI_ELIM_ANIM_DEBUG then
+			_PlayerUI_ElimDiag.pushFrames = _PlayerUI_ElimDiag.pushFrames + 1
+		end
+		-- Update rank visual fields from position animations
+		if PlayerUI_Ranking_ApplyAnimatedFields ~= nil then
+			PlayerUI_Ranking_ApplyAnimatedFields()
+		end
+		-- Re-derive DataContext fields from animated display values and push
+		PlayerUI_Animate_ApplyDisplayValues()
+	elseif not eliminationTickNeeded and not revealTickNeeded and not glowTickNeeded then
+		-- Check if reward playback runner needs the tick alive
+		local rewardPlaybackActive = (_PlayerUI_RewardPlayback ~= nil and _PlayerUI_RewardPlayback.phase ~= "idle")
+		if rewardPlaybackActive then
+			-- Playback is driving — still need to push DataContext this frame
+			PlayerUI_Animate_ApplyDisplayValues()
+		else
+			-- Fully converged — sleep until next SetTarget wakes us
+			_PlayerUI_AnimDirty = false
+			_PlayerUI_AnimPositionsDirty = false
+			if Rule_Exists(_PlayerUI_Animate_Tick) then
+				Rule_Pause(_PlayerUI_Animate_Tick)
+			end
+		end
+	end
+end
+
+-----------------------------------------------------------------------
+-- Position animation API: ease-out lerp for FLIP-style transitions
+-- Used by playerui_ranking.scar for rank reorder animations.
+-----------------------------------------------------------------------
+
+-- SetPosition: immediately set the display value (INVERT step of FLIP)
+function PlayerUI_Animate_SetPosition(key, value)
+	local entry = _PlayerUI_AnimPositions[key]
+	if entry == nil then
+		_PlayerUI_AnimPositions[key] = { target = value, display = value }
+	else
+		entry.display = value
+		-- Don't change target — caller sets target separately via SetPositionTarget
+	end
+end
+
+-- SetPositionTarget: set the target for ease-out animation (PLAY step of FLIP)
+function PlayerUI_Animate_SetPositionTarget(key, target)
+	local entry = _PlayerUI_AnimPositions[key]
+	if entry == nil then
+		_PlayerUI_AnimPositions[key] = { target = target, display = target }
+		return
+	end
+	entry.target = target
+	if entry.display ~= target then
+		_PlayerUI_AnimPositionsDirty = true
+		if Rule_Exists(_PlayerUI_Animate_Tick) then
+			Rule_Unpause(_PlayerUI_Animate_Tick)
+		end
+	end
+end
+
+-- GetPosition: return the current animated display value for a position key
+function PlayerUI_Animate_GetPosition(key)
+	local entry = _PlayerUI_AnimPositions[key]
+	if entry == nil then
+		return 0
+	end
+	return entry.display
+end
+
+-- HasArrived: returns true once when an animation reaches its target, then resets
+function PlayerUI_Animate_HasArrived(key)
+	local entry = _PlayerUI_Anim[key]
+	if entry ~= nil and entry.arrived then
+		entry.arrived = false
+		return true
+	end
+	return false
+end
+
+-- IsTransitioning: returns true when display has not yet reached target
+function PlayerUI_Animate_IsTransitioning(key)
+	local entry = _PlayerUI_Anim[key]
+	if entry == nil then return false end
+	return entry.display ~= entry.target
+end
+
+-- TriggerDecay: starts/overwrites a decay entry at startValue toward 0
+function PlayerUI_Animate_TriggerDecay(key, startValue, decayRate)
+	_PlayerUI_AnimDecay[key] = {
+		value = startValue,
+		decayRate = decayRate,
+	}
+	if Rule_Exists(_PlayerUI_Animate_Tick) then
+		Rule_Unpause(_PlayerUI_Animate_Tick)
+	end
+end
+
+-- GetDecay: returns current decay value for a key (0 if missing)
+function PlayerUI_Animate_GetDecay(key)
+	local entry = _PlayerUI_AnimDecay[key]
+	if entry == nil then
+		return 0
+	end
+	return entry.value
+end
+
+-- TriggerScorePulse: records score increases as a short-lived pulse value
+function PlayerUI_Animate_TriggerScorePulse(playerIndex, newScore)
+	local pulse = _PlayerUI_ScorePulse[playerIndex]
+	if pulse == nil then
+		_PlayerUI_ScorePulse[playerIndex] = { lastScore = newScore, value = 0 }
+		return
+	end
+	if pulse.lastScore ~= nil and newScore > pulse.lastScore then
+		pulse.value = 1.0
+	end
+	pulse.lastScore = newScore
+	if Rule_Exists(_PlayerUI_Animate_Tick) then
+		Rule_Unpause(_PlayerUI_Animate_Tick)
+	end
+end
+
+-----------------------------------------------------------------------
+-- Reward Icon Smoothing: per-slot fade-in and border crossfade.
+-- Presentation-only layer that sits between icon-array construction
+-- and DataContext assignment.  Never reads gameplay state.
+-----------------------------------------------------------------------
+
+-- Convert a 0..1 glow opacity to an #AARRGGBB gold fill string.
+-- Avoids Opacity binding on DataContext (see XAML safety comment in hud XAML).
+local function _PlayerUI_GlowFill(opacity)
+	local alpha = math.floor((opacity or 0) * 255 + 0.5)
+	alpha = math.max(0, math.min(255, alpha))
+	return string.format("#%02XFFD700", alpha)
+end
+
+-- Convert a 0..1 row opacity to an #AARRGGBB dim overlay fill.
+-- Replaces Opacity binding on visible Grid elements (XAML safety rule).
+function _PlayerUI_RowDimFill(opacity)
+	local alpha = math.floor((1.0 - (opacity or 1.0)) * 255 + 0.5)
+	alpha = math.max(0, math.min(255, alpha))
+	return string.format("#%02X111111", alpha)
+end
+
+-- Encode opacity into a base #AARRGGBB colour → new #AARRGGBB with scaled alpha.
+-- Replaces Opacity binding on Rectangles inside ItemsControl DataTemplates
+-- (XAML safety rule: no Opacity bound via DataContext).
+-- baseColor: "#AARRGGBB" string (the element's static Fill colour)
+-- opacity:   0..1 float
+function _PlayerUI_FillWithOpacity(baseColor, opacity)
+	local baseAlpha = tonumber(string.sub(baseColor, 2, 3), 16) or 255
+	local r = string.sub(baseColor, 4, 5)
+	local g = string.sub(baseColor, 6, 7)
+	local b = string.sub(baseColor, 8, 9)
+	local a = math.floor(baseAlpha * math.max(0, math.min(1, opacity or 0)) + 0.5)
+	return string.format("#%02X%s%s%s", a, r, g, b)
+end
+
+-- Merge a glow colour (#AARRGGBB or #RRGGBB) + opacity (0..1) into #AARRGGBB.
+-- Used for elimGlowFill where colour and opacity are driven independently.
+function _PlayerUI_GlowFillWithOpacity(glowColor, opacity)
+	if glowColor == nil then glowColor = "#FFDD3333" end
+	if #glowColor == 7 then
+		glowColor = "#FF" .. string.sub(glowColor, 2)
+	end
+	return _PlayerUI_FillWithOpacity(glowColor, opacity)
+end
+
+-- Normalise a border colour string to 8-char #AARRGGBB for lerp compat.
+-- Accepts #RRGGBB (7 chars) or #AARRGGBB (9 chars).  Returns #AARRGGBB.
+local function _PlayerUI_NormalizeBorderColor(color)
+	if color == nil then return "#FF555555" end
+	if #color == 7 then
+		return "#FF" .. string.sub(color, 2)
+	end
+	return color
+end
+
+-- Apply per-slot identity tracking and smoothing to a newly-built icon
+-- array.  Detects slot content changes by threshold, seeds opacity for
+-- changed slots, and records target border colour for crossfade.
+-- Returns the same table with opacity/borderColor fields applied.
+function _PlayerUI_SmoothRewardIcons(newIcons)
+	-- Guard: nil or empty → clear state, pass through
+	if newIcons == nil or #newIcons == 0 then
+		_PlayerUI_RewardIconSlotState = {}
+		_PlayerUI_RewardIconSmoothingActive = false
+		return newIcons
+	end
+
+	local prevState = _PlayerUI_RewardIconSlotState
+	local firstFrame = (not _PlayerUI_RewardIconSmoothingInitialized)
+	_PlayerUI_RewardIconSmoothingInitialized = true
+	local newState = {}
+	local anyActive = false
+
+	for i, icon in ipairs(newIcons) do
+		local threshold = tonumber(icon.thresholdText) or 0
+		local normBorder = _PlayerUI_NormalizeBorderColor(icon.borderColor)
+		local prev = prevState[i]
+
+		if firstFrame or prev == nil or prev.threshold ~= threshold then
+			-- Slot content changed (or first frame): anchor-preserving seed.
+			-- Search previous state for a donor slot with matching threshold
+			-- to inherit visual continuity (e.g., slot 2 becoming slot 1 after shuffle).
+			local donor = nil
+			local donorIndex = nil
+			if not firstFrame then
+				for j, ps in ipairs(prevState) do
+					if ps.threshold == threshold then
+						donor = ps
+						donorIndex = j
+						break
+					end
+				end
+			end
+
+			if donor and donorIndex then
+				-- Inherit transforms with position compensation for StackPanel slot shift
+				local slotWidth = _PLAYERUI_REWARD_ICON_SLOT_WIDTH or 36
+				local positionDelta = (donorIndex - i) * slotWidth
+				local adjustedOffsetX = (donor.offsetX or 0) + positionDelta
+				newState[i] = {
+					threshold = threshold,
+					opacity = donor.opacity or 1.0,
+					borderColor = normBorder,
+					targetBorderColor = normBorder,
+					offsetX = adjustedOffsetX,
+					targetOffsetX = 0,
+					scale = donor.scale or 1.0,
+					targetScale = 1.0,
+				}
+				if donor.opacity < 1.0 or math.abs(adjustedOffsetX) > (_PLAYERUI_REWARD_ICON_OFFSET_EPSILON or 0.5) then
+					anyActive = true
+				end
+			else
+				-- No matching threshold found (or first frame): use fade seed
+				local seedOpacity = firstFrame and 1.0 or _PLAYERUI_REWARD_ICON_FADE_SEED
+				newState[i] = {
+					threshold = threshold,
+					opacity = seedOpacity,
+					borderColor = normBorder,
+					targetBorderColor = normBorder,
+					offsetX = 0,
+					targetOffsetX = 0,
+					scale = 1.0,
+					targetScale = 1.0,
+				}
+				if seedOpacity < 1.0 then
+					anyActive = true
+				end
+			end
+		else
+			-- Same content: preserve current opacity, update target border
+			newState[i] = {
+				threshold = prev.threshold,
+				opacity = prev.opacity,
+				borderColor = prev.borderColor,
+				targetBorderColor = normBorder,
+				offsetX = prev.offsetX or 0,
+				targetOffsetX = prev.targetOffsetX or 0,
+				scale = prev.scale or 1.0,
+				targetScale = prev.targetScale or 1.0,
+			}
+			if prev.opacity < 1.0 then
+				anyActive = true
+			end
+			if prev.borderColor ~= normBorder then
+				anyActive = true
+			end
+			if PlayerUI_Settings.EnableRewardIconMotion == true then
+				if math.abs((prev.offsetX or 0) - (prev.targetOffsetX or 0)) > _PLAYERUI_REWARD_ICON_OFFSET_EPSILON then
+					anyActive = true
+				end
+				if math.abs((prev.scale or 1.0) - (prev.targetScale or 1.0)) > _PLAYERUI_REWARD_ICON_SCALE_EPSILON then
+					anyActive = true
+				end
+			end
+		end
+
+		-- Write smoothed values into the icon entry for XAML binding
+		icon.opacity = newState[i].opacity
+		icon.borderColor = newState[i].borderColor
+		icon.glowFill = icon.glowFill or "#00FFD700"
+		if PlayerUI_Settings.EnableRewardIconMotion == true then
+			icon.offsetX = newState[i].offsetX
+			icon.scale = newState[i].scale
+			icon.offsetXMargin = _PlayerUI_GetOffsetXMargin(newState[i].offsetX)
+		else
+			icon.offsetXMargin = "0,0,0,0"
+		end
+	end
+
+	_PlayerUI_RewardIconSlotState = newState
+	_PlayerUI_RewardIconSmoothingActive = anyActive
+
+	-- Wake tick so fade/lerp advances at 0.1s
+	if anyActive and Rule_Exists(_PlayerUI_Animate_Tick) then
+		Rule_Unpause(_PlayerUI_Animate_Tick)
+	end
+
+	return newIcons
+end
+
+-- Advance per-slot opacity and border colour lerp at 0.1s frequency.
+-- Called from the animation tick.  Modifies ctx.rewardIcons entries
+-- in-place (presentation only).  Returns true if still animating.
+function _PlayerUI_TickRewardIconSmoothing()
+	if not _PlayerUI_RewardIconSmoothingActive then
+		return false
+	end
+
+	local state = _PlayerUI_RewardIconSlotState
+	if state == nil or #state == 0 then
+		_PlayerUI_RewardIconSmoothingActive = false
+		return false
+	end
+
+	local icons = PlayerUiDataContext and PlayerUiDataContext.rewardIcons
+	if icons == nil then return false end
+
+	local anyActive = false
+
+	for i, slot in ipairs(state) do
+		local icon = icons[i]
+		if icon == nil then break end
+
+		-- Advance opacity toward 1.0
+		if slot.opacity < 1.0 then
+			slot.opacity = math.min(1.0, slot.opacity + _PLAYERUI_REWARD_ICON_FADE_IN_RATE)
+			icon.opacity = slot.opacity
+			if slot.opacity < 1.0 then
+				anyActive = true
+			end
+		end
+
+		-- Advance border colour toward target
+		if slot.targetBorderColor ~= nil and slot.borderColor ~= slot.targetBorderColor then
+			local oldBorder = slot.borderColor
+			slot.borderColor = _PlayerUI_LerpHexColor(
+				slot.borderColor, slot.targetBorderColor, _PLAYERUI_REWARD_ICON_BORDER_LERP)
+			-- If lerp made no visible change, snap to prevent infinite loop
+			if slot.borderColor == oldBorder then
+				slot.borderColor = slot.targetBorderColor
+			end
+			icon.borderColor = slot.borderColor
+			if slot.borderColor ~= slot.targetBorderColor then
+				anyActive = true
+			end
+		end
+
+		-- Advance offsetX toward target (feature-gated)
+		if PlayerUI_Settings.EnableRewardIconMotion == true then
+			local dx = (slot.targetOffsetX or 0) - (slot.offsetX or 0)
+			if math.abs(dx) > _PLAYERUI_REWARD_ICON_OFFSET_EPSILON then
+				slot.offsetX = (slot.offsetX or 0) + dx * _PLAYERUI_REWARD_ICON_OFFSET_LERP
+				icon.offsetX = slot.offsetX
+				icon.offsetXMargin = _PlayerUI_GetOffsetXMargin(slot.offsetX)
+				anyActive = true
+			elseif math.abs(dx) > 0 then
+				slot.offsetX = slot.targetOffsetX or 0
+				icon.offsetX = slot.offsetX
+				icon.offsetXMargin = _PlayerUI_GetOffsetXMargin(slot.offsetX)
+			end
+
+			-- Advance scale toward target
+			local ds = (slot.targetScale or 1.0) - (slot.scale or 1.0)
+			if math.abs(ds) > _PLAYERUI_REWARD_ICON_SCALE_EPSILON then
+				slot.scale = (slot.scale or 1.0) + ds * _PLAYERUI_REWARD_ICON_SCALE_LERP
+				icon.scale = slot.scale
+				anyActive = true
+			elseif math.abs(ds) > 0 then
+				slot.scale = slot.targetScale or 1.0
+				icon.scale = slot.scale
+			end
+		end
+	end
+
+	-- Strip-level offset lerp (container pan)
+	if PlayerUI_Settings.EnableRewardIconMotion == true then
+		local stripDx = _PlayerUI_RewardStripTargetOffsetX - _PlayerUI_RewardStripOffsetX
+		if math.abs(stripDx) > _PLAYERUI_REWARD_ICON_OFFSET_EPSILON then
+			_PlayerUI_RewardStripOffsetX = _PlayerUI_RewardStripOffsetX + stripDx * _PLAYERUI_REWARD_STRIP_OFFSET_LERP
+			PlayerUiDataContext.rewardStripOffsetX = _PlayerUI_RewardStripOffsetX
+			PlayerUiDataContext.rewardStripOffsetMargin = _PlayerUI_GetStripOffsetMargin(_PlayerUI_RewardStripOffsetX)
+			anyActive = true
+		elseif math.abs(stripDx) > 0 then
+			_PlayerUI_RewardStripOffsetX = _PlayerUI_RewardStripTargetOffsetX
+			PlayerUiDataContext.rewardStripOffsetX = _PlayerUI_RewardStripOffsetX
+			PlayerUiDataContext.rewardStripOffsetMargin = _PlayerUI_GetStripOffsetMargin(_PlayerUI_RewardStripOffsetX)
+		end
+	end
+
+	_PlayerUI_RewardIconSmoothingActive = anyActive
+	return anyActive
+end
+
+-----------------------------------------------------------------------
+-- Fill icon strip to 3 slots with preview entries (used across phases)
+-----------------------------------------------------------------------
+function _PlayerUI_FillPreviewSlots(icons, player, pb, excludeMilestone)
+	if #icons >= 3 or player == nil then return end
+	local exclude = {}
+	for _, ic in ipairs(icons) do
+		exclude[tonumber(ic.thresholdText) or 0] = true
+	end
+	if excludeMilestone and excludeMilestone.threshold then
+		exclude[excludeMilestone.threshold] = true
+	end
+	local count = 3 - #icons + #pb.queue + 1
+	local previews = PlayerUI_BuildRewardPreview(player, count)
+	for _, pv in ipairs(previews) do
+		if #icons >= 3 then break end
+		if not exclude[pv.threshold] then
+			table.insert(icons, {
+				icon = pv.icon or _PlayerUI_RewardIconFallback,
+				borderColor = "#555555",
+				thresholdText = "+" .. tostring(pv.threshold - (pv.prevThreshold or 0)),
+				opacity = 1.0,
+				glowFill = "#00FFD700",
+				offsetX = 0,
+				offsetXMargin = "0,0,0,0",
+				scale = 1.0,
+			})
+			exclude[pv.threshold] = true
+		end
+	end
+end
+
+-----------------------------------------------------------------------
+-- ApplyDisplayValues: write animated display numbers back into the
+-- DataContext tables and re-push to XAML.  Only called from Tick when
+-- at least one value changed — never during the main 1.0s update.
+-----------------------------------------------------------------------
+
+function PlayerUI_Animate_ApplyDisplayValues()
+	local allPlayers = _PlayerUI_AllPlayers
+	if allPlayers == nil then
+		return
+	end
+
+	-- Keep timer fresh during active 0.1s animation frames (negligible: one pcall + math + format)
+	PlayerUiDataContext.elapsedTimeDisplay = PlayerUI_GetElapsedTimeDisplay()
+
+	local ctx = PlayerUiDataContext
+
+	-- Per-player animated fields
+	for index = 1, #allPlayers do
+		local data = PlayerUIDataContextMappings.PlayersByIndex[index]
+
+		-- Kill score
+		local previousDisplay = data._lastDisplayedKillScore or 0
+		data.killScore = PlayerUI_Animate_GetDisplay("kill_" .. index)
+		if PlayerUI_Settings.EnableKillScorePulse and data.killScore > previousDisplay then
+			PlayerUI_Animate_TriggerScorePulse(index, data.killScore)
+		end
+		data._lastDisplayedKillScore = data.killScore
+
+		-- Per-player reward bar (kills display for text + bar width)
+		local playersEntry = PLAYERS[World_GetPlayerIndex(allPlayers[index].id)]
+		if playersEntry then
+			local dispKills = PlayerUI_Animate_GetDisplay("reward_bar_" .. index)
+			local req = playersEntry.obj_kill_requirement or 0
+			data.rewardProgressText = tostring(dispKills) .. " / " .. tostring(req)
+			local ratio = (req > 0) and math.min(dispKills / req, 1.0) or 0
+			data.rewardBarWidth = math.floor(ratio * 100)
+
+			-- Update color/glow from animated kill score (smooth during transition)
+			if PlayerUI_Settings.EnableScoreColors ~= false and _PlayerUI_GetScoreColor ~= nil then
+				data.killScoreColor = _PlayerUI_GetScoreColor(data.killScore)
+				data.scoreGlowTier = _PlayerUI_GetScoreGlowTier(data.killScore)
+			end
+
+			-- Size pulse tracks animation state
+			data.isScoreUpdating = PlayerUI_Animate_IsTransitioning("kill_" .. index)
+
+			-- Star decay check
+			if PlayerUI_Animate_GetDecay("reward_star_" .. index) <= 0 then
+				data.rewardEarnedFlash = false
+			end
+		end
+
+		-- Population (keyed by World_GetPlayerIndex, same as UpdatePopulationComposition)
+		local pIdx = World_GetPlayerIndex(allPlayers[index].id)
+		data.workerPopulation = PlayerUI_Animate_GetDisplay("workerPop_" .. pIdx)
+		data.allMilitaryPopulation = PlayerUI_Animate_GetDisplay("militaryPop_" .. pIdx)
+
+		-- Score pulse: continuous scale + boolean active flag for XAML DataTrigger
+		local pulse = _PlayerUI_ScorePulse[index]
+		local pulseValue = (pulse and pulse.value) or 0
+		local eased = 1 - ((1 - pulseValue) * (1 - pulseValue))
+		-- NOTE: killScorePulseScale is intentionally NOT written to DataContext.
+		-- Unbound numeric fields in ItemsSource entries crash D3D on toggle.
+		-- Only killScorePulseFontSize (which has a XAML binding) is published.
+		local pulseScale = 1.0 + (_PLAYERUI_PULSE_SCALE_PEAK * eased)
+		data.killScorePulseFontSize = 18 + ((pulseScale - 1.0) * 16.0)
+		data.killScorePulseActive = (pulseValue > _PLAYERUI_PULSE_EPSILON)
+	end
+
+	-- Re-aggregate team summaries from animated per-player values
+	PlayerUI_UpdateTeamSummaries()
+
+	-- Local player reward progress strip (playback runner or live fallback)
+	local rwd = _PlayerUI_EnsureRewardsContext()
+	if rwd ~= nil then
+		local localPlayerID = Game_GetLocalPlayer()
+		local player_idx = World_GetPlayerIndex(localPlayerID)
+		local player = PLAYERS[player_idx]
+		if player ~= nil then
+			local pb = _PlayerUI_RewardPlayback
+			local current = player.killed_number or 0
+
+			if pb.phase ~= "idle" and pb.active ~= nil then
+				-- ===== PLAYBACK RUNNER: owns DataContext while queue is active =====
+				local gameTime = World_GetGameTime()
+				local milestone = pb.active
+				local interval = milestone.interval
+				local elapsed = _PlayerUI_SafeElapsed(pb, gameTime)
+
+				-- ---- COMPLETION_CENTER: converge lead icon to emphasis position (motion only) ----
+				if pb.phase == "completion_center" then
+					-- Time-based fill ramp: lerp seed→target across CENTER+HIGHLIGHT/2.
+					-- Eliminates the previous step-based undershoot that left the bar
+					-- below 100% when fadeout snapped it to interval.
+					local fillTotal = _PLAYERUI_REWARD_CENTER_DURATION + (_PLAYERUI_REWARD_HIGHLIGHT_DURATION * 0.5)
+					local fillSeed = pb.fillSeed or pb.fillDisplay or 0
+					local fillTarget = pb.fillTarget or interval
+					local fillRaw = math.min(elapsed / fillTotal, 1.0)
+					local fillEased = _PlayerUI_EaseOut(fillRaw)
+					pb.fillDisplay = fillSeed + (fillTarget - fillSeed) * fillEased
+					-- Periodic verification log (every ~0.2s while filling) so we can
+					-- visually correlate the trajectory in scarlog.
+					if pb._lastFillLog == nil or (gameTime - pb._lastFillLog) >= 0.2 then
+						pb._lastFillLog = gameTime
+						local pct = (interval > 0) and ((pb.fillDisplay / interval) * 100) or 0
+						print("[PLAYERUI_REWARD_FILL] phase=center elapsed=" .. string.format("%.2f", elapsed)
+							.. " seed=" .. string.format("%.1f", fillSeed)
+							.. " target=" .. string.format("%.1f", fillTarget)
+							.. " display=" .. string.format("%.2f", pb.fillDisplay)
+							.. " pct=" .. string.format("%.1f", pct))
+					end
+					local duration = _PLAYERUI_REWARD_CENTER_DURATION
+					local timeout = _PLAYERUI_REWARD_CENTER_TIMEOUT
+					local rawProgress = math.min(elapsed / duration, 1.0)
+					local progress = _PlayerUI_EaseOut(rawProgress)
+
+					-- Lead icon: scale up toward highlight emphasis, no offset movement
+					local leadScale = 1.0 + progress * (_PLAYERUI_REWARD_ICON_SCALE_HIGHLIGHT - 1.0)
+
+					-- Build icon array with transitioning motion values
+					-- Fixed-position cycling: lead animates, queued icons remain static
+					local motionEnabled = (PlayerUI_Settings.EnableRewardIconMotion == true)
+					local comp_icons = {{
+						icon = milestone.icon or _PlayerUI_RewardIconFallback,
+						borderColor = "#FFD700",
+						thresholdText = _PlayerUI_FormatThresholdIncrement(milestone),
+						opacity = 1.0,
+						glowFill = "#00FFD700",
+						offsetX = 0,
+						offsetXMargin = "0,0,0,0",
+						scale = motionEnabled and leadScale or 1.0,
+					}}
+					for qi = 1, math.min(2, #pb.queue) do
+						local queued = _PlayerUI_SafeQueueEntry(pb.queue, qi)
+						-- Queued icons remain completely static during center phase
+						table.insert(comp_icons, {
+							icon = queued.icon or _PlayerUI_RewardIconFallback,
+							borderColor = "#555555",
+							thresholdText = _PlayerUI_FormatThresholdIncrement(queued),
+							opacity = 1.0,
+							glowFill = "#00FFD700",
+							offsetX = 0,
+							offsetXMargin = "0,0,0,0",
+							scale = 1.0,
+						})
+					end
+					_PlayerUI_FillPreviewSlots(comp_icons, player, pb, milestone)
+					ctx.rewardIcons = comp_icons
+
+					-- Convergence gate: advance when scale converged or timeout
+					local scaleConverged = math.abs(leadScale - _PLAYERUI_REWARD_ICON_SCALE_HIGHLIGHT) < _PLAYERUI_REWARD_ICON_SCALE_EPSILON
+					if progress >= 1.0 or scaleConverged or elapsed >= timeout then
+						if elapsed >= timeout and not scaleConverged then
+							_PlayerUI_MotionGuards.center_timeout_used = _PlayerUI_MotionGuards.center_timeout_used + 1
+						end
+						pb.phase = "completion_highlight"
+						pb.phaseStart = gameTime
+						print("[PLAYERUI_REWARD_PLAYBACK] completion_center->completion_highlight threshold=" .. tostring(milestone.threshold)
+							.. " converged=" .. tostring(scaleConverged) .. " elapsed=" .. string.format("%.2f", elapsed))
+					end
+
+				-- ---- COMPLETION_HIGHLIGHT: bar at 100%, glow on completed, queued icons static ----
+				elseif pb.phase == "completion_highlight" then
+					-- Continue time-based fill ramp begun in CENTER.  Total fill window
+					-- spans CENTER + first half of HIGHLIGHT, so the bar reaches 100%
+					-- early in the glow phase rather than snapping at fadeout.
+					local fillTotal = _PLAYERUI_REWARD_CENTER_DURATION + (_PLAYERUI_REWARD_HIGHLIGHT_DURATION * 0.5)
+					local fillSeed = pb.fillSeed or 0
+					local fillTarget = pb.fillTarget or interval
+					-- elapsed here is from highlight start; add center duration to get total
+					local totalElapsed = elapsed + _PLAYERUI_REWARD_CENTER_DURATION
+					local fillRaw = math.min(totalElapsed / fillTotal, 1.0)
+					local fillEased = _PlayerUI_EaseOut(fillRaw)
+					pb.fillDisplay = fillSeed + (fillTarget - fillSeed) * fillEased
+					-- Verification log
+					if pb._lastFillLog == nil or (gameTime - pb._lastFillLog) >= 0.2 then
+						pb._lastFillLog = gameTime
+						local pct = (interval > 0) and ((pb.fillDisplay / interval) * 100) or 0
+						print("[PLAYERUI_REWARD_FILL] phase=highlight elapsed=" .. string.format("%.2f", elapsed)
+							.. " seed=" .. string.format("%.1f", fillSeed)
+							.. " target=" .. string.format("%.1f", fillTarget)
+							.. " display=" .. string.format("%.2f", pb.fillDisplay)
+							.. " pct=" .. string.format("%.1f", pct))
+					end
+					local duration = _PLAYERUI_REWARD_HIGHLIGHT_DURATION
+					local progress = math.min(elapsed / duration, 1.0)
+
+					-- Glow: hold at peak for the first portion, then linear decay
+					local glowOpacity = 0
+					if progress < _PLAYERUI_REWARD_GLOW_HOLD_RATIO then
+						glowOpacity = _PLAYERUI_REWARD_GLOW_PEAK_OPACITY
+					else
+						local decayT = (progress - _PLAYERUI_REWARD_GLOW_HOLD_RATIO) / (1.0 - _PLAYERUI_REWARD_GLOW_HOLD_RATIO)
+						glowOpacity = _PLAYERUI_REWARD_GLOW_PEAK_OPACITY * (1.0 - decayT)
+					end
+
+					-- Build icon array — lead gets glow/scale, queued remain static
+					local motionEnabled = (PlayerUI_Settings.EnableRewardIconMotion == true)
+					local compScale = motionEnabled and _PLAYERUI_REWARD_ICON_SCALE_HIGHLIGHT or 1.0
+
+					local comp_icons = {{
+						icon = milestone.icon or _PlayerUI_RewardIconFallback,
+						borderColor = "#FFD700",
+						thresholdText = _PlayerUI_FormatThresholdIncrement(milestone),
+						opacity = 1.0,
+						glowFill = _PlayerUI_GlowFill(glowOpacity),
+						offsetX = 0,
+						offsetXMargin = "0,0,0,0",
+						scale = compScale,
+					}}
+					for qi = 1, math.min(2, #pb.queue) do
+						local queued = _PlayerUI_SafeQueueEntry(pb.queue, qi)
+						-- Queued icons remain completely static during highlight
+						table.insert(comp_icons, {
+							icon = queued.icon or _PlayerUI_RewardIconFallback,
+							borderColor = "#555555",
+							thresholdText = _PlayerUI_FormatThresholdIncrement(queued),
+							opacity = 1.0,
+							glowFill = "#00FFD700",
+							offsetX = 0,
+							offsetXMargin = "0,0,0,0",
+							scale = 1.0,
+						})
+					end
+					_PlayerUI_FillPreviewSlots(comp_icons, player, pb, milestone)
+					ctx.rewardIcons = comp_icons
+
+					if progress >= 1.0 then
+						pb.phase = "completion_fadeout"
+						pb.phaseStart = gameTime
+						print("[PLAYERUI_REWARD_PLAYBACK] completion_highlight->completion_fadeout threshold=" .. tostring(milestone.threshold))
+					end
+
+				-- ---- COMPLETION_FADEOUT: lead exits left, queued icons remain static ----
+				elseif pb.phase == "completion_fadeout" then
+					-- Bar should already be at interval from the CENTER+HIGHLIGHT ramp.
+					-- Clamp here as a safety in case the ramp underflowed (e.g. if
+					-- fadeout was entered early via a phase override).
+					pb.fillDisplay = interval
+					if pb._lastFillLog ~= nil then
+						print("[PLAYERUI_REWARD_FILL] phase=fadeout enter display="
+							.. string.format("%.2f", pb.fillDisplay)
+							.. " interval=" .. tostring(interval)
+							.. " (held at 100% until reshuffle decay)")
+						pb._lastFillLog = nil  -- reset for next milestone's CENTER phase
+					end
+					local duration = _PLAYERUI_REWARD_FADEOUT_DURATION
+					local rawProgress = math.min(elapsed / duration, 1.0)
+					local progress = _PlayerUI_EaseIn(rawProgress)
+					local motionEnabled = (PlayerUI_Settings.EnableRewardIconMotion == true)
+
+					-- Completed icon: fades out + slides left + scale shrinks
+					local exitOpacity = math.max(0, 1.0 - progress)
+					local exitOffset = motionEnabled and (-(progress * _PLAYERUI_REWARD_ICON_OFFSET_SLIDE)) or 0
+					local exitScale = 1.0
+					if motionEnabled then
+						exitScale = _PLAYERUI_REWARD_ICON_SCALE_HIGHLIGHT + progress * (_PLAYERUI_REWARD_FADEOUT_SCALE_END - _PLAYERUI_REWARD_ICON_SCALE_HIGHLIGHT)
+					end
+
+					-- Build 3-icon array: [exiting completed, queue static]
+					local comp_icons = {{
+						icon = milestone.icon or _PlayerUI_RewardIconFallback,
+						borderColor = "#FFD700",
+						thresholdText = _PlayerUI_FormatThresholdIncrement(milestone),
+						opacity = exitOpacity,
+						glowFill = "#00FFD700",
+						offsetX = exitOffset,
+						offsetXMargin = _PlayerUI_GetOffsetXMargin(exitOffset),
+						scale = exitScale,
+					}}
+					for qi = 1, math.min(2, #pb.queue) do
+						local queued = _PlayerUI_SafeQueueEntry(pb.queue, qi)
+						-- Queued icons remain completely static during fadeout
+						table.insert(comp_icons, {
+							icon = queued.icon or _PlayerUI_RewardIconFallback,
+							borderColor = "#555555",
+							thresholdText = _PlayerUI_FormatThresholdIncrement(queued),
+							opacity = 1.0,
+							glowFill = "#00FFD700",
+							offsetX = 0,
+							offsetXMargin = "0,0,0,0",
+							scale = 1.0,
+						})
+					end
+					_PlayerUI_FillPreviewSlots(comp_icons, player, pb, milestone)
+					ctx.rewardIcons = comp_icons
+
+					if rawProgress >= 1.0 then
+						pb.phase = "reshuffle"
+						pb.phaseStart = gameTime
+						print("[PLAYERUI_REWARD_PLAYBACK] completion_fadeout->reshuffle threshold=" .. tostring(milestone.threshold))
+					end
+
+				-- ---- RESHUFFLE: survivors shift left, right entrant slides in from right ----
+				elseif pb.phase == "reshuffle" then
+					pb.fillDisplay = interval
+					local duration = _PLAYERUI_REWARD_RESHUFFLE_DURATION
+					local stagger = _PLAYERUI_REWARD_RESHUFFLE_STAGGER or 0.08
+					local motionEnabled = (PlayerUI_Settings.EnableRewardIconMotion == true)
+					local slotWidth = _PLAYERUI_REWARD_ICON_SLOT_WIDTH or 36
+
+					-- Assemble staged visible set: pb.queue first, then preview top-up if thin
+					local staged = {}
+					local stagedThresholds = {}
+					for qi = 1, math.min(3, #pb.queue) do
+						local queued = _PlayerUI_SafeQueueEntry(pb.queue, qi)
+						table.insert(staged, queued)
+						if queued.threshold and queued.threshold ~= 0 then
+							stagedThresholds[queued.threshold] = true
+						end
+					end
+					-- Top up from canonical upcoming preview if strip would be underfilled
+					if #staged < 3 and player ~= nil then
+						local previewCount = 3 - #staged + #pb.queue + 1  -- ask for enough extras
+						local previews = PlayerUI_BuildRewardPreview(player, previewCount)
+						for _, pv in ipairs(previews) do
+							if #staged >= 3 then break end
+							if not stagedThresholds[pv.threshold]
+								and (milestone == nil or pv.threshold ~= milestone.threshold) then
+								table.insert(staged, {
+									icon = pv.icon or _PlayerUI_RewardIconFallback,
+									threshold = pv.threshold,
+									title = pv.title,
+									interval = pv.threshold - (pv.prevThreshold or 0),
+									_fromPreview = true,
+								})
+								stagedThresholds[pv.threshold] = true
+							end
+						end
+					end
+
+					-- Build 3-icon array from staged entries
+					local comp_icons = {}
+					for si = 1, math.min(3, #staged) do
+						local entry = staged[si]
+						local isNewEntrant = (si >= 3)  -- slot 3: right-side entrant
+
+						-- Per-slot stagger: each successive slot begins slightly later
+						local slotDelay = (si - 1) * stagger
+						local slotRaw = math.max(0, math.min((elapsed - slotDelay) / duration, 1.0))
+						local slotProgress = _PlayerUI_EaseOut(slotRaw)
+
+						-- Survivors: offset from +slotWidth → 0 (visual stability during StackPanel shift)
+						-- Right entrant: also +slotWidth → 0 (mirror of lead exit in reverse)
+						local qOffset = 0
+						if motionEnabled then
+							qOffset = slotWidth * (1.0 - slotProgress)
+						end
+
+						-- Opacity: survivors stay at 1.0, right entrant fades in from 0
+						local qOpacity = isNewEntrant and slotProgress or 1.0
+
+						-- Scale: all icons at 1.0
+						local qScale = 1.0
+
+						-- Border: new lead transitions from grey → gold
+						local qBorder = "#555555"
+						if si == 1 then
+							qBorder = _PlayerUI_LerpHexColor("#FF555555", "#FFFFD700", slotProgress)
+						end
+
+						table.insert(comp_icons, {
+							icon = entry.icon or _PlayerUI_RewardIconFallback,
+							borderColor = qBorder,
+							thresholdText = _PlayerUI_FormatThresholdIncrement(entry),
+							opacity = qOpacity,
+							glowFill = "#00FFD700",
+							offsetX = qOffset,
+							offsetXMargin = _PlayerUI_GetOffsetXMargin(qOffset),
+							scale = qScale,
+						})
+					end
+					ctx.rewardIcons = comp_icons
+
+					-- Title transitions to next milestone (dim → bright)
+					local rawProgress = math.min(elapsed / duration, 1.0)
+					local progress = _PlayerUI_EaseOut(rawProgress)
+					if #pb.queue > 0 then
+						ctx.rewardNextTitle = pb.queue[1].title or ""
+						ctx.rewardNextTitleColor = _PlayerUI_LerpHexColor("#FF666666", "#FFCCCCCC", progress)
+					else
+						ctx.rewardNextTitle = ""
+						ctx.rewardNextTitleColor = "#FF666666"
+					end
+
+					-- Bar decays from gold toward green during reshuffle
+					local reshuffleBarVal = interval * (1.0 - progress)
+					local reshufflePct = math.floor(((1.0 - progress) * 100) + 0.5)
+					local reshuffleDispInt = math.floor(reshuffleBarVal + 0.5)
+					rwd.progress_text = tostring(reshuffleDispInt) .. " / " .. tostring(interval) .. " (" .. tostring(reshufflePct) .. "%)"
+					rwd.progress_current = reshuffleBarVal
+					rwd.progress_max = interval
+					ctx.rewardProgressText = rwd.progress_text
+					ctx.rewardProgress_current = rwd.progress_current
+					ctx.rewardProgress_max = rwd.progress_max
+
+					-- Verification log: bar decay trajectory
+					if pb._lastDecayLog == nil or (gameTime - pb._lastDecayLog) >= 0.15 then
+						pb._lastDecayLog = gameTime
+						print("[PLAYERUI_REWARD_DECAY] phase=reshuffle elapsed=" .. string.format("%.2f", elapsed)
+							.. " progress=" .. string.format("%.2f", progress)
+							.. " bar=" .. string.format("%.1f", reshuffleBarVal)
+							.. "/" .. tostring(interval)
+							.. " pct=" .. tostring(reshufflePct))
+					end
+
+					local fill_color = _PlayerUI_LerpHexColor("#FFFFD700", "#FF4A7A2F", progress)
+					local border_color = _PlayerUI_LerpHexColor("#FFFFD700", "#FF5E6989", progress)
+					local label_color = _PlayerUI_LerpHexColor("#FFFFD700", "#FFAAAAAA", progress)
+					local separator_color = _PlayerUI_LerpHexColor("#FFFFD700", "#FF616C8C", progress)
+					ctx.rewardBarFillColor = fill_color
+					ctx.rewardBarBorderColor = border_color
+					ctx.rewardProgressLabelColor = label_color
+					ctx.rewardSeparatorColor = separator_color
+
+					if rawProgress >= 1.0 then
+						-- Snap all staged icons to resting state (eliminate stagger residuals)
+						for si = 1, #comp_icons do
+							comp_icons[si].offsetX = 0
+							comp_icons[si].offsetXMargin = "0,0,0,0"
+							comp_icons[si].opacity = 1.0
+							comp_icons[si].scale = 1.0
+						end
+						ctx.rewardIcons = comp_icons
+						pb.phase = "advance"
+						pb.phaseStart = gameTime
+						pb._lastDecayLog = nil
+						print("[PLAYERUI_REWARD_PLAYBACK] reshuffle->advance threshold=" .. tostring(milestone.threshold))
+					end
+
+				-- ---- ADVANCE: dwell pause then pop next milestone or drain to idle ----
+				elseif pb.phase == "advance" then
+					local dwell = _PLAYERUI_REWARD_ADVANCE_DWELL or 0.15
+					if elapsed < dwell then
+						-- Hold snapped icons during dwell (clean state from reshuffle snap)
+					else
+						-- Dwell complete, advance to next milestone
+						PlayerUI_RewardPlayback_AdvanceQueue(pb, current)
+						if pb.phase == "idle" then
+							-- Queue drained — sync smoothing state so idle path doesn't re-seed
+							_PlayerUI_RewardIconSlotState = {}
+							local finalIcons = ctx.rewardIcons or {}
+							for i, icon in ipairs(finalIcons) do
+								_PlayerUI_RewardIconSlotState[i] = {
+									threshold = tonumber(icon.thresholdText) or 0,
+									opacity = 1.0,
+									borderColor = _PlayerUI_NormalizeBorderColor(icon.borderColor),
+									targetBorderColor = _PlayerUI_NormalizeBorderColor(icon.borderColor),
+									offsetX = 0,
+									targetOffsetX = 0,
+									scale = 1.0,
+									targetScale = 1.0,
+								}
+							end
+							_PlayerUI_RewardIconSmoothingInitialized = true
+							_PlayerUI_RewardIconSmoothingActive = false
+
+							-- Reset strip offset on drain
+							_PlayerUI_RewardStripOffsetX = 0
+							_PlayerUI_RewardStripTargetOffsetX = 0
+							PlayerUiDataContext.rewardStripOffsetX = 0
+							PlayerUiDataContext.rewardStripOffsetMargin = "0,2,0,2"
+
+							-- Start idle bar from 0 so it visibly fills to live value
+							local next_req = player.obj_kill_requirement or 0
+							local player_civ = player.raceName or Player_GetRaceName(localPlayerID)
+							local prev_thresh, _, rel, ival = PlayerUI_GetRewardProgressBounds(current, player_civ, next_req)
+							_PlayerUI_Anim["reward_progress"] = {
+								target = rel, display = 0, easing = "linear", arrived = false,
+							}
+							ctx._rewardProgressBase = nil  -- force baseChanged on next 1.0s cycle
+							print("[PLAYERUI_REWARD_DRAIN] kills=" .. tostring(current)
+								.. " next_req=" .. tostring(next_req)
+								.. " prev_threshold=" .. tostring(prev_thresh)
+								.. " relative_current=" .. string.format("%.1f", rel)
+								.. " interval=" .. tostring(ival)
+								.. " anim_target=" .. string.format("%.1f", rel)
+								.. " anim_display=0")
+						end
+					end
+				end
+
+				-- Publish bar/color state for center, highlight, and fadeout phases
+				-- (reshuffle handles its own bar/title/color transition above)
+				if pb.phase == "completion_center" or pb.phase == "completion_highlight" or pb.phase == "completion_fadeout" then
+					local display_val = math.max(0, math.min(pb.fillDisplay, interval))
+					local ratio = math.min(display_val / interval, 1.0)
+					local pct = math.floor((ratio * 100) + 0.5)
+					local dispInt = math.floor(display_val + 0.5)
+
+					local fill_color = "#FF4A7A2F"
+					if ratio <= 0.5 then
+						fill_color = _PlayerUI_LerpHexColor("#FF4A7A2F", "#FFC8A832", ratio / 0.5)
+					else
+						fill_color = _PlayerUI_LerpHexColor("#FFC8A832", "#FFFFD700", (ratio - 0.5) / 0.5)
+					end
+
+					local border_color = _PlayerUI_LerpHexColor("#FF5E6989", "#FFFFD700", ratio)
+					local title_color = _PlayerUI_LerpHexColor("#FFCCCCCC", "#FFFFD700", ratio)
+					local label_color = _PlayerUI_LerpHexColor("#FFAAAAAA", "#FFFFD700", ratio)
+					local separator_color = _PlayerUI_LerpHexColor("#FF616C8C", "#FFFFD700", ratio)
+
+					rwd.progress_text = tostring(dispInt) .. " / " .. tostring(interval) .. " (" .. tostring(pct) .. "%)"
+					rwd.progress_current = display_val
+					rwd.progress_max = interval
+
+					ctx.rewardProgressText = rwd.progress_text
+					ctx.rewardProgress_current = rwd.progress_current
+					ctx.rewardProgress_max = rwd.progress_max
+					ctx.rewardNextTitle = milestone.title or ""
+					ctx.rewardBarFillColor = fill_color
+					ctx.rewardBarBorderColor = border_color
+					ctx.rewardNextTitleColor = title_color
+					ctx.rewardProgressLabelColor = label_color
+					ctx.rewardSeparatorColor = separator_color
+				end
+
+				-- Keep animation tick alive while playback is running
+				if pb.phase ~= "idle" then
+					_PlayerUI_AnimDirty = true
+				end
+			end
+
+			-- Live fallback (when playback is idle)
+			if pb.phase == "idle" then
+				local next_req = player.obj_kill_requirement or 0
+				local player_civ = player.raceName or Player_GetRaceName(localPlayerID)
+
+				-- THRESHOLD-CROSS DETECTION (fast path).
+				-- The slow PlayerUI_UpdateNextReward (8s ring rule) used to
+				-- own this, but during the up-to-8s gap the animate tick
+				-- here would already pick up the new player.obj_kill_requirement
+				-- and recompute interval/display_max, causing the bar visual
+				-- (display/display_max) to snap whenever the new interval
+				-- shrank or grew before _PlayerUI_Anim was rebased.  We now
+				-- detect the cross here at 0.1s cadence and enqueue
+				-- playback immediately so the bar transitions through the
+				-- proper completion animation instead of snapping.
+				if pb.lastObservedReq ~= nil and next_req > pb.lastObservedReq and pb.lastObservedReq >= 0 then
+					local crossed = PlayerUI_ReconstructCrossedThresholds(player_civ, pb.lastObservedReq, next_req)
+					local enq = 0
+					for _, threshold in ipairs(crossed) do
+						local m = PlayerUI_BuildPlaybackMilestone(player, player_civ, threshold)
+						if m ~= nil then
+							table.insert(pb.queue, m)
+							enq = enq + 1
+						end
+					end
+					if enq > 0 then
+						print("[PLAYERUI_REWARD_PLAYBACK] (animtick) enqueued " .. tostring(enq)
+							.. " milestone(s) oldReq=" .. tostring(pb.lastObservedReq)
+							.. " newReq=" .. tostring(next_req)
+							.. " queueLen=" .. tostring(#pb.queue))
+						pb.lastObservedReq = next_req
+						if pb.phase == "idle" and #pb.queue > 0 then
+							PlayerUI_RewardPlayback_AdvanceQueue(pb, current)
+						end
+						-- Phase changed to non-idle — fall through to next tick;
+						-- PlayerUI_ApplyDataContext at the bottom still pushes
+						-- the carried-over visual state for this frame.
+						PlayerUI_ApplyDataContext()
+						return
+					end
+					pb.lastObservedReq = next_req
+				end
+
+				local dispCurrent = PlayerUI_Animate_GetDisplay("reward_progress")
+				local _, _, _, interval = PlayerUI_GetRewardProgressBounds(current, player_civ, next_req)
+				local display_max = math.max(1, interval)
+				
+				-- Log if idle animation is still in-flight (preservation check)
+				local animEntry = _PlayerUI_Anim["reward_progress"]
+				if animEntry and animEntry.display ~= animEntry.target then
+					local now = World_GetGameTime()
+					if not animEntry._lastDriftLog or (now - animEntry._lastDriftLog) >= 0.3 then
+						print("[PLAYERUI_REWARD_IDLE_ANIM] still_moving="
+							.. string.format("%.1f", animEntry.display) .. "->" .. string.format("%.1f", animEntry.target)
+							.. " max=" .. tostring(display_max)
+							.. " kills=" .. tostring(current))
+						animEntry._lastDriftLog = now
+					end
+				else
+					if animEntry then animEntry._lastDriftLog = nil end
+				end
+				
+				dispCurrent = math.max(0, math.min(dispCurrent, display_max))
+				local ratio = math.min(dispCurrent / display_max, 1.0)
+				local pct = math.floor((ratio * 100) + 0.5)
+
+				local fill_color = "#FF4A7A2F"
+				if ratio <= 0.5 then
+					fill_color = _PlayerUI_LerpHexColor("#FF4A7A2F", "#FFC8A832", ratio / 0.5)
+				else
+					fill_color = _PlayerUI_LerpHexColor("#FFC8A832", "#FFFFD700", (ratio - 0.5) / 0.5)
+				end
+
+				local border_color = _PlayerUI_LerpHexColor("#FF5E6989", "#FFFFD700", ratio)
+				local title_color = _PlayerUI_LerpHexColor("#FFCCCCCC", "#FFFFD700", ratio)
+				local label_color = _PlayerUI_LerpHexColor("#FFAAAAAA", "#FFFFD700", ratio)
+				local separator_color = _PlayerUI_LerpHexColor("#FF616C8C", "#FFFFD700", ratio)
+
+				local dispCurrentInt = math.floor(dispCurrent + 0.5)
+				rwd.progress_text = tostring(dispCurrentInt) .. " / " .. tostring(display_max) .. " (" .. tostring(pct) .. "%)"
+				rwd.progress_current = math.min(dispCurrent, display_max)
+				rwd.progress_max = display_max
+
+				ctx.rewardProgressText = rwd.progress_text
+				ctx.rewardProgress_current = rwd.progress_current
+				ctx.rewardProgress_max = rwd.progress_max
+				ctx.rewardBarFillColor = fill_color
+				ctx.rewardBarBorderColor = border_color
+				ctx.rewardNextTitleColor = title_color
+				ctx.rewardProgressLabelColor = label_color
+				ctx.rewardSeparatorColor = separator_color
+			end
+		end
+	end
+
+	-- Push updated context to XAML
+	PlayerUI_ApplyDataContext()
+end
+
+-----------------------------------------------------------------------
+-- Elimination Transition Animation: fade + scale decay
+-----------------------------------------------------------------------
+
+-- Module state: keyed by player index → {active, startTime, duration}
+_PlayerUI_EliminationAnims = {}
+
+function PlayerUI_Animate_IsEliminationTransitionActive(playerIndex)
+	local entry = _PlayerUI_EliminationAnims[playerIndex]
+	return entry ~= nil and entry.active == true
+end
+
+local function _PlayerUI_EliminationStateFromProgress(progress)
+	local p = math.max(0.0, math.min(1.0, progress or 0.0))
+	local opacityMultiplier = 1.0 - ((1.0 - _PLAYERUI_ELIM_ANIM_FADE_TARGET) * p)
+	local easeOutFactor = 1.0 - ((1.0 - p) * (1.0 - p))
+	local scaleFactor = _PLAYERUI_ELIM_ANIM_SCALE_MIN + ((1.0 - _PLAYERUI_ELIM_ANIM_SCALE_MIN) * easeOutFactor)
+	return opacityMultiplier, scaleFactor
+end
+
+function PlayerUI_Animate_ApplyEliminationTransitionFinalVisual(data)
+	if data == nil then
+		return
+	end
+	if PlayerUI_Settings.EnableEliminationDim ~= false then
+		data.rowOpacity = data.IsEliminated and _PLAYERUI_ELIM_ANIM_FADE_TARGET or 1.0
+	else
+		data.rowOpacity = 1.0
+	end
+	data.rowDimFill = _PlayerUI_RowDimFill(data.rowOpacity)
+	-- Strikethrough deferred to presentation reveal (Phase 4)
+	data._elimFirstFrameSeeded = false
+	data.eliminationScaleFactor = 1.0
+	data.eliminationAnimActive = false
+	data.eliminationAnimElapsed = 0.0
+end
+
+-- Trigger animation for player (on first frame of elimination).
+-- Returns: true if animation was triggered/started
+function PlayerUI_Animate_EliminationTransition(playerIndex, duration, data)
+	if _PlayerUI_EliminationAnims[playerIndex] == nil then
+		local animDuration = duration or _PLAYERUI_ELIM_ANIM_DURATION
+		_PlayerUI_EliminationAnims[playerIndex] = {
+			active = true,
+			startTime = World_GetGameTime(),
+			duration = animDuration,
+			lastProgress = 0.0,
+		}
+		if data ~= nil then
+			local seedProgress = math.max(0.0, math.min(_PLAYERUI_ELIM_ANIM_SEED_PROGRESS, 1.0))
+			seedProgress = math.min(seedProgress, _PLAYERUI_ELIM_ANIM_MAX_PROGRESS_STEP)
+			local seedOpacity, seedScale = _PlayerUI_EliminationStateFromProgress(seedProgress)
+			data._elimCompletionFenceCycles = 0
+			data._elimFirstFrameSeeded = true
+			data._elimPresentationReady = false   -- Phase 4.1: block reveal until settle
+			data.eliminationAnimActive = true
+			data.eliminationAnimElapsed = animDuration * seedProgress
+			if PlayerUI_Settings.EnableEliminationDim ~= false then
+				data.rowOpacity = seedOpacity
+			else
+				data.rowOpacity = 1.0
+			end
+			data.rowDimFill = _PlayerUI_RowDimFill(data.rowOpacity)
+			data.eliminationScaleFactor = seedScale
+			_PlayerUI_EliminationAnims[playerIndex].lastProgress = seedProgress
+		end
+		if _PLAYERUI_ELIM_ANIM_DEBUG then
+			print("[PLAYERUI_ELIM_ANIM] Player " .. playerIndex
+				.. ": animation triggered"
+				.. " t=" .. tostring(World_GetGameTime())
+				.. " duration=" .. _PlayerUI_EliminationAnims[playerIndex].duration .. "s"
+				.. " seed=" .. tostring(_PlayerUI_EliminationAnims[playerIndex].lastProgress or 0.0))
+		end
+		if Rule_Exists(_PlayerUI_Animate_Tick) then
+			Rule_Unpause(_PlayerUI_Animate_Tick)
+		end
+		return true
+	end
+	return false
+end
+
+-- Get current animation state for a player (fade multiplier, scale factor, isActive)
+function PlayerUI_Animate_GetEliminationState(playerIndex)
+	local entry = _PlayerUI_EliminationAnims[playerIndex]
+	if entry == nil or not entry.active then
+		return {
+			opacityMultiplier = 1.0,
+			scaleFactor = 1.0,
+			isActive = false,
+			isComplete = false,
+		}
+	end
+
+	local duration = entry.duration
+	if duration == nil or duration <= 0 then
+		duration = _PLAYERUI_ELIM_ANIM_DURATION
+	end
+	local elapsed = math.max(0.0, World_GetGameTime() - entry.startTime)
+	local rawProgress = math.min(1.0, elapsed / duration)
+	local lastProgress = entry.lastProgress or 0.0
+	local maxStep = _PLAYERUI_ELIM_ANIM_MAX_PROGRESS_STEP or 1.0
+	local clampedProgress = math.min(rawProgress, lastProgress + maxStep)
+	if clampedProgress < lastProgress then
+		clampedProgress = lastProgress
+	end
+	if rawProgress >= 1.0 and clampedProgress >= 0.999 then
+		clampedProgress = 1.0
+	end
+	entry.lastProgress = clampedProgress
+
+	local opacityMultiplier, scaleFactor = _PlayerUI_EliminationStateFromProgress(clampedProgress)
+	local isComplete = (clampedProgress >= 1.0)
+	if isComplete and _PLAYERUI_ELIM_ANIM_DEBUG then
+		print("[PLAYERUI_ELIM_ANIM] Player " .. playerIndex
+			.. ": animation complete"
+			.. " t=" .. tostring(World_GetGameTime())
+			.. " elapsed=" .. tostring(elapsed)
+			.. " progress=" .. tostring(clampedProgress))
+	end
+	
+	return {
+		opacityMultiplier = opacityMultiplier,
+		scaleFactor = scaleFactor,
+		isActive = true,
+		isComplete = isComplete,
+	}
+end
+
+-- Clear animation state (called after animation completes or on player leave)
+function PlayerUI_Animate_ClearEliminationAnim(playerIndex)
+	_PlayerUI_EliminationAnims[playerIndex] = nil
+end
+
+-----------------------------------------------------------------------
+-- Elimination Reveal Animation: fade-in for label/icon/overlay
+-- Runs after the dim animation settles. Drives elimRevealOpacity 0→1.
+-----------------------------------------------------------------------
+
+_PlayerUI_EliminationRevealAnims = {}
+
+function PlayerUI_Animate_IsEliminationRevealActive(playerIndex)
+	local entry = _PlayerUI_EliminationRevealAnims[playerIndex]
+	return entry ~= nil and entry.active == true
+end
+
+local function _PlayerUI_RevealStateFromProgress(progress)
+	local p = math.max(0.0, math.min(1.0, progress or 0.0))
+	-- Opacity: linear 0→1
+	local opacity = p
+	return opacity
+end
+
+-- Trigger reveal animation for a player. Called once when dim completes + fence settles.
+-- Returns: true if reveal was triggered
+function PlayerUI_Animate_EliminationReveal(playerIndex, duration, data)
+	if _PlayerUI_EliminationRevealAnims[playerIndex] ~= nil then
+		return false
+	end
+	local revealDuration = duration or _PLAYERUI_ELIM_REVEAL_DURATION
+	_PlayerUI_EliminationRevealAnims[playerIndex] = {
+		active = true,
+		startTime = World_GetGameTime(),
+		duration = revealDuration,
+		lastProgress = 0.0,
+	}
+	if data ~= nil then
+		local seedProgress = math.max(0.0, math.min(_PLAYERUI_ELIM_REVEAL_SEED_PROGRESS, 1.0))
+		seedProgress = math.min(seedProgress, _PLAYERUI_ELIM_REVEAL_MAX_PROGRESS_STEP)
+		local seedOpacity = _PlayerUI_RevealStateFromProgress(seedProgress)
+		data.elimRevealOpacity = seedOpacity
+		_PlayerUI_EliminationRevealAnims[playerIndex].lastProgress = seedProgress
+		_PlayerUI_UpdateElimFills(data)
+	end
+	if _PLAYERUI_ELIM_ANIM_DEBUG then
+		print("[PLAYERUI_ELIM_REVEAL] Player " .. playerIndex
+			.. ": reveal triggered t=" .. tostring(World_GetGameTime())
+			.. " duration=" .. tostring(revealDuration) .. "s")
+	end
+	if Rule_Exists(_PlayerUI_Animate_Tick) then
+		Rule_Unpause(_PlayerUI_Animate_Tick)
+	end
+	return true
+end
+
+-- Get current reveal animation state for a player
+function PlayerUI_Animate_GetEliminationRevealState(playerIndex)
+	local entry = _PlayerUI_EliminationRevealAnims[playerIndex]
+	if entry == nil or not entry.active then
+		return { opacity = 1.0, isActive = false, isComplete = false }
+	end
+	local duration = entry.duration
+	if duration == nil or duration <= 0 then
+		duration = _PLAYERUI_ELIM_REVEAL_DURATION
+	end
+	local elapsed = math.max(0.0, World_GetGameTime() - entry.startTime)
+	local rawProgress = math.min(1.0, elapsed / duration)
+	local lastProgress = entry.lastProgress or 0.0
+	local maxStep = _PLAYERUI_ELIM_REVEAL_MAX_PROGRESS_STEP or 1.0
+	local clampedProgress = math.min(rawProgress, lastProgress + maxStep)
+	if clampedProgress < lastProgress then
+		clampedProgress = lastProgress
+	end
+	if rawProgress >= 1.0 and clampedProgress >= 0.999 then
+		clampedProgress = 1.0
+	end
+	entry.lastProgress = clampedProgress
+	local opacity = _PlayerUI_RevealStateFromProgress(clampedProgress)
+	local isComplete = (clampedProgress >= 1.0)
+	if isComplete and _PLAYERUI_ELIM_ANIM_DEBUG then
+		print("[PLAYERUI_ELIM_REVEAL] Player " .. playerIndex
+			.. ": reveal complete t=" .. tostring(World_GetGameTime()))
+	end
+	return { opacity = opacity, isActive = true, isComplete = isComplete }
+end
+
+function PlayerUI_Animate_ClearEliminationReveal(playerIndex)
+	_PlayerUI_EliminationRevealAnims[playerIndex] = nil
+end
+
+-----------------------------------------------------------------------
+-- Elimination Glow Pulse: brief colour flash decaying from peak → 0.
+-- Runs concurrently with reveal. Drives elimGlowOpacity peak→0.
+-----------------------------------------------------------------------
+
+_PlayerUI_EliminationGlowAnims = {}
+
+function PlayerUI_Animate_IsEliminationGlowActive(playerIndex)
+	local entry = _PlayerUI_EliminationGlowAnims[playerIndex]
+	return entry ~= nil and entry.active == true
+end
+
+local function _PlayerUI_GlowOpacityFromProgress(progress)
+	local p = math.max(0.0, math.min(1.0, progress or 0.0))
+	-- Inverse: peak at 0 progress, zero at 1.0 progress (decay curve)
+	return _PLAYERUI_ELIM_GLOW_PEAK_OPACITY * (1.0 - p)
+end
+
+-- Trigger glow pulse for a player. Called once at reveal time.
+function PlayerUI_Animate_EliminationGlow(playerIndex, duration, data)
+	if _PlayerUI_EliminationGlowAnims[playerIndex] ~= nil then
+		return false
+	end
+	local glowDuration = duration or _PLAYERUI_ELIM_GLOW_DURATION
+	_PlayerUI_EliminationGlowAnims[playerIndex] = {
+		active = true,
+		startTime = World_GetGameTime(),
+		duration = glowDuration,
+		lastProgress = 0.0,
+	}
+	if data ~= nil then
+		local seedProgress = math.max(0.0, math.min(_PLAYERUI_ELIM_GLOW_SEED_PROGRESS, 1.0))
+		seedProgress = math.min(seedProgress, _PLAYERUI_ELIM_GLOW_MAX_PROGRESS_STEP)
+		data.elimGlowOpacity = _PlayerUI_GlowOpacityFromProgress(seedProgress)
+		_PlayerUI_EliminationGlowAnims[playerIndex].lastProgress = seedProgress
+		_PlayerUI_UpdateElimFills(data)
+	end
+	if _PLAYERUI_ELIM_ANIM_DEBUG then
+		print("[PLAYERUI_ELIM_GLOW] Player " .. playerIndex
+			.. ": glow triggered t=" .. tostring(World_GetGameTime())
+			.. " duration=" .. tostring(glowDuration) .. "s")
+	end
+	if Rule_Exists(_PlayerUI_Animate_Tick) then
+		Rule_Unpause(_PlayerUI_Animate_Tick)
+	end
+	return true
+end
+
+-- Get current glow animation state for a player
+function PlayerUI_Animate_GetEliminationGlowState(playerIndex)
+	local entry = _PlayerUI_EliminationGlowAnims[playerIndex]
+	if entry == nil or not entry.active then
+		return { opacity = 0.0, isActive = false, isComplete = false }
+	end
+	local duration = entry.duration
+	if duration == nil or duration <= 0 then
+		duration = _PLAYERUI_ELIM_GLOW_DURATION
+	end
+	local elapsed = math.max(0.0, World_GetGameTime() - entry.startTime)
+	local rawProgress = math.min(1.0, elapsed / duration)
+	local lastProgress = entry.lastProgress or 0.0
+	local maxStep = _PLAYERUI_ELIM_GLOW_MAX_PROGRESS_STEP or 1.0
+	local clampedProgress = math.min(rawProgress, lastProgress + maxStep)
+	if clampedProgress < lastProgress then
+		clampedProgress = lastProgress
+	end
+	if rawProgress >= 1.0 and clampedProgress >= 0.999 then
+		clampedProgress = 1.0
+	end
+	entry.lastProgress = clampedProgress
+	local opacity = _PlayerUI_GlowOpacityFromProgress(clampedProgress)
+	local isComplete = (clampedProgress >= 1.0)
+	if isComplete and _PLAYERUI_ELIM_ANIM_DEBUG then
+		print("[PLAYERUI_ELIM_GLOW] Player " .. playerIndex
+			.. ": glow complete t=" .. tostring(World_GetGameTime()))
+	end
+	return { opacity = opacity, isActive = true, isComplete = isComplete }
+end
+
+function PlayerUI_Animate_ClearEliminationGlow(playerIndex)
+	_PlayerUI_EliminationGlowAnims[playerIndex] = nil
+end
+
+-----------------------------------------------------------------------
+-- Reset: tear down the tick rule and clear state (game end / restart)
+-----------------------------------------------------------------------
+
+function PlayerUI_Animate_Reset()
+	if Rule_Exists(_PlayerUI_Animate_Tick) then
+		Rule_Remove(_PlayerUI_Animate_Tick)
+	end
+	_PlayerUI_Anim = {}
+	_PlayerUI_AnimDirty = false
+	_PlayerUI_AnimPositions = {}
+	_PlayerUI_AnimPositionsDirty = false
+	_PlayerUI_AnimDecay = {}
+	_PlayerUI_ScorePulse = {}
+	_PlayerUI_EliminationAnims = {}
+	_PlayerUI_EliminationRevealAnims = {}
+	_PlayerUI_EliminationGlowAnims = {}
+end
