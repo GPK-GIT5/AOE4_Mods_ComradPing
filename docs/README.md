@@ -29,4 +29,3 @@ Six top-level documentation trees plus two runtime-folder mirrors. Start here if
 - [github/README.md](github/README.md) — public summary of private GitHub/automation materials
 - [skills/README.md](skills/README.md) — public summary of private Copilot skills
 - [game_data/README.md](game_data/README.md) — data-reference documentation and extraction notes
-- [research/README.md](../research/README.md) — investigations, audits, AI sessions

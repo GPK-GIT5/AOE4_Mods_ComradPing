@@ -28,7 +28,6 @@ Every folder below links to its navigation entry point. The `Gamemodes/` and `Sc
 | `Scenarios/` | [docs/scenarios/README.md](docs/scenarios/README.md) | Scenario SCAR scripts for custom coop maps |
 | [`docs/`](docs/README.md) | [docs/README.md](docs/README.md) | All reference and design documentation: `api_reference/`, `game_systems/`, `development_guides/`, `design_notes/`, `project_overview/` |
 | [`docs/game_data/`](docs/game_data/README.md) | [docs/game_data/README.md](docs/game_data/README.md) | Public data-reference docs and extraction workflow notes |
-| [`research/`](research/README.md) | [research/README.md](research/README.md) | Investigations, audits, AI session notes, experiments, design assumptions |
 | [`docs/github/`](docs/github/README.md) | [docs/github/README.md](docs/github/README.md) | Public summary of GitHub/private-workspace automation boundaries |
 | [`docs/skills/`](docs/skills/README.md) | [docs/skills/README.md](docs/skills/README.md) | Public summary of private Copilot skill packages and usage boundaries |
 | `Temporary/` | — | Untracked scratch space — AI processing, raw extractions, debug outputs, discarded runs (gitignored) |

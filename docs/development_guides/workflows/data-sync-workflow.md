@@ -97,7 +97,7 @@ Use this when a `WORTH-MANUAL-CHECK` finding appears or when validating a balanc
 2. Open `https://aoe4labs.com/` combat simulator — verify damage/EHP under standard attackers.
 3. If still ambiguous, search `game_data/extracted/aoe4/scar_dump/scar gameplay/cardinal.scar` and `Gameplay_data_duplicate/.../ebps/races/<race>/units/<unit>.xml` for the raw value.
 4. Fandom wiki only as a last resort for narrative-only fields (e.g., proximity tooltips).
-5. Record any cross-check findings under `research/investigations/audits/source-cross-check-<date>.md`.
+5. Record any cross-check findings under `docs/project_overview/changelog/<date>_source-cross-check.md`.
 
 ## Known limitations (today)
 
