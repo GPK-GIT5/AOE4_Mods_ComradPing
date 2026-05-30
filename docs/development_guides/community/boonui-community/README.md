@@ -573,7 +573,6 @@ migration checklist used by the Onslaught gamemode, see
 [`docs/game_systems/systems/mp-deterministic-mutation-pattern.md`](../../../game_systems/systems/mp-deterministic-mutation-pattern.md)
 in this workspace.
 
-The single best official example to mirror is `chart_a_course.scar` from the
-base-game script dump (not published in this public workspace). For local
-extraction context and acquisition notes, see
-[`docs/game_data/README.md`](../../../game_data/README.md).
+The single best official example to mirror is `chart_a_course.scar` from a
+local extraction of the game data. For extraction context and acquisition
+notes, see [`docs/game_data/README.md`](../../../game_data/README.md).

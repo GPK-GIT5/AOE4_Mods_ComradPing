@@ -26,7 +26,7 @@ Drop-in pop-up menu (1–4 selectable cards) for AoE IV SCAR mods.
    Rule_AddOneShot(Example_WelcomeBonus, 5.0)
    ```
 
-That's it. See [../README.md](../README.md) for the full
+That's it. See [../boonui-guide.md](../boonui-guide.md) for the full
 beginner-friendly walkthrough, templates, and troubleshooting.
 
 ## The minimum API

@@ -11,7 +11,7 @@
 -- options table:
 --   .title        : string — Header text
 --   .subtitle     : string — Subheader text (optional)
---   .choices      : array of { title, unit, desc, icon } (1-3 entries)
+--   .choices      : array of { title, unit, desc, icon } (1-4 entries)
 --   .on_select    : function(choice_index) — Called when player clicks a card
 --   .timeout      : number — Seconds before auto-select (0 = no timeout)
 --   .default_choice : number — Index for timeout fallback (default 1)
