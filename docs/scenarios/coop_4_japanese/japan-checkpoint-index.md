@@ -9,19 +9,12 @@
 
 ### Start Here
 - [japan-checkpoint-summary.md](japan-checkpoint-summary.md) — Overview + next steps
-- [japan-checkpoint-stage3.md](japan-checkpoint-stage3.md) — Detailed checkpoint log
-
-### Technical Details
-- [japan-checkpoint-stage3-manifest.md](japan-checkpoint-stage3-manifest.md) — Line-by-line file breakdown
-- [CHECKPOINT-STAGE3-HASHES.json](CHECKPOINT-STAGE3-HASHES.json) — SHA256 checksums
-
-### Stage Documentation
-- [japan-stage1-summary.md](japan-stage1-summary.md) — Stage 1: Resolver + Composition Maps
-- [japan-stage2-summary.md](japan-stage2-summary.md) — Stage 2: Registry + Data-Driven Restrictions
 - [japan-stage4-restriction.md](japan-stage4-restriction.md) — Stage 4 audit + plan
 
-### Reference
-- [MOD-INDEX.md](MOD-INDEX.md) — Reference copy (preferred for Copilot)
+### Technical Details
+- [CHECKPOINT-STAGE3-HASHES.json](CHECKPOINT-STAGE3-HASHES.json) — SHA256 checksums
+
+> **Note:** Stage 1–3 checkpoint logs and manifests (stage1-summary, stage2-summary, stage3, stage3-manifest) were removed. Integrity checksums above remain for reference.
 
 ---
 
@@ -39,16 +32,12 @@
 
 ### Persisted Documentation
 
-**4 Checkpoint Files Created:**
-1. japan-checkpoint-stage3.md — Main checkpoint log
-2. japan-checkpoint-summary.md — Build summary + verification
-3. japan-checkpoint-stage3-manifest.md — File-by-file breakdown
-4. CHECKPOINT-STAGE3-HASHES.json — Cryptographic integrity
-
-**3 Stage Guides:**
-1. japan-stage1-summary.md — Stage 1 reference
-2. japan-stage2-summary.md — Stage 2 reference + audit
+**Active Checkpoint Files:**
+1. japan-checkpoint-summary.md — Build summary + verification
+2. CHECKPOINT-STAGE3-HASHES.json — Cryptographic integrity
 3. japan-stage4-restriction.md — Stage 4 audit + plan
+
+> Stage 1–3 detail logs and manifests removed. See SHA256 checksums below for integrity verification.
 
 ---
 
@@ -143,18 +132,16 @@ if ($actual -eq $expected) { "✅ main.scar OK" } else { "⚠️ CHANGED" }
 ## 📖 How to Use This Checkpoint
 
 ### For Reference
-1. When adding a new DLC civ, follow the registration pattern in japan-checkpoint-stage3-manifest.md
+1. When adding a new DLC civ, follow the `AGS_ENTITY_TABLE` / `ResolveCivKey` pattern documented in `coop_4_japanese_data.scar`
 2. When adding a restriction, add to BALANCE_LOCKS registry (and document why)
 3. When testing, use Simulate_PlayerProgression() + Validator_RestrictionState()
 
 ### For Rollback
-1. Follow "How to Undo" in japan-checkpoint-stage3.md
-2. Restore from SHA256 checksum comparison if unsure which files changed
+1. Restore from SHA256 checksum comparison if unsure which files changed
 
 ### For Future Stages
 1. Read japan-checkpoint-summary.md for Stage 4 status
-2. Use japan-checkpoint-stage3-manifest.md to understand current code organization
-3. Reference japan-stage4-restriction.md for restriction audit context
+2. Reference japan-stage4-restriction.md for restriction audit context
 
 ---
 
@@ -177,18 +164,13 @@ if ($actual -eq $expected) { "✅ main.scar OK" } else { "⚠️ CHANGED" }
 ## Files in This Checkpoint
 
 ```
-reference/mods/japan_reference/
-├── japan-checkpoint-stage3.md                 ← Main checkpoint log
+docs/scenarios/coop_4_japanese/
 ├── japan-checkpoint-summary.md                ← Build summary
-├── CHECKPOINT-STAGE3-HASHES.json        ← SHA256 verification
-├── japan-checkpoint-stage3-manifest.md        ← File breakdown
+├── CHECKPOINT-STAGE3-HASHES.json              ← SHA256 verification
 ├── japan-checkpoint-index.md                  ← This file
-│
-├── japan-stage1-summary.md              ← Stage 1 reference
-├── japan-stage2-summary.md              ← Stage 2 reference + audit
-├── japan-stage4-restriction.md          ← Stage 4 audit + plan
-│
-└── (other reference files)
+├── japan-stage4-restriction.md                ← Stage 4 audit + plan
+├── japan-guide-api-reference.md               ← API reference
+└── japan-archive-refactor-log.md              ← Refactor history
 
 mods/Japan/assets/scenarios/multiplayer/coop_4_japanese/
 ├── coop_4_japanese.scar                 ← Main (modified)

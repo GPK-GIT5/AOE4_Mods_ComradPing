@@ -374,10 +374,8 @@ end
 
 ## 📖 Related Documentation
 
-- [japan-stage1-summary.md](japan-stage1-summary.md) — Resolver architecture
-- [japan-stage2-summary.md](japan-stage2-summary.md) — Helpers + audit
-- [japan-stage3-summary.md](japan-stage3-summary.md) — Profiles + validation
-- [MOD-INDEX.md](MOD-INDEX.md) — Reference copy (preferred for Copilot)
+- [japan-checkpoint-index.md](japan-checkpoint-index.md) — Stage status snapshots and checksums
+- [japan-stage4-restriction.md](japan-stage4-restriction.md) — Restriction audit + plan
 
 ---
 

@@ -165,11 +165,11 @@ print("[TEST-S4c] balance_locks_honored: " .. (Validator_RestrictionParity().ok 
 
 ## Existing Reference Documentation
 
-**Checkpoint Files (Stages 1–3):**
-- `docs/scenarios/coop_4_japanese/japan-checkpoint-stage3.md` — Detailed rollback guide + verification steps
+**Checkpoint Files:**
 - `docs/scenarios/coop_4_japanese/CHECKPOINT-STAGE3-HASHES.json` — SHA256 checksums for integrity
-- `docs/scenarios/coop_4_japanese/japan-checkpoint-stage3-manifest.md` — Line-by-line file breakdown
 - `docs/scenarios/coop_4_japanese/japan-guide-api-reference.md` — Function quick reference
+
+> Stage 1–3 detail logs (`japan-checkpoint-stage3.md`, `japan-checkpoint-stage3-manifest.md`) were removed.
 
 **Configuration:**
 - `.github/copilot-instructions.md` — Console-only mode rules + mandatory constraints (80 lines)
@@ -229,7 +229,7 @@ print(Validator_RestrictionState() and "PASS" or "FAIL")
 
 ## Cross-References
 
-- **Stage 1-2 Implementation:** See japan-checkpoint-stage3.md for integration points + file edits
+- **Stage 1-2 Implementation:** See `coop_4_japanese_data.scar` for integration points (AGS_ENTITY_TABLE, IsCivFamily helpers)
 - **DLC Resolver Architecture:** See japan-guide-api-reference.md for AGS_GetCivilizationEntity, IsCivFamily, etc.
 - **Console Safety Rules:** See .github/copilot-instructions.md for all AoE4 Console Command Generation constraints
 - **Test Session Logs:** 

@@ -13,7 +13,7 @@ Auto-generated on 2026-04-02 05:31. Total functions: **1746**
 - **specials**: 29 functions across 3 files
 - **startconditions**: 18 functions across 2 files
 
-Visibility: **1178** public, **419** private (_ prefix), **149** local
+Visibility: **1266** public, **331** private (_ prefix), **149** local
 
 ## conditions
 
@@ -1127,7 +1127,7 @@ Visibility: **1178** public, **419** private (_ prefix), **149** local
 
 | Line | Function | Params | Visibility |
 |------|----------|--------|------------|
-| 16 | `_CeilTo5` | n | private |
+| 16 | `_CeilTo5` | n | public |
 | 25 | `AGS_TeamBalance_UpdateModuleSettings` | — | public |
 | 32 | `AGS_TeamBalance_OnPlayerDefeated` | player, reason | public |
 | 41 | `AGS_TeamBalance_UpdateTeam` | player | public |
@@ -1210,7 +1210,7 @@ Visibility: **1178** public, **419** private (_ prefix), **149** local
 | 34 | `CBA_Options_ShouldLogSiegeStateChange` | player, key, state | public |
 | 45 | `CBA_Options_UpdateModuleSettings` | — | public |
 | 53 | `CBA_Options_PresetFinalize` | — | public |
-| 136 | `_BuildBlueprintReverseMap` | — | private |
+| 136 | `_BuildBlueprintReverseMap` | — | public |
 | 165 | `CBA_Options_GetPlayerProdLimit` | player | public |
 | 170 | `CBA_Options_GetWorkshopLimit` | — | public |
 | 177 | `CBA_Options_GetPlayerWorkshopLimit` | player | public |
@@ -1283,7 +1283,7 @@ Visibility: **1178** public, **419** private (_ prefix), **149** local
 | 2771 | `CBA_Options_RamLimit_Recount` | player | public |
 | 2838 | `CBA_Options_SiegeTowerLimit_Recount` | player | public |
 | 2894 | `_CBA_Options_ForEachQueueSpawnItem` | player, callback | local |
-| 2918 | `_CBA_Options_GetAllQueuedCounts` | player | private |
+| 2918 | `_CBA_Options_GetAllQueuedCounts` | player | public |
 | 2940 | `CBA_Options_RamLimit_GetQueuedCount` | player | public |
 | 2955 | `CBA_Options_SiegeTowerLimit_GetQueuedCount` | player | public |
 | 2966 | `CBA_Options_RamLimit_TrimQueue` | player, opt_ram_queued | public |
@@ -1443,10 +1443,10 @@ Visibility: **1178** public, **419** private (_ prefix), **149** local
 | 63 | `ObserverUiRuleSystem:AddUpdateUiDataContextForPlayerRule` | playerId, rule | public |
 | 67 | `ObserverUiRuleSystem:AddUpdateUiDataContextRule` | rule | public |
 | 71 | `ObserverUiRuleSystem:AddApplyUiDataContextRule` | rule | public |
-| 75 | `_NoOp` | — | private |
-| 79 | `_OneRuleToRingThemAll_TrackAlways` | — | private |
-| 84 | `_OneRuleToRingThemAll_OnlyTrackWhenUpdatingUi` | — | private |
-| 88 | `_OneRuleToRingThemAll` | updateUi | private |
+| 75 | `_NoOp` | — | public |
+| 79 | `_OneRuleToRingThemAll_TrackAlways` | — | public |
+| 84 | `_OneRuleToRingThemAll_OnlyTrackWhenUpdatingUi` | — | public |
+| 88 | `_OneRuleToRingThemAll` | updateUi | public |
 | 111 | `ObserverUiRuleSystem:_InitializeDataStructure` | playerId | public |
 | 119 | `routerForSquads` | group, index, squad | local |
 | 129 | `routerForEntities` | group, index, entity | local |
@@ -1597,7 +1597,7 @@ Visibility: **1178** public, **419** private (_ prefix), **149** local
 | 15 | `onSquadKilledRule` | context | local |
 | 34 | `SquadLosses:InitializePerPlayer` | i | public |
 | 43 | `SquadLosses:Reset` | — | public |
-| 47 | `_OnSquadKilledRule` | context | private |
+| 47 | `_OnSquadKilledRule` | context | public |
 
 ### observerui/tracking_towncenteridling.scar
 
@@ -1681,17 +1681,17 @@ Visibility: **1178** public, **419** private (_ prefix), **149** local
 
 | Line | Function | Params | Visibility |
 |------|----------|--------|------------|
-| 86 | `_PlayerUI_SafeElapsed` | pb, gameTime | private |
-| 102 | `_PlayerUI_EaseOut` | t | private |
-| 108 | `_PlayerUI_EaseIn` | t | private |
-| 114 | `_PlayerUI_EaseInOut` | t | private |
-| 124 | `_PlayerUI_SafeQueueEntry` | queue, index | private |
-| 141 | `_PlayerUI_ValidateHexColor` | colorStr | private |
-| 153 | `_PlayerUI_EnsureRewardsContext` | — | private |
-| 166 | `_PlayerUI_SetIfChanged` | t, k, v | private |
-| 186 | `_PlayerUI_GetOffsetXMargin` | offsetX | private |
-| 203 | `_PlayerUI_GetStripOffsetMargin` | offsetX | private |
-| 224 | `_PlayerUI_LerpHexColor` | colorA, colorB, t | private |
+| 86 | `_PlayerUI_SafeElapsed` | pb, gameTime | public |
+| 102 | `_PlayerUI_EaseOut` | t | public |
+| 108 | `_PlayerUI_EaseIn` | t | public |
+| 114 | `_PlayerUI_EaseInOut` | t | public |
+| 124 | `_PlayerUI_SafeQueueEntry` | queue, index | public |
+| 141 | `_PlayerUI_ValidateHexColor` | colorStr | public |
+| 153 | `_PlayerUI_EnsureRewardsContext` | — | public |
+| 166 | `_PlayerUI_SetIfChanged` | t, k, v | public |
+| 186 | `_PlayerUI_GetOffsetXMargin` | offsetX | public |
+| 203 | `_PlayerUI_GetStripOffsetMargin` | offsetX | public |
+| 224 | `_PlayerUI_LerpHexColor` | colorA, colorB, t | public |
 | 240 | `PlayerUI_Animate_Debug_ResetEliminationDiag` | — | public |
 | 252 | `PlayerUI_Animate_Debug_PrintEliminationDiag` | — | public |
 | 263 | `PlayerUI_Animate_GetEliminationLastProgress` | playerIndex | public |
@@ -1699,7 +1699,7 @@ Visibility: **1178** public, **419** private (_ prefix), **149** local
 | 319 | `PlayerUI_Animate_Init` | — | public |
 | 339 | `PlayerUI_Animate_SetTarget` | key, value, easing | public |
 | 377 | `PlayerUI_Animate_GetDisplay` | key | public |
-| 392 | `_PlayerUI_Animate_Tick` | — | private |
+| 392 | `_PlayerUI_Animate_Tick` | — | public |
 | 646 | `PlayerUI_Animate_SetPosition` | key, value | public |
 | 657 | `PlayerUI_Animate_SetPositionTarget` | key, target | public |
 | 673 | `PlayerUI_Animate_GetPosition` | key | public |
@@ -1709,11 +1709,11 @@ Visibility: **1178** public, **419** private (_ prefix), **149** local
 | 710 | `PlayerUI_Animate_GetDecay` | key | public |
 | 719 | `PlayerUI_Animate_TriggerScorePulse` | playerIndex, newScore | public |
 | 742 | `_PlayerUI_GlowFill` | opacity | local |
-| 750 | `_PlayerUI_RowDimFill` | opacity | private |
+| 750 | `_PlayerUI_RowDimFill` | opacity | public |
 | 758 | `_PlayerUI_NormalizeBorderColor` | color | local |
-| 770 | `_PlayerUI_SmoothRewardIcons` | newIcons | private |
-| 895 | `_PlayerUI_TickRewardIconSmoothing` | — | private |
-| 988 | `_PlayerUI_FillPreviewSlots` | icons, player, pb, excludeMilestone | private |
+| 770 | `_PlayerUI_SmoothRewardIcons` | newIcons | public |
+| 895 | `_PlayerUI_TickRewardIconSmoothing` | — | public |
+| 988 | `_PlayerUI_FillPreviewSlots` | icons, player, pb, excludeMilestone | public |
 | 1023 | `PlayerUI_Animate_ApplyDisplayValues` | — | public |
 | 1550 | `PlayerUI_Animate_IsEliminationTransitionActive` | playerIndex | public |
 | 1555 | `_PlayerUI_EliminationStateFromProgress` | progress | local |
@@ -1748,23 +1748,23 @@ Visibility: **1178** public, **419** private (_ prefix), **149** local
 | Line | Function | Params | Visibility |
 |------|----------|--------|------------|
 | 66 | `_PlayerUI_Ranking_LogLock` | msg | local |
-| 72 | `_Ranking_HasActiveEliminationSettleWindow` | — | private |
+| 72 | `_Ranking_HasActiveEliminationSettleWindow` | — | public |
 | 96 | `PlayerUI_Ranking_Init` | — | public |
-| 121 | `_Ranking_BuildTeamState` | teamKey, teamSlots | private |
-| 152 | `_Ranking_ComputePulseWindowEndTime` | now, period | private |
-| 156 | `_Ranking_DebugInjectOneUpdate` | teamKey, rows | private |
+| 121 | `_Ranking_BuildTeamState` | teamKey, teamSlots | public |
+| 152 | `_Ranking_ComputePulseWindowEndTime` | now, period | public |
+| 156 | `_Ranking_DebugInjectOneUpdate` | teamKey, rows | public |
 | 169 | `PlayerUI_Ranking_Update` | — | public |
-| 179 | `_Ranking_UpdateTeam` | teamKey, teamSlots, gameTime | private |
-| 365 | `_Ranking_PinTopPlayer` | sorted, gameTime | private |
-| 410 | `_Ranking_UpdateContestedFlags` | entries | private |
-| 432 | `_Ranking_ComputePredictions` | entries | private |
-| 487 | `_Ranking_WriteFieldsToSlots` | entries | private |
-| 724 | `_Ranking_ProcessDeferredTarget` | — | private |
-| 734 | `_Ranking_CleanStaleAnimKeys` | teamKey, teamSize | private |
-| 751 | `_Ranking_StartFlipAnimation` | teamKey, sorted, movers | private |
-| 812 | `_Ranking_ReorderDataContextArrays` | teamKey, sorted | private |
-| 842 | `_Ranking_GetOffsetMargin` | translateY | private |
-| 867 | `_Ranking_CheckTransitionConverged` | — | private |
+| 179 | `_Ranking_UpdateTeam` | teamKey, teamSlots, gameTime | public |
+| 365 | `_Ranking_PinTopPlayer` | sorted, gameTime | public |
+| 410 | `_Ranking_UpdateContestedFlags` | entries | public |
+| 432 | `_Ranking_ComputePredictions` | entries | public |
+| 487 | `_Ranking_WriteFieldsToSlots` | entries | public |
+| 724 | `_Ranking_ProcessDeferredTarget` | — | public |
+| 734 | `_Ranking_CleanStaleAnimKeys` | teamKey, teamSize | public |
+| 751 | `_Ranking_StartFlipAnimation` | teamKey, sorted, movers | public |
+| 812 | `_Ranking_ReorderDataContextArrays` | teamKey, sorted | public |
+| 842 | `_Ranking_GetOffsetMargin` | translateY | public |
+| 867 | `_Ranking_CheckTransitionConverged` | — | public |
 | 933 | `PlayerUI_Ranking_ApplyAnimatedFields` | — | public |
 | 1104 | `PlayerUI_Ranking_Reset` | — | public |
 | 1117 | `PlayerUI_Ranking_DebugForceSwap` | teamKey, idx1, idx2 | public |
@@ -1778,7 +1778,7 @@ Visibility: **1178** public, **419** private (_ prefix), **149** local
 | 1648 | `PlayerUI_Ranking_DebugSetScore` | teamKey, idx, newScore | public |
 | 1677 | `PlayerUI_Debug_PredictionSnapshot` | tag, playerIndex | public |
 | 1788 | `PlayerUI_Debug_ForceWaitAudit` | caseName, waitSeconds | public |
-| 1811 | `_PlayerUI_Debug_FWA_DeferredAudit` | — | private |
+| 1811 | `_PlayerUI_Debug_FWA_DeferredAudit` | — | public |
 | 1839 | `PlayerUI_Debug_PredictionDiagnostics` | — | public |
 | 1871 | `PlayerUI_Ranking_DebugTestPredictions` | — | public |
 | 1989 | `PlayerUI_Debug_SystemStatus` | — | public |
@@ -1801,8 +1801,8 @@ Visibility: **1178** public, **419** private (_ prefix), **149** local
 | 80 | `PlayerUiRuleSystem:AddUpdateUiDataContextForPlayerRule` | playerId, rule | public |
 | 84 | `PlayerUiRuleSystem:AddUpdateUiDataContextRule` | rule | public |
 | 88 | `PlayerUiRuleSystem:AddApplyUiDataContextRule` | rule | public |
-| 96 | `_PlayerUI_NoOp` | — | private |
-| 104 | `_PlayerUI_RingRule` | — | private |
+| 96 | `_PlayerUI_NoOp` | — | public |
+| 104 | `_PlayerUI_RingRule` | — | public |
 | 131 | `PlayerUiRuleSystem:_InitializeDataStructure` | playerId | public |
 | 142 | `routerForSquads` | group, index, squad | local |
 | 153 | `routerForEntities` | group, index, entity | local |
@@ -1813,21 +1813,21 @@ Visibility: **1178** public, **419** private (_ prefix), **149** local
 | Line | Function | Params | Visibility |
 |------|----------|--------|------------|
 | 18 | `PlayerUI_ResetEliminationPresentationState` | — | public |
-| 54 | `_PlayerUI_GetEliminationPresentationKey` | isEliminated, showEliminationPresentation, eliminationReason | private |
-| 70 | `_PlayerUI_ApplyEliminationPresentationIfChanged` | data, presentationKey | private |
-| 168 | `_PlayerUI_GetEliminationSteadyVisualKey` | isEliminated, dimEnabled | private |
-| 178 | `_PlayerUI_ApplyEliminationSteadyVisualIfChanged` | data, steadyVisualKey | private |
+| 54 | `_PlayerUI_GetEliminationPresentationKey` | isEliminated, showEliminationPresentation, eliminationReason | public |
+| 70 | `_PlayerUI_ApplyEliminationPresentationIfChanged` | data, presentationKey | public |
+| 168 | `_PlayerUI_GetEliminationSteadyVisualKey` | isEliminated, dimEnabled | public |
+| 178 | `_PlayerUI_ApplyEliminationSteadyVisualIfChanged` | data, steadyVisualKey | public |
 | 186 | `setIfChanged` | t, k, v | public |
 | 214 | `PlayerUI_Debug_PrintEliminationSnapshot` | index | public |
 | 247 | `_PlayerUI_Debug_GetAnimEntryValue` | key, field, fallback | local |
 | 259 | `_PlayerUI_Debug_GetDecayValue` | key | local |
 | 267 | `PlayerUI_Debug_PrintFullSnapshot` | index | public |
-| 344 | `_PlayerUI_IsEliminationAnimationActive` | index | private |
+| 344 | `_PlayerUI_IsEliminationAnimationActive` | index | public |
 | 351 | `PlayerUI_UpdateEliminationPresentationForIndex` | index, playersEntryOverride | public |
 | 443 | `PlayerUI_AdaptIconPathForXaml` | iconPath | public |
-| 481 | `_PlayerUI_LerpColor` | c1, c2, t | private |
-| 488 | `_PlayerUI_GetScoreColor` | score | private |
-| 500 | `_PlayerUI_GetScoreGlowTier` | score | private |
+| 481 | `_PlayerUI_LerpColor` | c1, c2, t | public |
+| 488 | `_PlayerUI_GetScoreColor` | score | public |
+| 500 | `_PlayerUI_GetScoreGlowTier` | score | public |
 | 510 | `PlayerUI_InitializeDataContext` | — | public |
 | 629 | `PlayerUI_UpdateDataContext` | — | public |
 | 873 | `PlayerUI_GetElapsedTimeDisplay` | — | public |
@@ -2148,46 +2148,46 @@ Visibility: **1178** public, **419** private (_ prefix), **149** local
 | 1364 | `CBA_Options_SiegeLimit_Cancel_filter` | siege_limit, player | public |
 | 1409 | `CBA_Options_SiegeLimit_BuildItemComplete` | context | public |
 | 1529 | `CBA_Options_SiegeLimit_SquadKilled` | context | public |
-| 1627 | `_Leaver_WarmupPrecache` | — | private |
-| 1745 | `_Leaver_IsAlwaysPrecacheBP` | bp_name | private |
-| 1752 | `_Leaver_PrecacheSelectedBuildings` | active_player_ids | private |
-| 1793 | `_Leaver_GetRequiredAgeForBP` | bp_name | private |
-| 1807 | `_Leaver_IsPrecacheRequiredForReceiver` | bp_name, player_id | private |
-| 1829 | `_Leaver_RuntimeTrackPrecache` | bp_name, player_id, context, route_label | private |
-| 1887 | `_Leaver_BuildPrecacheManifest` | — | private |
-| 2125 | `_Leaver_GetMilitarySuffix` | civ | private |
-| 2157 | `_Leaver_IsSpawnerExemptBP` | bp_name | private |
-| 2172 | `_Leaver_MeetsAgeRequirement` | bp_name, ags_key, player_id, context | private |
-| 2259 | `_Leaver_ResolveUpgradeBP` | player_id, upgrade_key | private |
-| 2281 | `_Leaver_PlayerHasUpgradeCached` | player_id, upgrade_key | private |
-| 2302 | `_Leaver_MeetsCapabilityRequirement` | bp_name, ags_key, player_id, context | private |
-| 2496 | `_Leaver_GetUnitRole` | sbp_name | private |
-| 2615 | `_Leaver_IsCivUniqueFallbackCandidate` | sbp_name | private |
-| 2627 | `_Leaver_GetCivUniquePolicy` | sbp_name | private |
-| 2639 | `_Leaver_IsNeutralOrTransferOnlySquad` | squad, sbp_name | private |
-| 2652 | `_ResolveReceiverClassFallback` | sbp_name, rcv_civ | private |
-| 2734 | `_ResolveGenericArchetypeFallback` | sbp_name, rcv_civ | private |
-| 2766 | `_Leaver_GetReverseMapKey` | bp_name | private |
-| 2788 | `_ResolveFallbackSquadBP` | sbp_name, rcv_civ | private |
-| 2822 | `_ResolveMilitarySquadBP` | sbp_name, src_civ, rcv_civ | private |
-| 2860 | `_ResolveMilitaryRoute` | sbp_name, src_civ, rcv_civ | private |
+| 1627 | `_Leaver_WarmupPrecache` | — | public |
+| 1745 | `_Leaver_IsAlwaysPrecacheBP` | bp_name | public |
+| 1752 | `_Leaver_PrecacheSelectedBuildings` | active_player_ids | public |
+| 1793 | `_Leaver_GetRequiredAgeForBP` | bp_name | public |
+| 1807 | `_Leaver_IsPrecacheRequiredForReceiver` | bp_name, player_id | public |
+| 1829 | `_Leaver_RuntimeTrackPrecache` | bp_name, player_id, context, route_label | public |
+| 1887 | `_Leaver_BuildPrecacheManifest` | — | public |
+| 2125 | `_Leaver_GetMilitarySuffix` | civ | public |
+| 2157 | `_Leaver_IsSpawnerExemptBP` | bp_name | public |
+| 2172 | `_Leaver_MeetsAgeRequirement` | bp_name, ags_key, player_id, context | public |
+| 2259 | `_Leaver_ResolveUpgradeBP` | player_id, upgrade_key | public |
+| 2281 | `_Leaver_PlayerHasUpgradeCached` | player_id, upgrade_key | public |
+| 2302 | `_Leaver_MeetsCapabilityRequirement` | bp_name, ags_key, player_id, context | public |
+| 2496 | `_Leaver_GetUnitRole` | sbp_name | public |
+| 2615 | `_Leaver_IsCivUniqueFallbackCandidate` | sbp_name | public |
+| 2627 | `_Leaver_GetCivUniquePolicy` | sbp_name | public |
+| 2639 | `_Leaver_IsNeutralOrTransferOnlySquad` | squad, sbp_name | public |
+| 2652 | `_ResolveReceiverClassFallback` | sbp_name, rcv_civ | public |
+| 2734 | `_ResolveGenericArchetypeFallback` | sbp_name, rcv_civ | public |
+| 2766 | `_Leaver_GetReverseMapKey` | bp_name | public |
+| 2788 | `_ResolveFallbackSquadBP` | sbp_name, rcv_civ | public |
+| 2822 | `_ResolveMilitarySquadBP` | sbp_name, src_civ, rcv_civ | public |
+| 2860 | `_ResolveMilitaryRoute` | sbp_name, src_civ, rcv_civ | public |
 | 2917 | `Mod_FindBestAlly` | victim_id | public |
-| 2945 | `_Transfer_CanAcceptBuilding` | recipient | private |
-| 2952 | `_Transfer_CanAcceptOutpost` | recipient | private |
-| 2958 | `_Transfer_CanAcceptWorkshop` | recipient | private |
-| 2966 | `_Transfer_ClassifyBuilding` | eid, owner_civ | private |
-| 3013 | `_Transfer_FindLegalRecipient` | victim_id, bld_class | private |
-| 3033 | `_Transfer_FindSameFactionAlly` | victim_id, source_faction | private |
-| 3048 | `_Transfer_BuildingToPlayer` | eid, recipient | private |
-| 3071 | `_Transfer_Resources` | victim_id, recipient | private |
-| 3084 | `_Transfer_EjectGarrisons` | victim_id | private |
-| 3101 | `_Convert_Building` | eid, recipient, receiver_civ, source_civ, stats, source_player_id | private |
-| 3472 | `_Leaver_CountVillagers` | player | private |
-| 3481 | `_Convert_EcoSquad` | squad, recipient, receiver_civ | private |
+| 2945 | `_Transfer_CanAcceptBuilding` | recipient | public |
+| 2952 | `_Transfer_CanAcceptOutpost` | recipient | public |
+| 2958 | `_Transfer_CanAcceptWorkshop` | recipient | public |
+| 2966 | `_Transfer_ClassifyBuilding` | eid, owner_civ | public |
+| 3013 | `_Transfer_FindLegalRecipient` | victim_id, bld_class | public |
+| 3033 | `_Transfer_FindSameFactionAlly` | victim_id, source_faction | public |
+| 3048 | `_Transfer_BuildingToPlayer` | eid, recipient | public |
+| 3071 | `_Transfer_Resources` | victim_id, recipient | public |
+| 3084 | `_Transfer_EjectGarrisons` | victim_id | public |
+| 3101 | `_Convert_Building` | eid, recipient, receiver_civ, source_civ, stats, source_player_id | public |
+| 3472 | `_Leaver_CountVillagers` | player | public |
+| 3481 | `_Convert_EcoSquad` | squad, recipient, receiver_civ | public |
 | 3536 | `Mod_EliminatePlayerUnits` | player, recipient_override, is_silent | public |
-| 3721 | `_Leaver_ContinueTransfer` | — | private |
-| 4256 | `_Leaver_PauseIntervalRules` | — | private |
-| 4265 | `_Leaver_ResumeIntervalRules` | — | private |
+| 3721 | `_Leaver_ContinueTransfer` | — | public |
+| 4256 | `_Leaver_PauseIntervalRules` | — | public |
+| 4265 | `_Leaver_ResumeIntervalRules` | — | public |
 
 ### day night cycle.scar
 

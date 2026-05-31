@@ -4,13 +4,9 @@ Primary entry point: [README.md](README.md)
 
 This file is the deep index for API lookup workflows. It only lists references that exist in the public workspace.
 
-## Core API files
+## SCAR scripting overview
 
-- [api/scar-api-functions.md](api/scar-api-functions.md)
-- [api/scar-engine-api-signatures.md](api/scar-engine-api-signatures.md)
-- [api/commands-reference.md](api/commands-reference.md)
-- [api/constants-and-enums.md](api/constants-and-enums.md)
-- [api/game-events.md](api/game-events.md)
+- [api/README.md](api/README.md) — SCAR scripting system overview (engine catalogs removed per Xbox Game Content Usage Rules)
 
 ## Curated indexes
 
@@ -33,7 +29,7 @@ This file is the deep index for API lookup workflows. It only lists references t
 - [../development_guides/README.md](../development_guides/README.md)
 - [../gamemodes/MOD-INDEX.md](../gamemodes/MOD-INDEX.md)
 - [../scenarios/README.md](../scenarios/README.md)
-- [../github/README.md](../github/README.md)
+- [../README.md](../README.md)
 
 ## Notes
 

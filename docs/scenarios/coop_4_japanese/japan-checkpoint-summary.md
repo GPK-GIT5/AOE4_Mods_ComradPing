@@ -26,11 +26,10 @@ Persisted artifacts and references:
 
 | Document | Purpose | Location |
 |----------|---------|----------|
-| japan-checkpoint-stage3.md | Checkpoint overview + rollback guide | reference/mods/japan_reference/ |
-| japan-checkpoint-stage3-manifest.md | Detailed file breakdown | reference/mods/japan_reference/ |
-| CHECKPOINT-STAGE3-HASHES.json | Stage 1-3 checksums | reference/mods/japan_reference/ |
-| japan-stage2-summary.md | Stage 2 complete guide | reference/mods/japan_reference/ |
-| japan-stage4-restriction.md | Stage 4 audit + plan | reference/mods/japan_reference/ |
+| CHECKPOINT-STAGE3-HASHES.json | Stage 1-3 checksums | docs/scenarios/coop_4_japanese/ |
+| japan-stage4-restriction.md | Stage 4 audit + plan | docs/scenarios/coop_4_japanese/ |
+
+> Stage 1–3 detail logs (`japan-checkpoint-stage3.md`, `japan-checkpoint-stage3-manifest.md`, `japan-stage1-summary.md`, `japan-stage2-summary.md`) were removed. Integrity checksums remain in `CHECKPOINT-STAGE3-HASHES.json`.
 
 ---
 
@@ -119,12 +118,9 @@ if ($hash -eq "10D58381A8A8215A18011E3382239E24EAD44D6B2478879DB857A5641B254514"
 ### Current State
 
 ```powershell
-# Verify all files exist
-Test-Path "reference/mods/japan_reference/japan-checkpoint-stage3.md"           # ✅ Yes
-Test-Path "reference/mods/japan_reference/japan-checkpoint-stage3-manifest.md"  # ✅ Yes
-Test-Path "reference/mods/japan_reference/CHECKPOINT-STAGE3-HASHES.json"       # ✅ Yes
-Test-Path "reference/mods/japan_reference/japan-stage2-summary.md"             # ✅ Yes
-Test-Path "reference/mods/japan_reference/japan-stage4-restriction.md"         # ✅ Yes
+# Verify key files exist
+Test-Path "docs/scenarios/coop_4_japanese/CHECKPOINT-STAGE3-HASHES.json"       # ✅ Yes
+Test-Path "docs/scenarios/coop_4_japanese/japan-stage4-restriction.md"         # ✅ Yes
 ```
 
 ### Next Steps (Testing)
@@ -135,7 +131,7 @@ Test-Path "reference/mods/japan_reference/japan-stage4-restriction.md"         #
 
 ### To Rollback (if needed)
 
-See japan-checkpoint-stage3.md "How to Undo" section for file-by-file rollback instructions.
+See `CHECKPOINT-STAGE3-HASHES.json` and `coop_4_japanese_data.scar` for rollback reference points.
 
 ---
 
@@ -154,11 +150,7 @@ See japan-checkpoint-stage3.md "How to Undo" section for file-by-file rollback i
 
 ## References
 
-📖 **For Stage 1 details:** [japan-stage1-summary.md](japan-stage1-summary.md)  
-📖 **For Stage 2 details:** [japan-stage2-summary.md](japan-stage2-summary.md)  
-📖 **For Stage 4 plan/audit:** [japan-stage4-restriction.md](japan-stage4-restriction.md)  
-📋 **For file breakdown:** [japan-checkpoint-stage3-manifest.md](japan-checkpoint-stage3-manifest.md)  
-📋 **For this checkpoint:** [japan-checkpoint-stage3.md](japan-checkpoint-stage3.md)
+📖 **For Stage 4 plan/audit:** [japan-stage4-restriction.md](japan-stage4-restriction.md)
 
 ---
 

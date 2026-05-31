@@ -19,4 +19,4 @@ This file is retained for compatibility with older bookmarks and references.
 
 - [../../gamemodes/MOD-INDEX.md](../../gamemodes/MOD-INDEX.md)
 - [../../scenarios/README.md](../../scenarios/README.md)
-- [../../github/README.md](../../github/README.md)
+- [../../README.md](../../README.md)

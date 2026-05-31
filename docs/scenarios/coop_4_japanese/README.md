@@ -17,17 +17,7 @@ Navigation hub for [`Scenarios/coop_4_japanese/`](../../../Scenarios/coop_4_japa
 
 ## Historical checkpoint snapshots
 
-These files are now archived. The links below remain as redirect stubs and point to the archive location.
-
-| [japan-checkpoint-stage3.md](japan-checkpoint-stage3.md) | Rollback guide + verification steps for Stage 3 |
-| [japan-checkpoint-stage3-manifest.md](japan-checkpoint-stage3-manifest.md) | Line-by-line file breakdown for Stage 3 |
-| [japan-stage1-summary.md](japan-stage1-summary.md) | Stage 1 work summary |
-| [japan-stage2-summary.md](japan-stage2-summary.md) | Stage 2 work summary |
-| [japan-archive-refactor-log.md](japan-archive-refactor-log.md) | Refactor history |
-
-Archive hub: [docs/archive/scenarios/japan-development/README.md](../../archive/scenarios/japan-development/README.md)
-
-Checksum and integrity notes are maintained in the markdown checkpoint documents above.
+Stage 1–3 checkpoint and manifest documents (japan-stage1-summary, japan-stage2-summary, japan-checkpoint-stage3, japan-checkpoint-stage3-manifest) were traceability records for completed development phases. Those documents have been removed. Integrity notes are maintained in the active checkpoint documents listed in the table above.
 
 ## SCAR module layout — `scar/` subfolder
 

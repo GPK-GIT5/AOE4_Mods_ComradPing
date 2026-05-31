@@ -30,7 +30,7 @@ Use this table when you need the old local docs flow but only public-safe source
 | Map authoring and scenario logic | <https://support.ageofempires.com/> (crafted/generated maps) | [../../scenarios/README.md](../../scenarios/README.md) |
 | Game mode scripting | <https://support.ageofempires.com/> (game modes) | [../../gamemodes/README.md](../../gamemodes/README.md), [../../gamemodes/onslaught/README.md](../../gamemodes/onslaught/README.md) |
 | SCAR API lookup | <https://support.ageofempires.com/> (modding references) | [../../api_reference/INDEX.md](../../api_reference/INDEX.md) |
-| Practical coding patterns | Community examples and modding forums | [../community/boonui-community/README.md](../community/boonui-community/README.md), [../workflows/deterministic-workflow-guidelines.md](../workflows/deterministic-workflow-guidelines.md) |
+| Practical coding patterns | Community examples and modding forums | [../community/boonui-community/README.md](../community/boonui-community/README.md) |
 
 ## Why these are not redistributed
 

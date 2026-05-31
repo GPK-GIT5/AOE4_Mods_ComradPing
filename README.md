@@ -26,10 +26,8 @@ Every folder below links to its navigation entry point. The `Gamemodes/` and `Sc
 |---|---|---|
 | `Gamemodes/` | [docs/gamemodes/README.md](docs/gamemodes/README.md) | Mod source — Onslaught (CBA, our mod) and `Dependencies/` (AGS third-party dependency) |
 | `Scenarios/` | [docs/scenarios/README.md](docs/scenarios/README.md) | Scenario SCAR scripts for custom coop maps |
-| [`docs/`](docs/README.md) | [docs/README.md](docs/README.md) | All reference and design documentation: `api_reference/`, `game_systems/`, `development_guides/`, `design_notes/`, `project_overview/` |
+| `docs/` | [docs/README.md](docs/README.md) | All reference and design documentation: `api_reference/`, `game_systems/`, `development_guides/`, `design_notes/`, `game_data/` |
 | [`docs/game_data/`](docs/game_data/README.md) | [docs/game_data/README.md](docs/game_data/README.md) | Public data-reference docs and extraction workflow notes |
-| [`docs/github/`](docs/github/README.md) | [docs/github/README.md](docs/github/README.md) | Public summary of GitHub/private-workspace automation boundaries |
-| [`docs/skills/`](docs/skills/README.md) | [docs/skills/README.md](docs/skills/README.md) | Public summary of private Copilot skill packages and usage boundaries |
 | `Temporary/` | — | Untracked scratch space — AI processing, raw extractions, debug outputs, discarded runs (gitignored) |
 
 ---
@@ -51,8 +49,6 @@ Every folder below links to its navigation entry point. The `Gamemodes/` and `Sc
 | [docs/api_reference/api/constants-and-enums.md](docs/api_reference/api/constants-and-enums.md) | 700+ constants and enums with type prefixes |
 | [docs/api_reference/api/game-events.md](docs/api_reference/api/game-events.md) | 175 game events (`GE_*`) with numeric IDs |
 | [docs/development_guides/community/boonui-community/README.md](docs/development_guides/community/boonui-community/README.md) | End-to-end BoonUI integration guide with MP-safe mutation pattern |
-| [docs/development_guides/workflows/deterministic-workflow-guidelines.md](docs/development_guides/workflows/deterministic-workflow-guidelines.md) | Deterministic SCAR workflow and sync-safety checklist |
-| [docs/github/README.md](docs/github/README.md) | Public-facing map of private automation/instructions and how to work without private folders |
 | [docs/api_reference/INDEX.md](docs/api_reference/INDEX.md) | Primary API reference index and navigation hub |
 
 ---
@@ -62,8 +58,8 @@ Every folder below links to its navigation entry point. The `Gamemodes/` and `Sc
 1. **Open** `AoE4-Workspace.code-workspace` in VS Code — all folders load as roots.
 2. **Write mod code** in `Gamemodes/Onslaught/assets/scar/`. Do not edit `Gamemodes/Dependencies/Advanced Game Settings/` — it is a read-only third-party dependency.
 3. **Look up APIs** in `docs/api_reference/api/` while coding. `.scar` files use Lua syntax highlighting.
-4. **Follow workflow docs** in `docs/development_guides/workflows/` for extraction, validation, and release-oriented checks.
-5. **Check private/public boundaries** in `docs/github/README.md` and `docs/skills/README.md` before reusing workflow instructions from older notes.
+4. **Follow workflow docs** in [docs/development_guides/README.md](docs/development_guides/README.md) for data source authority and extraction pipeline context.
+5. **Review docs** at [docs/README.md](docs/README.md) for documentation boundaries, private workspace notes, and the Game Content Usage notice.
 
 ---
 

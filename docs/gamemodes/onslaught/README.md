@@ -66,4 +66,4 @@ For deep references, read [MOD-INDEX.md](../MOD-INDEX.md) first, then any specif
 
 - [../MOD-INDEX.md](../MOD-INDEX.md) — cross-mod quick reference
 - [../../api_reference/indexes/](../../api_reference/indexes/) — onslaught-function-index, onslaught-globals-index, CSV indexes
-- [../../skills/README.md](../../skills/README.md) — public summary of private SCAR-debug skill coverage
+- [../../README.md#private-and-excluded-workspace-components](../../README.md#private-and-excluded-workspace-components) — consolidated notes for private skill tooling context
