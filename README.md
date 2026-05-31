@@ -45,11 +45,8 @@ Every folder below links to its navigation entry point. The `Gamemodes/` and `Sc
 
 | File | What it covers |
 |---|---|
-| [docs/api_reference/api/scar-api-functions.md](docs/api_reference/api/scar-api-functions.md) | 4,435 SCAR API functions across 157 categories |
-| [docs/api_reference/api/constants-and-enums.md](docs/api_reference/api/constants-and-enums.md) | 700+ constants and enums with type prefixes |
-| [docs/api_reference/api/game-events.md](docs/api_reference/api/game-events.md) | 175 game events (`GE_*`) with numeric IDs |
+| [docs/api_reference/README.md](docs/api_reference/README.md) | SCAR scripting system, Onslaught indexes, data cross-references, campaign notes |
 | [docs/development_guides/community/boonui-community/README.md](docs/development_guides/community/boonui-community/README.md) | End-to-end BoonUI integration guide with MP-safe mutation pattern |
-| [docs/api_reference/INDEX.md](docs/api_reference/INDEX.md) | Primary API reference index and navigation hub |
 
 ---
 
@@ -57,7 +54,7 @@ Every folder below links to its navigation entry point. The `Gamemodes/` and `Sc
 
 1. **Open** `AoE4-Workspace.code-workspace` in VS Code — all folders load as roots.
 2. **Write mod code** in `Gamemodes/Onslaught/assets/scar/`. Do not edit `Gamemodes/Dependencies/Advanced Game Settings/` — it is a read-only third-party dependency.
-3. **Look up APIs** in `docs/api_reference/api/` while coding. `.scar` files use Lua syntax highlighting.
+3. **Look up APIs** in [docs/api_reference/README.md](docs/api_reference/README.md) while coding. `.scar` files use Lua syntax highlighting.
 4. **Follow workflow docs** in [docs/development_guides/README.md](docs/development_guides/README.md) for data source authority and extraction pipeline context.
 5. **Review docs** at [docs/README.md](docs/README.md) for documentation boundaries, private workspace notes, and the Game Content Usage notice.
 

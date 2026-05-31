@@ -819,7 +819,7 @@ print(AI_GetPersonality(player3))  -- Expected: "default_campaign"
 | Blueprint Resolution | `game_data/extracted/blueprints/` | Verify attribName for AGS_ENTITY_TABLE |
 | SCAR API Functions | `docs/api_reference/api/scar-api-functions.md` | Function signature lookup |
 | Constants & Enums | `docs/api_reference/api/constants-and-enums.md` | ObjectiveType_*, ITEM_*, AGE_* |
-| Data Index | `docs/api_reference/navigation/data-index.md` | Unit stats and civilization data |
+| Data Index | `docs/api_reference/README.md#dependency--data-index` | SCAR import/dependency snapshot |
 | Official Guides | `docs/development_guides/official/02-editor-interface.md` | Content Editor workflow |
 
 ### Related Mod References

@@ -22,4 +22,4 @@ Full tooling lives in the private workspace under `.github/scripts/`.
 ## See also
 
 - [../README.md](../README.md) — docs index
-- [../api_reference/INDEX.md](../api_reference/INDEX.md) — API lookup
+- [../api_reference/README.md](../api_reference/README.md) — API reference hub

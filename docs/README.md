@@ -141,7 +141,7 @@ Skills are tightly coupled to private MCP servers, private data pipelines, and w
 
 #### Public replacements and related docs
 
-- [api_reference/INDEX.md](api_reference/INDEX.md) — deep API/index lookup
+- [api_reference/README.md](api_reference/README.md) — API reference hub
 - [game_systems/README.md](game_systems/README.md) — system patterns and architecture
 - [development_guides/README.md](development_guides/README.md) — workflow context and data pipeline overview
 - [gamemodes/README.md](gamemodes/README.md) and [scenarios/README.md](scenarios/README.md) — runtime tree navigation

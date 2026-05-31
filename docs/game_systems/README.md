@@ -16,7 +16,7 @@ Three subtrees covering gameplay frameworks, cross-cutting system patterns, and 
 
 ## See also
 
-- [../api_reference/INDEX.md](../api_reference/INDEX.md) — SCAR API reference
+- [../api_reference/README.md](../api_reference/README.md) — SCAR API reference
 - [../design_notes/campaigns/](../design_notes/campaigns/) — per-campaign pattern analysis
 - [../gamemodes/README.md](../gamemodes/README.md) — Onslaught mod navigation
 - [../scenarios/README.md](../scenarios/README.md) — custom scenario navigation

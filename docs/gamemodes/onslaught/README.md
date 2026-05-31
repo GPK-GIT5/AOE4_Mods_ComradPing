@@ -65,5 +65,5 @@ For deep references, read [MOD-INDEX.md](../MOD-INDEX.md) first, then any specif
 ## See also
 
 - [../MOD-INDEX.md](../MOD-INDEX.md) — cross-mod quick reference
-- [../../api_reference/indexes/](../../api_reference/indexes/) — onslaught-function-index, onslaught-globals-index, CSV indexes
+- [../../api_reference/README.md#onslaught-indexes](../../api_reference/README.md#onslaught-indexes) — onslaught function index, globals index, excluded sources
 - [../../README.md#private-and-excluded-workspace-components](../../README.md#private-and-excluded-workspace-components) — consolidated notes for private skill tooling context
